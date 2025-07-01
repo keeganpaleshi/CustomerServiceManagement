@@ -61,6 +61,29 @@ def classify_email(raw_txt: str) -> dict:
 
 
 # -------------------------------------------------------
+# Module 3 - Evaluate AI Drafts
+# -------------------------------------------------------
+def critic_email(draft: str, original: str) -> dict:
+    """Self-grade a draft reply using GPT-4.1."""
+    client = OpenAI(api_key=OPENAI_API_KEY)
+    resp = client.chat.completions.create(
+        model=CLASSIFY_MODEL,
+        messages=[
+            {
+                "role": "system",
+                "content": (
+                    "Return ONLY JSON {\"score\":1-10,\"feedback\":\"...\"} "
+                    "rating on correctness, tone, length."
+                ),
+            },
+            {"role": "assistant", "content": draft},
+            {"role": "user", "content": f"Original email:\n\n{original}"},
+        ],
+    )
+    return json.loads(resp.choices[0].message.content)
+
+
+# -------------------------------------------------------
 # 2) Gmail Service Setup
 # -------------------------------------------------------
 def get_gmail_service(
