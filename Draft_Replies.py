@@ -70,12 +70,20 @@ def critic_email(draft: str, original: str) -> dict:
 # 2) Gmail Service Setup
 # -------------------------------------------------------
 def get_gmail_service(
-    creds_filename: str = "client_secret_106355235075-nsep78srfr4f7g4noa2lfmjdemvc3q7h.apps.googleusercontent.com.json",
-    token_filename: str = "token.pickle",
+    creds_filename: str | None = None,
+    token_filename: str | None = None,
 ):
+    """Authenticate with Gmail API and return a service resource.
+
+    Filenames may be supplied via arguments or the ``GMAIL_CLIENT_SECRET`` and
+    ``GMAIL_TOKEN_FILE`` environment variables. Defaults are the original
+    filenames bundled with the repo.
     """
-    Authenticate with Gmail API and return a service resource.
-    """
+    creds_filename = creds_filename or os.getenv(
+        "GMAIL_CLIENT_SECRET",
+        "client_secret_106355235075-nsep78srfr4f7g4noa2lfmjdemvc3q7h.apps.googleusercontent.com.json",
+    )
+    token_filename = token_filename or os.getenv("GMAIL_TOKEN_FILE", "token.pickle")
     creds = None
 
     # Load token if it exists
