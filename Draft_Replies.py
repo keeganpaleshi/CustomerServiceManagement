@@ -18,13 +18,11 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 if not OPENAI_API_KEY:
     raise ValueError("Please set your OPENAI_API_KEY environment variable.")
 
-# EXAMPLE model name   verify you have access to this model
-OPENAI_MODEL = "gpt-4.5-preview"
-
-# Model used specifically when generating draft replies
-
-# Default to the o3 model unless overridden by env var
+# Default model used for AI responses.  If the environment does not specify a
+# particular draft model, fall back to the lightweight "o3" model.  The same
+# model is also used for other OpenAI calls unless explicitly overridden.
 DRAFT_MODEL = os.getenv("DRAFT_MODEL", "o3")
+OPENAI_MODEL = DRAFT_MODEL
 
 # Model used when classifying incoming emails
 CLASSIFY_MODEL = os.getenv("CLASSIFY_MODEL", OPENAI_MODEL)
