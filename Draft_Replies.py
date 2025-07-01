@@ -1,7 +1,6 @@
 import os
 import pickle
 import base64
-import openai
 import json
 from email.mime.text import MIMEText
 from google.auth.transport.requests import Request
@@ -33,13 +32,11 @@ CLASSIFY_MODEL = os.getenv("CLASSIFY_MODEL", OPENAI_MODEL)
 
 # We'll use the new v1.0.0+ style:
 from openai import OpenAI
-import json
 
 
 # -------------------------------------------------------
 # Module 1 - Classify incoming email
 # -------------------------------------------------------
-CLASSIFY_MODEL = OPENAI_MODEL
 
 
 def classify_email(raw_txt: str) -> dict:
@@ -55,6 +52,29 @@ def classify_email(raw_txt: str) -> dict:
                 ),
             },
             {"role": "user", "content": raw_txt},
+        ],
+    )
+    return json.loads(resp.choices[0].message.content)
+
+
+# -------------------------------------------------------
+# Module 3 - Evaluate AI Drafts
+# -------------------------------------------------------
+def critic_email(draft: str, original: str) -> dict:
+    """Self-grade a draft reply using GPT-4.1."""
+    client = OpenAI(api_key=OPENAI_API_KEY)
+    resp = client.chat.completions.create(
+        model=CLASSIFY_MODEL,
+        messages=[
+            {
+                "role": "system",
+                "content": (
+                    "Return ONLY JSON {\"score\":1-10,\"feedback\":\"...\"} "
+                    "rating on correctness, tone, length."
+                ),
+            },
+            {"role": "assistant", "content": draft},
+            {"role": "user", "content": f"Original email:\n\n{original}"},
         ],
     )
     return json.loads(resp.choices[0].message.content)
