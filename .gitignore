@@ -1,0 +1,8 @@
+# Python
+__pycache__/
+*.py[cod]
+# Credentials
+token.pickle
+client_secret.json
+# OS
+.DS_Store
