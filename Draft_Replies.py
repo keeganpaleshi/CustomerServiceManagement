@@ -39,7 +39,6 @@ import json
 # -------------------------------------------------------
 # Module 1 - Classify incoming email
 # -------------------------------------------------------
-CLASSIFY_MODEL = OPENAI_MODEL
 
 
 def classify_email(raw_txt: str) -> dict:
