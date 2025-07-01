@@ -23,10 +23,13 @@ if not OPENAI_API_KEY:
 OPENAI_MODEL = "gpt-4.5-preview"
 
 # Model used specifically when generating draft replies
-DRAFT_MODEL = os.getenv("DRAFT_MODEL", OPENAI_MODEL)
+
+# Default to the o3 model unless overridden by env var
+DRAFT_MODEL = os.getenv("DRAFT_MODEL", "o3")
 
 # Model used when classifying incoming emails
 CLASSIFY_MODEL = os.getenv("CLASSIFY_MODEL", OPENAI_MODEL)
+
 
 # We'll use the new v1.0.0+ style:
 from openai import OpenAI
@@ -192,7 +195,7 @@ def classify_email(text: str) -> dict:
 # -------------------------------------------------------
 # 5) OpenAI Integration
 # -------------------------------------------------------
-def generate_ai_reply(subject, sender, snippet_or_body, email_type):
+def generate_ai_reply(subject, sender, snippet, email_type):
     """
     Generate a draft reply using OpenAI's new library (>=1.0.0).
     """
@@ -204,7 +207,7 @@ def generate_ai_reply(subject, sender, snippet_or_body, email_type):
         "You are an AI email assistant. The user received an email.\n"
         f"Subject: {subject}\n"
         f"From: {sender}\n"
-        f"Email content/snippet: {snippet_or_body}\n\n"
+        f"Email content/snippet: {snippet}\n\n"
         "Please write a friendly and professional draft reply addressing the sender's query."
     )
 
