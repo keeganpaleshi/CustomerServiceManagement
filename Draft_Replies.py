@@ -179,9 +179,7 @@ def classify_email(text: str) -> dict:
                 {
                     "role": "system",
                     "content": (
-                        "Categorize the email as 'lead', 'customer', or 'other' "
-                        "and provide an importance rating from 0-10. Return JSON "
-                        "{\"type\":<type>, \"importance\":<importance>}"
+                        "Categorize the email as lead, customer, or other. Return ONLY JSON {\"type\":\"lead|customer|other\",\"importance\":1-10}. NO other text."
                     ),
                 },
                 {"role": "user", "content": text},
