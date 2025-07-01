@@ -2,6 +2,7 @@ import os
 import pickle
 import base64
 import openai
+import json
 from email.mime.text import MIMEText
 from google.auth.transport.requests import Request
 from google_auth_oauthlib.flow import InstalledAppFlow
@@ -23,6 +24,9 @@ OPENAI_MODEL = "gpt-4.5-preview"
 
 # Model used specifically when generating draft replies
 DRAFT_MODEL = os.getenv("DRAFT_MODEL", OPENAI_MODEL)
+
+# Model used when classifying incoming emails
+CLASSIFY_MODEL = os.getenv("CLASSIFY_MODEL", OPENAI_MODEL)
 
 # We'll use the new v1.0.0+ style:
 from openai import OpenAI
@@ -159,6 +163,32 @@ def create_draft(service, user_id, message_body, thread_id=None):
         return None
 
 
+def classify_email(text: str) -> dict:
+    """Classify an email and return a dict with type and importance."""
+    client = OpenAI(api_key=OPENAI_API_KEY)
+    try:
+        response = client.chat.completions.create(
+            model=CLASSIFY_MODEL,
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "Categorize the email as 'lead', 'customer', or 'other' "
+                        "and provide an importance rating from 0-10. Return JSON "
+                        "{\"type\":<type>, \"importance\":<importance>}"
+                    ),
+                },
+                {"role": "user", "content": text},
+            ],
+            temperature=0,
+            max_tokens=50,
+        )
+        return json.loads(response.choices[0].message.content)
+    except Exception as e:
+        print(f"Error classifying email: {e}")
+        return {"type": "other", "importance": 0}
+
+
 # -------------------------------------------------------
 # 5) OpenAI Integration
 # -------------------------------------------------------
@@ -257,7 +287,7 @@ def main():
             .get(
                 userId="me",
                 id=msg_id,
-                format="metadata",
+                format="full",
                 metadataHeaders=["From", "Subject"],
             )
             .execute()
@@ -267,6 +297,28 @@ def main():
         sender = get_header_value(msg_detail, "From")
         thread_id = msg_detail.get("threadId")
         snippet = msg_detail.get("snippet", "")
+
+        # Decode the plain text body if available
+        body_txt = ""
+        payload = msg_detail.get("payload", {})
+        if "parts" in payload:
+            for part in payload.get("parts", []):
+                if part.get("mimeType") == "text/plain":
+                    data = part.get("body", {}).get("data", "")
+                    if data:
+                        body_txt = base64.urlsafe_b64decode(data.encode("utf-8")).decode("utf-8")
+                        break
+        else:
+            data = payload.get("body", {}).get("data", "")
+            if data:
+                body_txt = base64.urlsafe_b64decode(data.encode("utf-8")).decode("utf-8")
+
+        cls = classify_email(f"Subject:{subject}\n\n{body_txt}")
+        email_type = cls["type"]
+        importance = cls["importance"]
+        if email_type == "other":
+            continue
+        print(f"{msg_id[:8]}… type={email_type}, imp={importance}")
 
         # 1) Check if there's already a draft in this thread
         thread_data = service.users().threads().get(userId="me", id=thread_id).execute()
@@ -283,8 +335,6 @@ def main():
 
         # 2) If not, generate a new draft
         reply_subject = f"Re: {subject}" if subject else "Re: (no subject)"
-        # Determine the email type; this can be replaced with more advanced logic
-        email_type = "general"
         draft_body_text = generate_ai_reply(subject, sender, snippet, email_type)
         draft_message = create_base64_message(
             "me", sender, reply_subject, draft_body_text
