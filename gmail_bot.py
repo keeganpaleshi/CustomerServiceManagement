@@ -11,7 +11,15 @@ import pickle, base64
 
 SCOPES = ["https://www.googleapis.com/auth/gmail.modify"]
 
-def get_gmail_service(creds_filename="client_secret.json", token_filename="token.pickle"):
+def get_gmail_service(creds_filename=None, token_filename=None):
+    """Authenticate with Gmail using OAuth2.
+
+    Filenames can be provided as arguments or via the ``GMAIL_CLIENT_SECRET``
+    and ``GMAIL_TOKEN_FILE`` environment variables. Defaults are
+    ``client_secret.json`` and ``token.pickle``.
+    """
+    creds_filename = creds_filename or os.getenv("GMAIL_CLIENT_SECRET", "client_secret.json")
+    token_filename = token_filename or os.getenv("GMAIL_TOKEN_FILE", "token.pickle")
     creds = None
     if os.path.exists(token_filename):
         with open(token_filename, "rb") as t:
