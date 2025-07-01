@@ -3,6 +3,7 @@ import os
 # additional imports
 import json
 import requests
+from Draft_Replies import generate_ai_reply
 
 from googleapiclient.discovery import build     # already imported in Draft_Replies, keep here too
 from google.auth.transport.requests import Request
@@ -92,3 +93,14 @@ def create_ticket(subject: str, sender: str, body: str):
         timeout=15,
     )
     r.raise_for_status()
+
+
+def process_messages(service, unread_messages):
+    """Placeholder for the upcoming main loop rewrite."""
+    for msg in unread_messages:
+        email_type = "other"
+        # classification will set email_type in Module G
+        if email_type == "other":
+            continue
+        # further processing will be added later
+
