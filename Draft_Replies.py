@@ -21,6 +21,9 @@ if not OPENAI_API_KEY:
 # EXAMPLE model name   verify you have access to this model
 OPENAI_MODEL = "gpt-4.5-preview"
 
+# Model used specifically when generating draft replies
+DRAFT_MODEL = os.getenv("DRAFT_MODEL", OPENAI_MODEL)
+
 # We'll use the new v1.0.0+ style:
 from openai import OpenAI
 
@@ -134,7 +137,7 @@ def create_draft(service, user_id, message_body, thread_id=None):
 # -------------------------------------------------------
 # 5) OpenAI Integration
 # -------------------------------------------------------
-def generate_ai_reply(subject, sender, snippet_or_body):
+def generate_ai_reply(subject, sender, snippet_or_body, email_type):
     """
     Generate a draft reply using OpenAI's new library (>=1.0.0).
     """
@@ -149,9 +152,12 @@ def generate_ai_reply(subject, sender, snippet_or_body):
         f"Email content/snippet: {snippet_or_body}\n\n"
         "Please write a friendly and professional draft reply addressing the sender's query."
     )
+
+    # Prepend the type context specified by the user
+    instructions = f"[Email type: {email_type}]\n\n" + instructions
     try:
         response = client.chat.completions.create(
-            model=OPENAI_MODEL,
+            model=DRAFT_MODEL,
             messages=[
                 {
                     "role": "system",
@@ -252,7 +258,9 @@ def main():
 
         # 2) If not, generate a new draft
         reply_subject = f"Re: {subject}" if subject else "Re: (no subject)"
-        draft_body_text = generate_ai_reply(subject, sender, snippet)
+        # Determine the email type; this can be replaced with more advanced logic
+        email_type = "general"
+        draft_body_text = generate_ai_reply(subject, sender, snippet, email_type)
         draft_message = create_base64_message(
             "me", sender, reply_subject, draft_body_text
         )
