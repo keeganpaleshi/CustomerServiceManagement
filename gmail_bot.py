@@ -9,6 +9,13 @@ from google.auth.transport.requests import Request
 from google_auth_oauthlib.flow import InstalledAppFlow
 import pickle, base64
 
+from openai import OpenAI
+from Draft_Replies import generate_ai_reply
+
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+if not OPENAI_API_KEY:
+    raise ValueError("Please set your OPENAI_API_KEY environment variable.")
+
 SCOPES = ["https://www.googleapis.com/auth/gmail.modify"]
 
 def get_gmail_service(creds_filename=None, token_filename=None):
@@ -59,6 +66,48 @@ def thread_has_draft(service, thread_id):
     return any(
         "DRAFT" in (m.get("labelIds") or []) for m in data.get("messages", [])
     )
+
+def critic_email(draft: str, original: str) -> dict:
+    """Self-grade a draft reply using GPT-4.1."""
+    client = OpenAI(api_key=OPENAI_API_KEY)
+    resp = client.chat.completions.create(
+        model=CLASSIFY_MODEL,
+        messages=[
+            {
+                "role": "system",
+                "content": (
+                    "Return ONLY JSON {\"score\":1-10,\"feedback\":\"...\"} "
+                    "rating on correctness, tone, length."
+                ),
+            },
+            {"role": "assistant", "content": draft},
+            {"role": "user", "content": f"Original email:\n\n{original}"},
+        ],
+    )
+    return json.loads(resp.choices[0].message.content)
+
+def classify_email(text: str) -> dict:
+    """Classify an email and return a dict with type and importance."""
+    client = OpenAI(api_key=OPENAI_API_KEY)
+    try:
+        response = client.chat.completions.create(
+            model=CLASSIFY_MODEL,
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "Categorize the email as lead, customer, or other. Return ONLY JSON {\"type\":\"lead|customer|other\",\"importance\":1-10}. NO other text."
+                    ),
+                },
+                {"role": "user", "content": text},
+            ],
+            temperature=0,
+            max_tokens=50,
+        )
+        return json.loads(response.choices[0].message.content)
+    except Exception as e:
+        print(f"Error classifying email: {e}")
+        return {"type": "other", "importance": 0}
 # — model choices —
 CLASSIFY_MODEL  = "gpt-4.1"
 DRAFT_MODEL     = "o3"
@@ -94,18 +143,7 @@ def create_ticket(subject: str, sender: str, body: str):
     r.raise_for_status()
 
 
-def process_messages(service, unread_messages):
-    """Placeholder for the upcoming main loop rewrite."""
-    for msg in unread_messages:
-        email_type = "other"
-        # classification will set email_type in Module G
-        if email_type == "other":
-            continue
-        # further processing will be added later
-
-
 def main():
-    from Draft_Replies import generate_ai_reply, classify_email, critic_email
 
     svc = get_gmail_service()
     for ref in fetch_all_unread_messages(svc):
