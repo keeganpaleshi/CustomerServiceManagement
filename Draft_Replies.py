@@ -18,8 +18,8 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 if not OPENAI_API_KEY:
     raise ValueError("Please set your OPENAI_API_KEY environment variable.")
 
-# Default to the o3 model unless overridden by env var
-DRAFT_MODEL = os.getenv("DRAFT_MODEL", "o3")
+# Default to the `gpt-4-1106-preview` model unless overridden by env var
+DRAFT_MODEL = os.getenv("DRAFT_MODEL", "gpt-4-1106-preview")
 
 # Use the same model for general OpenAI calls by default
 OPENAI_MODEL = DRAFT_MODEL
@@ -44,7 +44,7 @@ from openai import OpenAI
 # Module 3 - Evaluate AI Drafts
 # -------------------------------------------------------
 def critic_email(draft: str, original: str) -> dict:
-    """Self-grade a draft reply using GPT-4.1."""
+    """Self-grade a draft reply using GPT-4."""
     client = OpenAI(api_key=OPENAI_API_KEY)
     resp = client.chat.completions.create(
         model=CLASSIFY_MODEL,

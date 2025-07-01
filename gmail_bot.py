@@ -46,8 +46,8 @@ def create_draft(service, user_id, msg_body, thread_id=None):
     if thread_id: data["message"]["threadId"] = thread_id
     return service.users().drafts().create(userId=user_id, body=data).execute()
 # — model choices —
-CLASSIFY_MODEL  = "gpt-4.1"
-DRAFT_MODEL     = "o3"
+CLASSIFY_MODEL  = "gpt-4-1106-preview"
+DRAFT_MODEL     = "gpt-4-1106-preview"
 
 # — routing & thresholds —
 TICKET_SYSTEM   = "freescout"
