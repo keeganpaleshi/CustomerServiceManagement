@@ -6,26 +6,35 @@ from email.mime.text import MIMEText
 from google.auth.transport.requests import Request
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
+import yaml
 
 # -------------------------------------------------------
 # 1) Configuration
 # -------------------------------------------------------
+# Load YAML config
+with open(os.path.join(os.path.dirname(__file__), "config.yaml")) as f:
+    CFG = yaml.safe_load(f)
+
 # Gmail API scope
-SCOPES = ["https://www.googleapis.com/auth/gmail.modify"]
+SCOPES = CFG["gmail"]["scopes"]
 
 # Load OpenAI API key from env (never store in plain text!)
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+OPENAI_API_KEY = os.getenv(CFG["openai"]["api_key_env"])
 if not OPENAI_API_KEY:
-    raise ValueError("Please set your OPENAI_API_KEY environment variable.")
+    raise ValueError(f"Please set your {CFG['openai']['api_key_env']} environment variable.")
 
-# Default to the o3 model unless overridden by env var
-DRAFT_MODEL = os.getenv("DRAFT_MODEL", "o3")
+# Default to the o3 model unless overridden in config
+DRAFT_MODEL = CFG["openai"]["draft_model"]
 
 # Use the same model for general OpenAI calls by default
 OPENAI_MODEL = DRAFT_MODEL
 
 # Model used when classifying incoming emails
-CLASSIFY_MODEL = os.getenv("CLASSIFY_MODEL", OPENAI_MODEL)
+CLASSIFY_MODEL = CFG["openai"]["classify_model"]
+
+# Critic settings
+CRITIC_THRESHOLD = CFG["thresholds"]["critic_threshold"]
+MAX_RETRIES      = CFG["thresholds"]["max_retries"]
 
 
 # We'll use the new v1.0.0+ style:
@@ -72,15 +81,11 @@ def get_gmail_service(
 ):
     """Authenticate with Gmail API and return a service resource.
 
-    Filenames may be supplied via arguments or the ``GMAIL_CLIENT_SECRET`` and
-    ``GMAIL_TOKEN_FILE`` environment variables. Defaults are the original
-    filenames bundled with the repo.
+    Filenames may be supplied via arguments or will default to the values
+    specified in ``config.yaml``.
     """
-    creds_filename = creds_filename or os.getenv(
-        "GMAIL_CLIENT_SECRET",
-        "client_secret_106355235075-nsep78srfr4f7g4noa2lfmjdemvc3q7h.apps.googleusercontent.com.json",
-    )
-    token_filename = token_filename or os.getenv("GMAIL_TOKEN_FILE", "token.pickle")
+    creds_filename = creds_filename or CFG["gmail"]["client_secret_file"]
+    token_filename = token_filename or CFG["gmail"]["token_file"]
     creds = None
 
     # Load token if it exists
