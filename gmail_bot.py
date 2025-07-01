@@ -11,22 +11,42 @@ import pickle, base64
 
 from openai import OpenAI
 from Draft_Replies import generate_ai_reply
+import yaml
 
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+# Load YAML config
+with open(os.path.join(os.path.dirname(__file__), "config.yaml")) as f:
+    CFG = yaml.safe_load(f)
+
+# Gmail settings
+SCOPES               = CFG["gmail"]["scopes"]
+GMAIL_CLIENT_SECRET  = CFG["gmail"]["client_secret_file"]
+GMAIL_TOKEN_FILE     = CFG["gmail"]["token_file"]
+
+# OpenAI models & API key
+OPENAI_API_KEY       = os.getenv(CFG["openai"]["api_key_env"])
+CLASSIFY_MODEL       = CFG["openai"]["classify_model"]
+DRAFT_MODEL          = CFG["openai"]["draft_model"]
+
+# Critic settings
+CRITIC_THRESHOLD     = CFG["thresholds"]["critic_threshold"]
+MAX_RETRIES          = CFG["thresholds"]["max_retries"]
+
+# Ticketing
+TICKET_SYSTEM        = CFG["ticket"]["system"]
+FREESCOUT_URL        = CFG["ticket"]["freescout_url"]
+FREESCOUT_KEY        = CFG["ticket"]["freescout_key"]
+
 if not OPENAI_API_KEY:
-    raise ValueError("Please set your OPENAI_API_KEY environment variable.")
-
-SCOPES = ["https://www.googleapis.com/auth/gmail.modify"]
+    raise ValueError(f"Please set your {CFG['openai']['api_key_env']} environment variable.")
 
 def get_gmail_service(creds_filename=None, token_filename=None):
     """Authenticate with Gmail using OAuth2.
 
-    Filenames can be provided as arguments or via the ``GMAIL_CLIENT_SECRET``
-    and ``GMAIL_TOKEN_FILE`` environment variables. Defaults are
-    ``client_secret.json`` and ``token.pickle``.
+    Filenames can be provided as arguments or will default to the values
+    specified in ``config.yaml``.
     """
-    creds_filename = creds_filename or os.getenv("GMAIL_CLIENT_SECRET", "client_secret.json")
-    token_filename = token_filename or os.getenv("GMAIL_TOKEN_FILE", "token.pickle")
+    creds_filename = creds_filename or GMAIL_CLIENT_SECRET
+    token_filename = token_filename or GMAIL_TOKEN_FILE
     creds = None
     if os.path.exists(token_filename):
         with open(token_filename, "rb") as t:
@@ -108,16 +128,7 @@ def classify_email(text: str) -> dict:
     except Exception as e:
         print(f"Error classifying email: {e}")
         return {"type": "other", "importance": 0}
-# — model choices —
-CLASSIFY_MODEL  = "gpt-4.1"
-DRAFT_MODEL     = "o3"
 
-# — routing & thresholds —
-TICKET_SYSTEM   = "freescout"
-FREESCOUT_URL   = os.getenv("FREESCOUT_URL", "")
-FREESCOUT_KEY   = os.getenv("FREESCOUT_KEY", "")
-CRITIC_THRESHOLD = 8.0
-MAX_RETRIES      = 2
 
 
 def create_ticket(subject: str, sender: str, body: str):

@@ -1,0 +1,19 @@
+openai:
+  api_key_env: OPENAI_API_KEY        # name of env var or you can inline a key (not recommended)
+  classify_model: "gpt-4.1"
+  draft_model:    "o3"
+
+thresholds:
+  critic_threshold: 8.0
+  max_retries:      2
+
+ticket:
+  system:         "freescout"        # or "helpscout", "freshdesk", etc.
+  freescout_url:  ""                 # fill in your desk URL
+  freescout_key:  ""                 # or set FREESCOUT_KEY env var
+
+gmail:
+  scopes:
+    - "https://www.googleapis.com/auth/gmail.modify"
+  client_secret_file: "client_secret.json"
+  token_file:         "token.pickle"
