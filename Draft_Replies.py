@@ -23,6 +23,31 @@ OPENAI_MODEL = "gpt-4.5-preview"
 
 # We'll use the new v1.0.0+ style:
 from openai import OpenAI
+import json
+
+
+# -------------------------------------------------------
+# Module 1 - Classify incoming email
+# -------------------------------------------------------
+CLASSIFY_MODEL = OPENAI_MODEL
+
+
+def classify_email(raw_txt: str) -> dict:
+    client = OpenAI(api_key=OPENAI_API_KEY)
+    resp = client.chat.completions.create(
+        model=CLASSIFY_MODEL,
+        messages=[
+            {
+                "role": "system",
+                "content": (
+                    "Return ONLY JSON with keys: "
+                    '{"type":"lead|customer|other","importance":1-10}. No extra text.'
+                ),
+            },
+            {"role": "user", "content": raw_txt},
+        ],
+    )
+    return json.loads(resp.choices[0].message.content)
 
 
 # -------------------------------------------------------
