@@ -7,9 +7,6 @@ from google.auth.transport.requests import Request
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 
-# Bring in ticket creation helper and critic threshold from gmail_bot
-from gmail_bot import CRITIC_THRESHOLD, create_ticket, thread_has_draft
-
 # -------------------------------------------------------
 # 1) Configuration
 # -------------------------------------------------------
