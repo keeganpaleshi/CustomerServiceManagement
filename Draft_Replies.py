@@ -1,7 +1,6 @@
 import os
 import pickle
 import base64
-import openai
 import json
 from email.mime.text import MIMEText
 from google.auth.transport.requests import Request
@@ -33,7 +32,6 @@ CLASSIFY_MODEL = os.getenv("CLASSIFY_MODEL", OPENAI_MODEL)
 
 # We'll use the new v1.0.0+ style:
 from openai import OpenAI
-import json
 
 
 # -------------------------------------------------------
