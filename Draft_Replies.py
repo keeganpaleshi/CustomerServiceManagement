@@ -18,13 +18,11 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 if not OPENAI_API_KEY:
     raise ValueError("Please set your OPENAI_API_KEY environment variable.")
 
-# EXAMPLE model name   verify you have access to this model
-OPENAI_MODEL = "gpt-4.5-preview"
-
-# Model used specifically when generating draft replies
-
 # Default to the o3 model unless overridden by env var
 DRAFT_MODEL = os.getenv("DRAFT_MODEL", "o3")
+
+# Use the same model for general OpenAI calls by default
+OPENAI_MODEL = DRAFT_MODEL
 
 # Model used when classifying incoming emails
 CLASSIFY_MODEL = os.getenv("CLASSIFY_MODEL", OPENAI_MODEL)
@@ -200,7 +198,7 @@ def classify_email(text: str) -> dict:
 # -------------------------------------------------------
 # 5) OpenAI Integration
 # -------------------------------------------------------
-def generate_ai_reply(subject, sender, snippet, email_type):
+def generate_ai_reply(subject, sender, snippet_or_body, email_type):
     """
     Generate a draft reply using OpenAI's new library (>=1.0.0).
     """
@@ -209,15 +207,13 @@ def generate_ai_reply(subject, sender, snippet, email_type):
 
     # Example prompt; tailor as needed
     instructions = (
+        f"[Email type: {email_type}]\n\n"
         "You are an AI email assistant. The user received an email.\n"
         f"Subject: {subject}\n"
         f"From: {sender}\n"
-        f"Email content/snippet: {snippet}\n\n"
+        f"Email content/snippet: {snippet_or_body}\n\n"
         "Please write a friendly and professional draft reply addressing the sender's query."
     )
-
-    # Prepend the type context specified by the user
-    instructions = f"[Email type: {email_type}]\n\n" + instructions
     try:
         response = client.chat.completions.create(
             model=DRAFT_MODEL,
@@ -343,7 +339,8 @@ def main():
 
         # 2) If not, generate a new draft
         reply_subject = f"Re: {subject}" if subject else "Re: (no subject)"
-        draft_body_text = generate_ai_reply(subject, sender, snippet, email_type)
+        snippet_or_body = body_txt if body_txt else snippet
+        draft_body_text = generate_ai_reply(subject, sender, snippet_or_body, email_type)
         draft_message = create_base64_message(
             "me", sender, reply_subject, draft_body_text
         )
