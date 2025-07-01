@@ -8,7 +8,7 @@ from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 
 # Bring in ticket creation helper and critic threshold from gmail_bot
-from gmail_bot import CRITIC_THRESHOLD, create_ticket
+from gmail_bot import CRITIC_THRESHOLD, create_ticket, thread_has_draft
 
 # -------------------------------------------------------
 # 1) Configuration
@@ -334,13 +334,7 @@ def main():
         print(f"{msg_id[:8]}… type={email_type}, imp={importance}")
 
         # 1) Check if there's already a draft in this thread
-        thread_data = service.users().threads().get(userId="me", id=thread_id).execute()
-        messages_in_thread = thread_data.get("messages", [])
-        # If any message in the thread has a label "DRAFT", skip
-        already_has_draft = any(
-            "DRAFT" in (m.get("labelIds") or []) for m in messages_in_thread
-        )
-        if already_has_draft:
+        if thread_has_draft(service, thread_id):
             print(
                 f"Skipping message {msg_id} (thread {thread_id}) because a draft already exists."
             )
