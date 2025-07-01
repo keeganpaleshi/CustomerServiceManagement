@@ -7,6 +7,9 @@ from google.auth.transport.requests import Request
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 
+# Bring in ticket creation helper and critic threshold from gmail_bot
+from gmail_bot import CRITIC_THRESHOLD, create_ticket
+
 # -------------------------------------------------------
 # 1) Configuration
 # -------------------------------------------------------
@@ -187,9 +190,7 @@ def classify_email(text: str) -> dict:
                 {
                     "role": "system",
                     "content": (
-                        "Categorize the email as 'lead', 'customer', or 'other' "
-                        "and provide an importance rating from 0-10. Return JSON "
-                        "{\"type\":<type>, \"importance\":<importance>}"
+                        "Categorize the email as lead, customer, or other. Return ONLY JSON {\"type\":\"lead|customer|other\",\"importance\":1-10}. NO other text."
                     ),
                 },
                 {"role": "user", "content": text},
@@ -345,10 +346,26 @@ def main():
             )
             continue
 
+
         # 2) If not, generate a new draft
         reply_subject = f"Re: {subject}" if subject else "Re: (no subject)"
-        snippet_or_body = body_txt if body_txt else snippet
-        draft_body_text = generate_ai_reply(subject, sender, snippet_or_body, email_type)
+        draft_body_text = generate_ai_reply(subject, sender, snippet, email_type)
+
+        # Self-grade the AI-generated reply to ensure quality
+        critique = critic_email(
+            draft_body_text,
+            f"Subject:{subject}\n\n{body_txt}",
+        )
+        score = critique.get("score", 0)
+        if score < CRITIC_THRESHOLD:
+            print(
+                f"Draft for message {msg_id} scored {score} (<{CRITIC_THRESHOLD}). Creating ticket."
+            )
+            create_ticket(subject, sender, body_txt)
+            continue
+        else:
+            print(f"Draft score {score} >= {CRITIC_THRESHOLD}; saving draft.")
+
         draft_message = create_base64_message(
             "me", sender, reply_subject, draft_body_text
         )
