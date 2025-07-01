@@ -53,6 +53,12 @@ def create_draft(service, user_id, msg_body, thread_id=None):
     data = {"message": msg_body}
     if thread_id: data["message"]["threadId"] = thread_id
     return service.users().drafts().create(userId=user_id, body=data).execute()
+
+def thread_has_draft(service, thread_id):
+    data = service.users().threads().get(userId="me", id=thread_id).execute()
+    return any(
+        "DRAFT" in (m.get("labelIds") or []) for m in data.get("messages", [])
+    )
 # — model choices —
 CLASSIFY_MODEL  = "gpt-4.1"
 DRAFT_MODEL     = "o3"
