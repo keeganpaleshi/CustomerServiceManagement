@@ -1,6 +1,7 @@
 import os
 import pickle
 import base64
+import json
 import openai
 from email.mime.text import MIMEText
 from google.auth.transport.requests import Request
@@ -23,6 +24,49 @@ OPENAI_MODEL = "gpt-4.5-preview"
 
 # We'll use the new v1.0.0+ style:
 from openai import OpenAI
+
+
+def classify_email(text: str) -> dict:
+    """Classify an email into lead/customer/other and rate its importance."""
+    client = OpenAI(api_key=OPENAI_API_KEY)
+    system_prompt = (
+        "Classify the following email as coming from a new lead, an existing "
+        "customer, or other. Return JSON with keys 'type' (lead|customer|other) "
+        "and 'importance' (low|medium|high)."
+    )
+    try:
+        response = client.chat.completions.create(
+            model=OPENAI_MODEL,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": text},
+            ],
+            max_tokens=20,
+            temperature=0,
+        )
+        content = response.choices[0].message.content.strip()
+        return json.loads(content)
+    except Exception as e:
+        print(f"Error classifying email: {e}")
+        return {"type": "other", "importance": "low"}
+
+
+def extract_body_text(message: dict) -> str:
+    """Decode the first text/plain part of a Gmail message."""
+    payload = message.get("payload", {})
+    parts = payload.get("parts", [])
+    # Search multipart messages first
+    for part in parts:
+        if part.get("mimeType", "").startswith("text/plain"):
+            data = part.get("body", {}).get("data")
+            if data:
+                return base64.urlsafe_b64decode(data).decode("utf-8", errors="ignore")
+
+    # Fall back to top-level body
+    data = payload.get("body", {}).get("data")
+    if data:
+        return base64.urlsafe_b64decode(data).decode("utf-8", errors="ignore")
+    return ""
 
 
 # -------------------------------------------------------
@@ -226,8 +270,7 @@ def main():
             .get(
                 userId="me",
                 id=msg_id,
-                format="metadata",
-                metadataHeaders=["From", "Subject"],
+                format="full",
             )
             .execute()
         )
@@ -235,7 +278,14 @@ def main():
         subject = get_header_value(msg_detail, "Subject")
         sender = get_header_value(msg_detail, "From")
         thread_id = msg_detail.get("threadId")
-        snippet = msg_detail.get("snippet", "")
+        body_txt = extract_body_text(msg_detail)
+
+        cls = classify_email(f"Subject:{subject}\n\n{body_txt}")
+        email_type = cls["type"]
+        importance = cls["importance"]
+        if email_type == "other":
+            continue
+        print(f"{msg_id[:8]}… type={email_type}, imp={importance}")
 
         # 1) Check if there's already a draft in this thread
         thread_data = service.users().threads().get(userId="me", id=thread_id).execute()
@@ -252,7 +302,7 @@ def main():
 
         # 2) If not, generate a new draft
         reply_subject = f"Re: {subject}" if subject else "Re: (no subject)"
-        draft_body_text = generate_ai_reply(subject, sender, snippet)
+        draft_body_text = generate_ai_reply(subject, sender, body_txt)
         draft_message = create_base64_message(
             "me", sender, reply_subject, draft_body_text
         )
