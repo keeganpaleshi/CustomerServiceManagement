@@ -25,3 +25,12 @@ python gmail_bot.py
 
 OAuth – the first run opens a browser window; token is cached in token.pickle.
 ```
+
+### Tweaking behavior
+
+Edit `config.yaml` to adjust limits and model settings. Key options include:
+
+- `openai.draft_system_message` – system prompt used for draft replies.
+- `openai.draft_max_tokens` – token limit for reply generation.
+- `openai.classify_max_tokens` – token limit for the classification step.
+- `limits.max_drafts` – maximum number of drafts created per run.

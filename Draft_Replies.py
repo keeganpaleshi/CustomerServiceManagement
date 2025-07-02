@@ -25,16 +25,21 @@ if not OPENAI_API_KEY:
 
 # Default to the o3 model unless overridden in config
 DRAFT_MODEL = CFG["openai"]["draft_model"]
+DRAFT_MAX_TOKENS = CFG["openai"].get("draft_max_tokens", 16384)
+DRAFT_SYSTEM_MSG = CFG["openai"].get("draft_system_message", "")
 
 # Use the same model for general OpenAI calls by default
 OPENAI_MODEL = DRAFT_MODEL
 
 # Model used when classifying incoming emails
 CLASSIFY_MODEL = CFG["openai"]["classify_model"]
+CLASSIFY_MAX_TOKENS = CFG["openai"].get("classify_max_tokens", 50)
 
 # Critic settings
 CRITIC_THRESHOLD = CFG["thresholds"]["critic_threshold"]
 MAX_RETRIES      = CFG["thresholds"]["max_retries"]
+
+MAX_DRAFTS = CFG.get("limits", {}).get("max_drafts", 100)
 
 
 # We'll use the new v1.0.0+ style:
@@ -115,7 +120,7 @@ def get_gmail_service(
 def fetch_all_unread_messages(service):
     """
     Fetch all unread messages in the Gmail inbox, handling pagination.
-    We'll then slice to only the first 100 (likely the newest) in main().
+    We'll then slice to only the configured number in ``main``.
     """
     unread_messages = []
     page_token = None
@@ -198,7 +203,7 @@ def classify_email(text: str) -> dict:
                 {"role": "user", "content": text},
             ],
             temperature=0,
-            max_tokens=50,
+            max_tokens=CLASSIFY_MAX_TOKENS,
         )
         return json.loads(response.choices[0].message.content)
     except Exception as e:
@@ -229,30 +234,10 @@ def generate_ai_reply(subject, sender, snippet_or_body, email_type):
         response = client.chat.completions.create(
             model=DRAFT_MODEL,
             messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "Context: This is a business email for Cruising Solutions. You are replying "
-                        "to customers who have concerns or questions some about orders they've placed, "
-                        "others about products they're considering purchasing. You should reply in the "
-                        "name of David, lead Customer Service Member, with the phone number 843-222-3660.\n\n"
-                        "Style Guidelines:\n\n"
-                        "    Write in an email format.\n"
-                        "    Be kind, courteous, and polite.\n"
-                        "    Recognize any urgency in the customer's message.\n"
-                        "    Provide helpful, succinct responses (most customers appreciate concise emails).\n"
-                        "    Avoid giving specific dates or times when you will follow up (e.g., no  today,  "
-                        " tomorrow,  or exact deadlines). Instead, use phrases such as:\n"
-                        "         as soon as possible \n"
-                        "         at your earliest convenience \n"
-                        "    Occasionally use nautical terms, as most customers are sailors.\n"
-                        "    If you don t have an answer to their question immediately, let them know you re "
-                        "checking into it and will respond once you have the information."
-                    ),
-                },
+                {"role": "system", "content": DRAFT_SYSTEM_MSG},
                 {"role": "user", "content": instructions},
             ],
-            max_tokens=16384,
+            max_tokens=DRAFT_MAX_TOKENS,
             temperature=0.7,
         )
         # Extract the actual reply text
@@ -274,7 +259,7 @@ def generate_ai_reply(subject, sender, snippet_or_body, email_type):
 def main():
     """
     1) Authenticate & build Gmail service.
-    2) Fetch unread messages & limit to 100 (likely the newest).
+    2) Fetch unread messages & limit to the configured amount.
     3) For each message:
        - Skip if there's already a draft in the same thread.
        - Generate AI-based draft.
@@ -282,16 +267,17 @@ def main():
     """
     service = get_gmail_service()
 
-    # Fetch all unread, then limit to 100 for "most recent" processing
+    # Fetch all unread, then limit for "most recent" processing
     unread_messages = fetch_all_unread_messages(service)
     if not unread_messages:
         print("No unread messages found.")
         return
 
     # We assume the API returns them from newest to oldest, but that can vary.
-    # If you want the strictly newest 100, you may want to reverse or sort by internalDate.
-    unread_messages = unread_messages[:100]
-    print(f"Fetched {len(unread_messages)} unread messages (limited to 100).")
+    # If you want the strictly newest ``MAX_DRAFTS``, you may want to reverse
+    # or sort by ``internalDate``.
+    unread_messages = unread_messages[:MAX_DRAFTS]
+    print(f"Fetched {len(unread_messages)} unread messages (limited to {MAX_DRAFTS}).")
 
     # Process each unread message
     for msg_ref in unread_messages:

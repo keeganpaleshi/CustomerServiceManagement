@@ -25,11 +25,13 @@ GMAIL_TOKEN_FILE     = CFG["gmail"]["token_file"]
 # OpenAI models & API key
 OPENAI_API_KEY       = os.getenv(CFG["openai"]["api_key_env"])
 CLASSIFY_MODEL       = CFG["openai"]["classify_model"]
-DRAFT_MODEL          = CFG["openai"]["draft_model"]
+CLASSIFY_MAX_TOKENS  = CFG["openai"].get("classify_max_tokens", 50)
 
 # Critic settings
 CRITIC_THRESHOLD     = CFG["thresholds"]["critic_threshold"]
 MAX_RETRIES          = CFG["thresholds"]["max_retries"]
+
+MAX_DRAFTS           = CFG.get("limits", {}).get("max_drafts", 100)
 
 # Ticketing
 TICKET_SYSTEM        = CFG["ticket"]["system"]
@@ -122,7 +124,7 @@ def classify_email(text: str) -> dict:
                 {"role": "user", "content": text},
             ],
             temperature=0,
-            max_tokens=50,
+            max_tokens=CLASSIFY_MAX_TOKENS,
         )
         return json.loads(response.choices[0].message.content)
     except Exception as e:
@@ -157,7 +159,7 @@ def create_ticket(subject: str, sender: str, body: str):
 def main():
 
     svc = get_gmail_service()
-    for ref in fetch_all_unread_messages(svc):
+    for ref in fetch_all_unread_messages(svc)[:MAX_DRAFTS]:
         msg = (
             svc.users()
             .messages()

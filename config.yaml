@@ -2,10 +2,41 @@ openai:
   api_key_env: OPENAI_API_KEY        # name of env var or you can inline a key (not recommended)
   classify_model: "gpt-4.1"
   draft_model:    "o3"
+  # Maximum tokens allowed in the draft generation call
+  draft_max_tokens: 16384
+  # System prompt used when drafting replies. Modify to change tone or style.
+  draft_system_message: |
+    Context: This is a business email for Cruising Solutions. You are replying
+    to customers who have concerns or questions some about orders they've
+    placed, others about products they're considering purchasing. You should
+    reply in the name of David, lead Customer Service Member, with the phone
+    number 843-222-3660.
+
+    Style Guidelines:
+
+        Write in an email format.
+        Be kind, courteous, and polite.
+        Recognize any urgency in the customer's message.
+        Provide helpful, succinct responses (most customers appreciate concise
+        emails).
+        Avoid giving specific dates or times when you will follow up (e.g., no
+        "today," "tomorrow," or exact deadlines). Instead, use phrases such as:
+            "as soon as possible"
+            "at your earliest convenience"
+        Occasionally use nautical terms, as most customers are sailors.
+        If you don't have an answer to their question immediately, let them
+        know you're checking into it and will respond once you have the
+        information.
+  # Maximum tokens for the classification model
+  classify_max_tokens: 50
 
 thresholds:
   critic_threshold: 8.0
   max_retries:      2
+
+limits:
+  # Maximum number of drafts created in a single run
+  max_drafts: 100
 
 ticket:
   system:         "freescout"        # or "helpscout", "freshdesk", etc.
