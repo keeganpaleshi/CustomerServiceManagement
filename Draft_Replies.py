@@ -41,6 +41,16 @@ MAX_RETRIES      = CFG["thresholds"]["max_retries"]
 
 MAX_DRAFTS = CFG.get("limits", {}).get("max_drafts", 100)
 
+# Labels that indicate promotional or spam content. Any message with these
+# Gmail labels will be skipped.
+PROMO_LABELS = {
+    "SPAM",
+    "CATEGORY_PROMOTIONS",
+    "CATEGORY_SOCIAL",
+    "CATEGORY_UPDATES",
+    "CATEGORY_FORUMS",
+}
+
 
 # We'll use the new v1.0.0+ style:
 from openai import OpenAI
@@ -187,6 +197,19 @@ def create_draft(service, user_id, message_body, thread_id=None):
         return None
 
 
+def is_promotional_or_spam(message, body_text: str) -> bool:
+    """Return True if the message looks like a newsletter or spam."""
+    labels = set(message.get("labelIds", []))
+    if labels & PROMO_LABELS:
+        return True
+    headers = {h.get("name", "").lower(): h.get("value", "") for h in message.get("payload", {}).get("headers", [])}
+    if "list-unsubscribe" in headers or "list-id" in headers:
+        return True
+    if "unsubscribe" in body_text.lower():
+        return True
+    return False
+
+
 def classify_email(text: str) -> dict:
     """Classify an email and return a dict with type and importance."""
     client = OpenAI(api_key=OPENAI_API_KEY)
@@ -313,6 +336,11 @@ def main():
             data = payload.get("body", {}).get("data", "")
             if data:
                 body_txt = base64.urlsafe_b64decode(data.encode("utf-8")).decode("utf-8")
+
+        # Skip newsletters or spam before using any AI models
+        if is_promotional_or_spam(msg_detail, body_txt):
+            print(f"{msg_id[:8]}… skipped promotional/spam")
+            continue
 
         cls = classify_email(f"Subject:{subject}\n\n{body_txt}")
         email_type = cls["type"]

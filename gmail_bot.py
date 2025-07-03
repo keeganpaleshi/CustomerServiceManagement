@@ -33,6 +33,16 @@ MAX_RETRIES          = CFG["thresholds"]["max_retries"]
 
 MAX_DRAFTS           = CFG.get("limits", {}).get("max_drafts", 100)
 
+# Gmail label IDs that indicate promotional or spammy content. Messages with
+# any of these labels will be skipped entirely.
+PROMO_LABELS = {
+    "SPAM",
+    "CATEGORY_PROMOTIONS",
+    "CATEGORY_SOCIAL",
+    "CATEGORY_UPDATES",
+    "CATEGORY_FORUMS",
+}
+
 # Ticketing
 TICKET_SYSTEM        = CFG["ticket"]["system"]
 FREESCOUT_URL        = CFG["ticket"]["freescout_url"]
@@ -88,6 +98,18 @@ def thread_has_draft(service, thread_id):
     return any(
         "DRAFT" in (m.get("labelIds") or []) for m in data.get("messages", [])
     )
+
+def is_promotional_or_spam(message, body_text: str) -> bool:
+    """Return True if the message looks like a newsletter or spam."""
+    labels = set(message.get("labelIds", []))
+    if labels & PROMO_LABELS:
+        return True
+    headers = {h.get("name", "").lower(): h.get("value", "") for h in message.get("payload", {}).get("headers", [])}
+    if "list-unsubscribe" in headers or "list-id" in headers:
+        return True
+    if "unsubscribe" in body_text.lower():
+        return True
+    return False
 
 def critic_email(draft: str, original: str) -> dict:
     """Self-grade a draft reply using GPT-4.1."""
@@ -180,6 +202,11 @@ def main():
         part = msg["payload"]["parts"][0]["body"]["data"]
         body = base64.urlsafe_b64decode(part).decode("utf-8", "ignore")
         snippet = msg.get("snippet", "")
+
+        # Skip obvious newsletters or spam before any AI calls
+        if is_promotional_or_spam(msg, body):
+            print(f"{ref['id'][:8]}… skipped promotional/spam")
+            continue
 
         # ---- classification ----
         cls = classify_email(f"Subject:{subject}\n\n{body}")

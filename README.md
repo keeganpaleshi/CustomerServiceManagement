@@ -4,7 +4,8 @@
 
 1. Reads all **unread** Gmail messages.
 2. Uses **GPT-4.1** to classify each as `lead`, `customer`, or `other` and assign an `importance` score (1-10).
-3. Ignores `other`.
+3. Ignores `other` and automatically skips promotional or newsletter emails
+   based on Gmail labels or unsubscribe headers.
 4. For leads & customers:
    * Drafts a reply with **o3** (never sends).
    * Runs a self-critique loop until the draft scores ≥ 8.
