@@ -42,6 +42,7 @@ ticket:
   system:         "freescout"        # or "helpscout", "freshdesk", etc.
   freescout_url:  ""                 # fill in your desk URL
   freescout_key:  ""                 # or set FREESCOUT_KEY env var
+  freescout_poll_interval: 300      # seconds between API polls
 
 gmail:
   scopes:
