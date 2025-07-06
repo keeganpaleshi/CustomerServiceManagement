@@ -154,6 +154,49 @@ def classify_email(text: str) -> dict:
         return {"type": "other", "importance": 0}
 
 
+def route_email(service, thread_id: str, subject: str, sender: str, body: str, cls: dict) -> None:
+    """Route an email to ticketing or request more info via draft."""
+    email_type = cls.get("type")
+    importance = cls.get("importance", 0)
+
+    try:
+        client = OpenAI(api_key=OPENAI_API_KEY)
+        resp = client.chat.completions.create(
+            model=CLASSIFY_MODEL,
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "Determine if the message is high priority and if there is enough "
+                        "information to act. Return ONLY JSON {\"priority\":\"high|low\","
+                        "\"enough_info\":true|false}."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": f"Type:{email_type} Importance:{importance}\nSubject:{subject}\n\n{body}",
+                },
+            ],
+            temperature=0,
+            max_tokens=20,
+        )
+        decision = json.loads(resp.choices[0].message.content)
+        priority = decision.get("priority", "high")
+        enough_info = decision.get("enough_info", True)
+    except Exception as e:
+        print(f"Error determining priority: {e}")
+        priority, enough_info = "high", True
+
+    if priority == "high" or not enough_info:
+        create_ticket(subject, sender, body)
+    else:
+        request_text = (
+            "Could you please provide more details about your request so we can assist you?"
+        )
+        msg = create_base64_message("me", sender, f"Re: {subject}", request_text)
+        create_draft(service, "me", msg, thread_id=thread_id)
+
+
 
 def create_ticket(subject: str, sender: str, body: str):
     if TICKET_SYSTEM != "freescout":
@@ -234,8 +277,8 @@ def main():
             )
             create_draft(svc, "me", msg_draft, thread_id=thread)
 
-        # ---- ticket for lead/customer ----
-        create_ticket(subject, sender, body)
+        # ---- ticket or info request ----
+        route_email(svc, thread, subject, sender, body, cls)
 
         print(f"{ref['id'][:8]}… {email_type:<8} imp={importance}")
 
