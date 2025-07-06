@@ -1,45 +1,36 @@
 import os
-
-# additional imports
 import json
-import requests
 import argparse
+
+import base64
+
 import time
 from datetime import datetime, timedelta
 
 
-from googleapiclient.discovery import build     # already imported in Draft_Replies, keep here too
-from google.auth.transport.requests import Request
-from google_auth_oauthlib.flow import InstalledAppFlow
-import pickle, base64
+import requests
 
-from openai import OpenAI
 from Draft_Replies import generate_ai_reply
-import yaml
-
-
-# Load YAML config
-with open(os.path.join(os.path.dirname(__file__), "config.yaml")) as f:
-    CFG = yaml.safe_load(f)
-
-# Gmail settings
-SCOPES               = CFG["gmail"]["scopes"]
-GMAIL_CLIENT_SECRET  = CFG["gmail"]["client_secret_file"]
-GMAIL_TOKEN_FILE     = CFG["gmail"]["token_file"]
-GMAIL_QUERY          = CFG["gmail"].get("query", "is:unread")
-
-HTTP_TIMEOUT         = CFG.get("http", {}).get("timeout", 15)
-
-# OpenAI models & API key
-OPENAI_API_KEY       = os.getenv(CFG["openai"]["api_key_env"])
-CLASSIFY_MODEL       = CFG["openai"]["classify_model"]
-CLASSIFY_MAX_TOKENS  = CFG["openai"].get("classify_max_tokens", 50)
-
-# Critic settings
-CRITIC_THRESHOLD     = CFG["thresholds"]["critic_threshold"]
-MAX_RETRIES          = CFG["thresholds"]["max_retries"]
-
-MAX_DRAFTS           = CFG.get("limits", {}).get("max_drafts", 100)
+from email_utils import (
+    CFG,
+    CLASSIFY_MAX_TOKENS,
+    CLASSIFY_MODEL,
+    CRITIC_THRESHOLD,
+    GMAIL_QUERY,
+    HTTP_TIMEOUT,
+    MAX_RETRIES,
+    MAX_DRAFTS,
+    OPENAI_API_KEY,
+    create_base64_message,
+    create_draft,
+    create_ticket,
+    critic_email,
+    classify_email,
+    fetch_all_unread_messages,
+    get_gmail_service,
+    is_promotional_or_spam,
+    thread_has_draft,
+)
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Process Gmail messages")

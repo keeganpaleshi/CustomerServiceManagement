@@ -38,6 +38,15 @@ Edit `config.yaml` to adjust limits and model settings. Key options include:
 - `gmail.query` – default Gmail search query.
 - `http.timeout` – HTTP request timeout in seconds.
 
+
+## Development
+
+Run `flake8` before committing to check for style issues:
+
+```bash
+flake8
+```
+
 ## FreeScout status updates
 
 Run the bot with `--poll-freescout` to periodically check FreeScout for recent
@@ -66,3 +75,4 @@ def freescout_hook():
 
 Deploy the webhook on a server with HTTPS and set the URL in FreeScout's
 settings to have Gmail updated whenever a conversation changes.
+
