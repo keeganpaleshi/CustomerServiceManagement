@@ -48,3 +48,5 @@ gmail:
     - "https://www.googleapis.com/auth/gmail.modify"
   client_secret_file: "client_secret.json"
   token_file:         "token.pickle"
+  # Gmail search query used when fetching messages
+  query:              "is:unread"

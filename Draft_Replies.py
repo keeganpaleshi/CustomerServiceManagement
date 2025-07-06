@@ -17,6 +17,7 @@ with open(os.path.join(os.path.dirname(__file__), "config.yaml")) as f:
 
 # Gmail API scope
 SCOPES = CFG["gmail"]["scopes"]
+GMAIL_QUERY = CFG["gmail"].get("query", "is:unread")
 
 # Load OpenAI API key from env (never store in plain text!)
 OPENAI_API_KEY = os.getenv(CFG["openai"]["api_key_env"])
@@ -128,18 +129,16 @@ def get_gmail_service(
 # 3) Fetching Unread Messages
 # -------------------------------------------------------
 def fetch_all_unread_messages(service):
-    """
-    Fetch all unread messages in the Gmail inbox, handling pagination.
-    We'll then slice to only the configured number in ``main``.
-    """
+    """Fetch messages matching the configured Gmail query."""
     unread_messages = []
     page_token = None
+    query = GMAIL_QUERY
 
     while True:
         response = (
             service.users()
             .messages()
-            .list(userId="me", q="is:unread", pageToken=page_token)
+            .list(userId="me", q=query, pageToken=page_token)
             .execute()
         )
         messages_page = response.get("messages", [])
