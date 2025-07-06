@@ -35,3 +35,31 @@ Edit `config.yaml` to adjust limits and model settings. Key options include:
 - `openai.draft_max_tokens` – token limit for reply generation.
 - `openai.classify_max_tokens` – token limit for the classification step.
 - `limits.max_drafts` – maximum number of drafts created per run.
+
+## Syncing FreeScout updates to Gmail
+
+The script can keep Gmail informed of new activity in FreeScout. By default it
+polls the FreeScout API every 5 minutes (see `ticket.freescout_poll_interval` in
+`config.yaml`). Each poll sends a summary email listing conversations updated
+since the last check.
+
+If you prefer real-time updates, set up a webhook receiver using Flask:
+
+```python
+from flask import Flask, request
+from gmail_bot import get_gmail_service, send_summary_email
+
+app = Flask(__name__)
+
+@app.route('/freescout', methods=['POST'])
+def freescout_webhook():
+    service = get_gmail_service()
+    payload = request.json
+    send_summary_email(service, [payload])
+    return '', 204
+
+if __name__ == '__main__':
+    app.run(port=5000)
+```
+
+Configure FreeScout to POST conversation events to your `/freescout` endpoint.

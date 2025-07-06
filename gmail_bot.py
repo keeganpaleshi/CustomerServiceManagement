@@ -3,6 +3,7 @@ import os
 # additional imports
 import json
 import requests
+import time
 
 from googleapiclient.discovery import build     # already imported in Draft_Replies, keep here too
 from google.auth.transport.requests import Request
@@ -47,6 +48,7 @@ PROMO_LABELS = {
 TICKET_SYSTEM        = CFG["ticket"]["system"]
 FREESCOUT_URL        = CFG["ticket"]["freescout_url"]
 FREESCOUT_KEY        = CFG["ticket"]["freescout_key"]
+FREESCOUT_POLL_INTERVAL = CFG["ticket"].get("freescout_poll_interval", 300)
 
 if not OPENAI_API_KEY:
     raise ValueError(f"Please set your {CFG['openai']['api_key_env']} environment variable.")
@@ -178,6 +180,45 @@ def create_ticket(subject: str, sender: str, body: str):
     r.raise_for_status()
 
 
+def fetch_freescout_conversations(updated_since: int) -> list:
+    """Return conversations updated since the given UNIX timestamp."""
+    if TICKET_SYSTEM != "freescout":
+        return []
+    url = f"{FREESCOUT_URL.rstrip('/')}/api/conversations"
+    headers = {
+        "Accept": "application/json",
+        "X-FreeScout-API-Key": FREESCOUT_KEY,
+    }
+    params = {"updated_since": updated_since}
+    r = requests.get(url, headers=headers, params=params, timeout=15)
+    r.raise_for_status()
+    return r.json().get("conversations", [])
+
+
+def send_summary_email(service, updates: list):
+    if not updates:
+        return
+    lines = [
+        f"#{c.get('id')}: {c.get('subject', '(no subject)')} status={c.get('status')}"
+        for c in updates
+    ]
+    body = "Recent FreeScout updates:\n\n" + "\n".join(lines)
+    msg = create_base64_message("me", "me", "FreeScout updates", body)
+    service.users().messages().send(userId="me", body=msg).execute()
+
+
+def poll_freescout_updates(service, interval: int = FREESCOUT_POLL_INTERVAL):
+    last = int(time.time()) - interval
+    while True:
+        try:
+            updates = fetch_freescout_conversations(last)
+            send_summary_email(service, updates)
+            last = int(time.time())
+        except Exception as e:
+            print(f"Error polling FreeScout: {e}")
+        time.sleep(interval)
+
+
 def main():
 
     svc = get_gmail_service()
@@ -238,6 +279,9 @@ def main():
         create_ticket(subject, sender, body)
 
         print(f"{ref['id'][:8]}… {email_type:<8} imp={importance}")
+
+    # after processing unread messages, poll FreeScout for updates
+    poll_freescout_updates(svc)
 
 
 if __name__ == "__main__":
