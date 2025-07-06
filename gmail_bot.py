@@ -3,6 +3,7 @@ import os
 # additional imports
 import json
 import requests
+import argparse
 
 from googleapiclient.discovery import build     # already imported in Draft_Replies, keep here too
 from google.auth.transport.requests import Request
@@ -13,6 +14,7 @@ from openai import OpenAI
 from Draft_Replies import generate_ai_reply
 import yaml
 
+
 # Load YAML config
 with open(os.path.join(os.path.dirname(__file__), "config.yaml")) as f:
     CFG = yaml.safe_load(f)
@@ -21,6 +23,9 @@ with open(os.path.join(os.path.dirname(__file__), "config.yaml")) as f:
 SCOPES               = CFG["gmail"]["scopes"]
 GMAIL_CLIENT_SECRET  = CFG["gmail"]["client_secret_file"]
 GMAIL_TOKEN_FILE     = CFG["gmail"]["token_file"]
+GMAIL_QUERY          = CFG["gmail"].get("query", "is:unread")
+
+HTTP_TIMEOUT         = CFG.get("http", {}).get("timeout", 15)
 
 # OpenAI models & API key
 OPENAI_API_KEY       = os.getenv(CFG["openai"]["api_key_env"])
@@ -32,6 +37,12 @@ CRITIC_THRESHOLD     = CFG["thresholds"]["critic_threshold"]
 MAX_RETRIES          = CFG["thresholds"]["max_retries"]
 
 MAX_DRAFTS           = CFG.get("limits", {}).get("max_drafts", 100)
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="Process Gmail messages")
+    parser.add_argument("--gmail-query", default=GMAIL_QUERY, help="Gmail search query")
+    parser.add_argument("--timeout", type=int, default=HTTP_TIMEOUT, help="HTTP request timeout")
+    return parser.parse_args()
 
 # Gmail label IDs that indicate promotional or spammy content. Messages with
 # any of these labels will be skipped entirely.
@@ -73,13 +84,19 @@ def get_gmail_service(creds_filename=None, token_filename=None):
             pickle.dump(creds, t)
     return build("gmail", "v1", credentials=creds)
 
-def fetch_all_unread_messages(service):
+def fetch_all_unread_messages(service, query: str = GMAIL_QUERY):
     unread, token = [], None
     while True:
-        resp = service.users().messages().list(userId="me", q="is:unread", pageToken=token).execute()
+        resp = (
+            service.users()
+            .messages()
+            .list(userId="me", q=query, pageToken=token)
+            .execute()
+        )
         unread.extend(resp.get("messages", []))
         token = resp.get("nextPageToken")
-        if not token: break
+        if not token:
+            break
     return unread
 
 def create_base64_message(sender, to, subject, body):
@@ -155,7 +172,7 @@ def classify_email(text: str) -> dict:
 
 
 
-def create_ticket(subject: str, sender: str, body: str):
+def create_ticket(subject: str, sender: str, body: str, timeout: int = HTTP_TIMEOUT):
     if TICKET_SYSTEM != "freescout":
         return
     url = f"{FREESCOUT_URL.rstrip('/')}/api/conversations"
@@ -173,15 +190,16 @@ def create_ticket(subject: str, sender: str, body: str):
             "X-FreeScout-API-Key": FREESCOUT_KEY,
         },
         json=payload,
-        timeout=15,
+        timeout=timeout,
     )
     r.raise_for_status()
 
 
 def main():
+    args = parse_args()
 
     svc = get_gmail_service()
-    for ref in fetch_all_unread_messages(svc)[:MAX_DRAFTS]:
+    for ref in fetch_all_unread_messages(svc, query=args.gmail_query)[:MAX_DRAFTS]:
         msg = (
             svc.users()
             .messages()
@@ -235,7 +253,7 @@ def main():
             create_draft(svc, "me", msg_draft, thread_id=thread)
 
         # ---- ticket for lead/customer ----
-        create_ticket(subject, sender, body)
+        create_ticket(subject, sender, body, timeout=args.timeout)
 
         print(f"{ref['id'][:8]}… {email_type:<8} imp={importance}")
 

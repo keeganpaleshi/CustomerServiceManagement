@@ -7,6 +7,7 @@ from google.auth.transport.requests import Request
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 import yaml
+import argparse
 
 # -------------------------------------------------------
 # 1) Configuration
@@ -40,6 +41,14 @@ CRITIC_THRESHOLD = CFG["thresholds"]["critic_threshold"]
 MAX_RETRIES      = CFG["thresholds"]["max_retries"]
 
 MAX_DRAFTS = CFG.get("limits", {}).get("max_drafts", 100)
+GMAIL_QUERY = CFG["gmail"].get("query", "is:unread")
+HTTP_TIMEOUT = CFG.get("http", {}).get("timeout", 15)
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="Draft Gmail replies")
+    parser.add_argument("--gmail-query", default=GMAIL_QUERY, help="Gmail search query")
+    parser.add_argument("--timeout", type=int, default=HTTP_TIMEOUT, help="HTTP request timeout")
+    return parser.parse_args()
 
 # Labels that indicate promotional or spam content. Any message with these
 # Gmail labels will be skipped.
@@ -127,7 +136,7 @@ def get_gmail_service(
 # -------------------------------------------------------
 # 3) Fetching Unread Messages
 # -------------------------------------------------------
-def fetch_all_unread_messages(service):
+def fetch_all_unread_messages(service, query: str = GMAIL_QUERY):
     """
     Fetch all unread messages in the Gmail inbox, handling pagination.
     We'll then slice to only the configured number in ``main``.
@@ -139,7 +148,7 @@ def fetch_all_unread_messages(service):
         response = (
             service.users()
             .messages()
-            .list(userId="me", q="is:unread", pageToken=page_token)
+            .list(userId="me", q=query, pageToken=page_token)
             .execute()
         )
         messages_page = response.get("messages", [])
@@ -280,6 +289,7 @@ def generate_ai_reply(subject, sender, snippet_or_body, email_type):
 # 6) Main Flow
 # -------------------------------------------------------
 def main():
+    args = parse_args()
     """
     1) Authenticate & build Gmail service.
     2) Fetch unread messages & limit to the configured amount.
@@ -291,7 +301,7 @@ def main():
     service = get_gmail_service()
 
     # Fetch all unread, then limit for "most recent" processing
-    unread_messages = fetch_all_unread_messages(service)
+    unread_messages = fetch_all_unread_messages(service, query=args.gmail_query)
     if not unread_messages:
         print("No unread messages found.")
         return
@@ -371,7 +381,7 @@ def main():
             print(
                 f"Draft for message {msg_id} scored {score} (<{CRITIC_THRESHOLD}). Creating ticket."
             )
-            create_ticket(subject, sender, body_txt)
+            create_ticket(subject, sender, body_txt, timeout=args.timeout)
             continue
         else:
             print(f"Draft score {score} >= {CRITIC_THRESHOLD}; saving draft.")
