@@ -171,6 +171,65 @@ def classify_email(text: str) -> dict:
         return {"type": "other", "importance": 0}
 
 
+def route_email(
+    service,
+    subject: str,
+    sender: str,
+    body: str,
+    thread_id: str,
+    cls: dict,
+    timeout: int = HTTP_TIMEOUT,
+) -> None:
+    """Route an email based on priority and information level.
+
+    If the message is high priority or lacks sufficient information, open a
+    ticket. Otherwise, create a draft requesting additional details.
+    """
+
+    email_type = cls.get("type")
+    importance = cls.get("importance", 0)
+    if email_type == "other":
+        return
+
+    high_priority = importance >= 8
+    needs_info = False
+    try:
+        client = OpenAI(api_key=OPENAI_API_KEY)
+        resp = client.chat.completions.create(
+            model=CLASSIFY_MODEL,
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "Assess priority and information sufficiency. Return ONLY "
+                        "JSON {\"priority\":\"high|normal\",\"needs_more_info\":true|false}."
+                    ),
+                },
+                {"role": "user", "content": f"Subject:{subject}\n\n{body}"},
+            ],
+            temperature=0,
+            max_tokens=20,
+        )
+        result = json.loads(resp.choices[0].message.content)
+        high_priority = result.get("priority") == "high" or high_priority
+        needs_info = result.get("needs_more_info", False)
+    except Exception as e:
+        print(f"Priority check failed: {e}")
+
+    if high_priority or needs_info:
+        create_ticket(subject, sender, body, timeout=timeout)
+        return
+
+    # Otherwise ask for more details
+    if not thread_has_draft(service, thread_id):
+        followup = (
+            "Thank you for contacting us. Could you provide more details about "
+            "your request so we can assist you?"
+        )
+        msg = create_base64_message("me", sender, f"Re: {subject}", followup)
+        create_draft(service, "me", msg, thread_id=thread_id)
+
+
 
 def create_ticket(subject: str, sender: str, body: str, timeout: int = HTTP_TIMEOUT):
     if TICKET_SYSTEM != "freescout":
@@ -252,8 +311,16 @@ def main():
             )
             create_draft(svc, "me", msg_draft, thread_id=thread)
 
-        # ---- ticket for lead/customer ----
-        create_ticket(subject, sender, body, timeout=args.timeout)
+        # ---- ticket or follow-up ----
+        route_email(
+            svc,
+            subject,
+            sender,
+            body,
+            thread,
+            cls,
+            timeout=args.timeout,
+        )
 
         print(f"{ref['id'][:8]}… {email_type:<8} imp={importance}")
 
