@@ -4,6 +4,8 @@ import os
 import json
 import requests
 import argparse
+import time
+from datetime import datetime, timedelta
 
 from googleapiclient.discovery import build     # already imported in Draft_Replies, keep here too
 from google.auth.transport.requests import Request
@@ -42,6 +44,17 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Process Gmail messages")
     parser.add_argument("--gmail-query", default=GMAIL_QUERY, help="Gmail search query")
     parser.add_argument("--timeout", type=int, default=HTTP_TIMEOUT, help="HTTP request timeout")
+    parser.add_argument(
+        "--poll-freescout",
+        action="store_true",
+        help="Continuously poll FreeScout for updates",
+    )
+    parser.add_argument(
+        "--poll-interval",
+        type=int,
+        default=300,
+        help="Seconds between FreeScout polls",
+    )
     return parser.parse_args()
 
 # Gmail label IDs that indicate promotional or spammy content. Messages with
@@ -195,6 +208,57 @@ def create_ticket(subject: str, sender: str, body: str, timeout: int = HTTP_TIME
     r.raise_for_status()
 
 
+def fetch_recent_conversations(since_iso: str | None = None, timeout: int = HTTP_TIMEOUT):
+    """Return list of recent FreeScout conversations since a given ISO time."""
+    url = f"{FREESCOUT_URL.rstrip('/')}/api/conversations"
+    params = {"updated_since": since_iso} if since_iso else None
+    resp = requests.get(
+        url,
+        headers={
+            "Accept": "application/json",
+            "X-FreeScout-API-Key": FREESCOUT_KEY,
+        },
+        params=params,
+        timeout=timeout,
+    )
+    resp.raise_for_status()
+    return resp.json() or []
+
+
+def ensure_label(service, name: str) -> str:
+    """Return Gmail label ID, creating the label if needed."""
+    labels = service.users().labels().list(userId="me").execute().get("labels", [])
+    for lab in labels:
+        if lab.get("name") == name:
+            return lab["id"]
+    body = {
+        "name": name,
+        "labelListVisibility": "labelShow",
+        "messageListVisibility": "show",
+    }
+    created = service.users().labels().create(userId="me", body=body).execute()
+    return created["id"]
+
+
+def send_update_email(service, summary: str):
+    msg = create_base64_message("me", "me", "FreeScout Updates", summary)
+    service.users().messages().send(userId="me", body=msg).execute()
+
+
+def poll_freescout_updates(service, interval: int = 300, timeout: int = HTTP_TIMEOUT):
+    """Continuously poll FreeScout and email a summary of new conversations."""
+    label_id = ensure_label(service, "FreeScout Updates")
+    since = datetime.utcnow() - timedelta(minutes=5)
+    while True:
+        convs = fetch_recent_conversations(since.isoformat(), timeout=timeout)
+        if convs:
+            lines = [f"#{c.get('id')} {c.get('subject','')[:50]} [{c.get('status')}]" for c in convs]
+            summary = "\n".join(lines)
+            send_update_email(service, summary)
+        since = datetime.utcnow()
+        time.sleep(interval)
+
+
 def main():
     args = parse_args()
 
@@ -256,6 +320,13 @@ def main():
         create_ticket(subject, sender, body, timeout=args.timeout)
 
         print(f"{ref['id'][:8]}… {email_type:<8} imp={importance}")
+
+    if args.poll_freescout:
+        poll_freescout_updates(
+            svc,
+            interval=args.poll_interval,
+            timeout=args.timeout,
+        )
 
 
 if __name__ == "__main__":
