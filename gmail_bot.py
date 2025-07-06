@@ -7,6 +7,7 @@ import argparse
 import time
 from datetime import datetime, timedelta
 
+
 from googleapiclient.discovery import build     # already imported in Draft_Replies, keep here too
 from google.auth.transport.requests import Request
 from google_auth_oauthlib.flow import InstalledAppFlow
@@ -244,9 +245,11 @@ def route_email(
 
 
 
-def create_ticket(subject: str, sender: str, body: str, timeout: int = HTTP_TIMEOUT):
+def create_ticket(subject: str, sender: str, body: str, timeout: int = HTTP_TIMEOUT, retries: int = 3):
+    """Create a ticket in FreeScout with basic retry logic."""
     if TICKET_SYSTEM != "freescout":
-        return
+        return None
+
     url = f"{FREESCOUT_URL.rstrip('/')}/api/conversations"
     payload = {
         "type": "email",
@@ -254,17 +257,76 @@ def create_ticket(subject: str, sender: str, body: str, timeout: int = HTTP_TIME
         "customer": {"email": sender},
         "threads": [{"type": "customer", "text": body}],
     }
-    r = requests.post(
-        url,
-        headers={
-            "Accept": "application/json",
-            "Content-Type": "application/json",
-            "X-FreeScout-API-Key": FREESCOUT_KEY,
-        },
-        json=payload,
-        timeout=timeout,
-    )
-    r.raise_for_status()
+
+    for attempt in range(1, retries + 1):
+        try:
+            resp = requests.post(
+                url,
+                headers={
+                    "Accept": "application/json",
+                    "Content-Type": "application/json",
+                    "X-FreeScout-API-Key": FREESCOUT_KEY,
+                },
+                json=payload,
+                timeout=timeout,
+            )
+            resp.raise_for_status()
+            return resp.json()
+        except requests.RequestException as e:
+            if attempt == retries:
+                print(f"Failed to create ticket after {retries} attempts: {e}")
+                return None
+            sleep_time = 2 ** (attempt - 1)
+            print(f"Ticket creation error: {e}. Retrying in {sleep_time}s...")
+            time.sleep(sleep_time)
+
+
+def route_email(service, thread_id: str, subject: str, sender: str, body: str, snippet: str, timeout: int = HTTP_TIMEOUT):
+    """Classify an email and either open a ticket or create a draft."""
+    cls = classify_email(f"Subject:{subject}\n\n{body}")
+    email_type = cls.get("type", "other")
+    importance = cls.get("importance", 0)
+
+    if email_type == "other":
+        return "skipped", importance
+
+    if importance >= 8:
+        created = create_ticket(subject, sender, body, timeout=timeout)
+        if created:
+            return "ticket", importance
+
+    if not thread_has_draft(service, thread_id):
+        request_text = (
+            "Thanks for reaching out. Could you provide more details about your request so we can assist?"
+        )
+        draft_msg = create_base64_message("me", sender, f"Re: {subject}", request_text)
+        create_draft(service, "me", draft_msg, thread_id=thread_id)
+        return "draft", importance
+
+    return "none", importance
+
+
+def poll_ticket_updates(limit: int = 10, timeout: int = HTTP_TIMEOUT):
+    """Fetch recent ticket updates from FreeScout."""
+    if TICKET_SYSTEM != "freescout":
+        return []
+
+    url = f"{FREESCOUT_URL.rstrip('/')}/api/conversations"
+    try:
+        resp = requests.get(
+            url,
+            headers={
+                "Accept": "application/json",
+                "X-FreeScout-API-Key": FREESCOUT_KEY,
+            },
+            params={"limit": limit},
+            timeout=timeout,
+        )
+        resp.raise_for_status()
+        return resp.json().get("data", [])
+    except requests.RequestException as e:
+        print(f"Error polling FreeScout: {e}")
+        return []
 
 
 def fetch_recent_conversations(since_iso: str | None = None, timeout: int = HTTP_TIMEOUT):
@@ -339,15 +401,18 @@ def main():
         )
         thread = msg["threadId"]
 
-        # decode first text/plain part
-        part = msg["payload"]["parts"][0]["body"]["data"]
+        part = msg["payload"]["parts"][0]["body"].get("data", "")
         body = base64.urlsafe_b64decode(part).decode("utf-8", "ignore")
         snippet = msg.get("snippet", "")
 
-        # Skip obvious newsletters or spam before any AI calls
         if is_promotional_or_spam(msg, body):
             print(f"{ref['id'][:8]}… skipped promotional/spam")
             continue
+
+        action, importance = route_email(
+            svc, thread, subject, sender, body, snippet, timeout=args.timeout
+        )
+        print(f"{ref['id'][:8]}… {action:<6} imp={importance}")
 
         # ---- classification ----
         cls = classify_email(f"Subject:{subject}\n\n{body}")
@@ -386,7 +451,9 @@ def main():
             timeout=args.timeout,
         )
 
-        print(f"{ref['id'][:8]}… {email_type:<8} imp={importance}")
+    updates = poll_ticket_updates()
+    if updates:
+        print(f"Fetched {len(updates)} ticket updates from FreeScout")
 
     if args.poll_freescout:
         poll_freescout_updates(

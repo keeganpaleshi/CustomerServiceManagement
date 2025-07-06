@@ -6,12 +6,12 @@
 2. Uses **GPT-4.1** to classify each as `lead`, `customer`, or `other` and assign an `importance` score (1-10).
 3. Ignores `other` and automatically skips promotional or newsletter emails
    based on Gmail labels or unsubscribe headers.
-4. For leads & customers:
-   * Drafts a reply with **o3** (never sends).
-   * Runs a self-critique loop until the draft scores ≥ 8.
-   * Saves the draft to Gmail.
-   * Opens a ticket in FreeScout.
+4. Routes each message:
+   * High-importance emails open a ticket in **FreeScout** with retry logic.
+   * Lower-importance emails get a draft asking for more details.
+   * Drafts are self-critiqued until scoring ≥ 8 and then saved to Gmail.
 5. Prints a one-line log per processed email.
+6. Polls FreeScout for recent ticket updates after processing.
 
 ---
 
