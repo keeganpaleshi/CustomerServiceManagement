@@ -35,3 +35,5 @@ Edit `config.yaml` to adjust limits and model settings. Key options include:
 - `openai.draft_max_tokens` – token limit for reply generation.
 - `openai.classify_max_tokens` – token limit for the classification step.
 - `limits.max_drafts` – maximum number of drafts created per run.
+- `gmail.query` – default Gmail search query.
+- `http.timeout` – HTTP request timeout in seconds.
