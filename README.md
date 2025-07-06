@@ -26,6 +26,13 @@ python gmail_bot.py
 
 OAuth – the first run opens a browser window; token is cached in token.pickle.
 ```
+### Development
+
+Run `flake8` before committing:
+```bash
+flake8 Draft_Replies.py gmail_bot.py utils.py
+```
+
 
 ### Tweaking behavior
 
