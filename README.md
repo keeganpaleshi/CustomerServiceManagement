@@ -37,3 +37,11 @@ Edit `config.yaml` to adjust limits and model settings. Key options include:
 - `limits.max_drafts` – maximum number of drafts created per run.
 - `gmail.query` – default Gmail search query.
 - `http.timeout` – HTTP request timeout in seconds.
+
+## Development
+
+Run `flake8` before committing to check for style issues:
+
+```bash
+flake8
+```

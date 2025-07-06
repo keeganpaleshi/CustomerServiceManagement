@@ -1,49 +1,37 @@
 import os
-import pickle
 import base64
-import json
-import requests
-from email.mime.text import MIMEText
-from google.auth.transport.requests import Request
-from google_auth_oauthlib.flow import InstalledAppFlow
-from googleapiclient.discovery import build
-import yaml
 import argparse
+from email.mime.text import MIMEText
+
+from email_utils import (
+    CFG,
+    CLASSIFY_MAX_TOKENS,
+    CLASSIFY_MODEL,
+    CRITIC_THRESHOLD,
+    GMAIL_QUERY,
+    HTTP_TIMEOUT,
+    MAX_DRAFTS,
+    MAX_RETRIES,
+    OPENAI_API_KEY,
+    create_base64_message,
+    create_draft,
+    create_ticket,
+    critic_email,
+    classify_email,
+    fetch_all_unread_messages,
+    get_gmail_service,
+    is_promotional_or_spam,
+    thread_has_draft,
+)
 
 # -------------------------------------------------------
 # 1) Configuration
 # -------------------------------------------------------
-# Load YAML config
-with open(os.path.join(os.path.dirname(__file__), "config.yaml")) as f:
-    CFG = yaml.safe_load(f)
 
-# Gmail API scope
-SCOPES = CFG["gmail"]["scopes"]
-
-# Load OpenAI API key from env (never store in plain text!)
-OPENAI_API_KEY = os.getenv(CFG["openai"]["api_key_env"])
-if not OPENAI_API_KEY:
-    raise ValueError(f"Please set your {CFG['openai']['api_key_env']} environment variable.")
-
-# Default to the o3 model unless overridden in config
+# Draft generation settings specific to this script
 DRAFT_MODEL = CFG["openai"]["draft_model"]
 DRAFT_MAX_TOKENS = CFG["openai"].get("draft_max_tokens", 16384)
 DRAFT_SYSTEM_MSG = CFG["openai"].get("draft_system_message", "")
-
-# Use the same model for general OpenAI calls by default
-OPENAI_MODEL = DRAFT_MODEL
-
-# Model used when classifying incoming emails
-CLASSIFY_MODEL = CFG["openai"]["classify_model"]
-CLASSIFY_MAX_TOKENS = CFG["openai"].get("classify_max_tokens", 50)
-
-# Critic settings
-CRITIC_THRESHOLD = CFG["thresholds"]["critic_threshold"]
-MAX_RETRIES      = CFG["thresholds"]["max_retries"]
-
-MAX_DRAFTS = CFG.get("limits", {}).get("max_drafts", 100)
-GMAIL_QUERY = CFG["gmail"].get("query", "is:unread")
-HTTP_TIMEOUT = CFG.get("http", {}).get("timeout", 15)
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Draft Gmail replies")
@@ -82,203 +70,6 @@ from openai import OpenAI
 # -------------------------------------------------------
 # Module 3 - Evaluate AI Drafts
 # -------------------------------------------------------
-def critic_email(draft: str, original: str) -> dict:
-    """Self-grade a draft reply using GPT-4.1."""
-    client = OpenAI(api_key=OPENAI_API_KEY)
-    resp = client.chat.completions.create(
-        model=CLASSIFY_MODEL,
-        messages=[
-            {
-                "role": "system",
-                "content": (
-                    "Return ONLY JSON {\"score\":1-10,\"feedback\":\"...\"} "
-                    "rating on correctness, tone, length."
-                ),
-            },
-            {"role": "assistant", "content": draft},
-            {"role": "user", "content": f"Original email:\n\n{original}"},
-        ],
-    )
-    return json.loads(resp.choices[0].message.content)
-
-
-# -------------------------------------------------------
-# 2) Gmail Service Setup
-# -------------------------------------------------------
-def get_gmail_service(
-    creds_filename: str | None = None,
-    token_filename: str | None = None,
-):
-    """Authenticate with Gmail API and return a service resource.
-
-    Filenames may be supplied via arguments or will default to the values
-    specified in ``config.yaml``.
-    """
-    creds_filename = creds_filename or CFG["gmail"]["client_secret_file"]
-    token_filename = token_filename or CFG["gmail"]["token_file"]
-    creds = None
-
-    # Load token if it exists
-    if os.path.exists(token_filename):
-        with open(token_filename, "rb") as token:
-            creds = pickle.load(token)
-
-    # If no valid credentials, prompt for login
-    if not creds or not creds.valid:
-        if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
-        else:
-            flow = InstalledAppFlow.from_client_secrets_file(creds_filename, SCOPES)
-            creds = flow.run_local_server(port=0)
-        # Save the token for future runs
-        with open(token_filename, "wb") as token:
-            pickle.dump(creds, token)
-
-    # Build the Gmail service
-    service = build("gmail", "v1", credentials=creds)
-    return service
-
-
-# -------------------------------------------------------
-# 3) Fetching Unread Messages
-# -------------------------------------------------------
-def fetch_all_unread_messages(service, query: str = GMAIL_QUERY):
-    """
-    Fetch all unread messages in the Gmail inbox, handling pagination.
-    We'll then slice to only the configured number in ``main``.
-    """
-    unread_messages = []
-    page_token = None
-
-    while True:
-        response = (
-            service.users()
-            .messages()
-            .list(userId="me", q=query, pageToken=page_token)
-            .execute()
-        )
-        messages_page = response.get("messages", [])
-        if not messages_page:
-            break
-
-        unread_messages.extend(messages_page)
-        page_token = response.get("nextPageToken")
-        if not page_token:
-            break
-
-    return unread_messages
-
-
-# -------------------------------------------------------
-# 4) Email Processing Helpers
-# -------------------------------------------------------
-def get_header_value(message, header_name):
-    """
-    Extract a specific header (e.g., 'Subject', 'From') from a message detail.
-    """
-    headers = message.get("payload", {}).get("headers", [])
-    for header in headers:
-        if header.get("name", "").lower() == header_name.lower():
-            return header.get("value", "")
-    return ""
-
-
-def create_base64_message(sender, to, subject, body_text):
-    """
-    Create a MIMEText email and encode it in base64 for the Gmail API.
-    """
-    msg = MIMEText(body_text)
-    msg["to"] = to
-    msg["from"] = sender
-    msg["subject"] = subject
-
-    raw_bytes = base64.urlsafe_b64encode(msg.as_bytes())
-    return {"raw": raw_bytes.decode("utf-8")}
-
-
-def create_draft(service, user_id, message_body, thread_id=None):
-    """
-    Create and insert a draft email.
-    """
-    try:
-        body = {"message": message_body}
-        if thread_id:
-            body["message"]["threadId"] = thread_id
-
-        draft = service.users().drafts().create(userId=user_id, body=body).execute()
-        return draft
-    except Exception as error:
-        print(f"An error occurred creating the draft: {error}")
-        return None
-
-
-def thread_has_draft(service, thread_id):
-    """Return True if a Gmail thread already contains a draft."""
-    data = service.users().threads().get(userId="me", id=thread_id).execute()
-    return any(
-        "DRAFT" in (m.get("labelIds") or []) for m in data.get("messages", [])
-    )
-
-
-def create_ticket(subject: str, sender: str, body: str):
-    if TICKET_SYSTEM != "freescout":
-        return
-    url = f"{FREESCOUT_URL.rstrip('/')}/api/conversations"
-    payload = {
-        "type": "email",
-        "subject": subject or "(no subject)",
-        "customer": {"email": sender},
-        "threads": [{"type": "customer", "text": body}],
-    }
-    resp = requests.post(
-        url,
-        headers={
-            "Accept": "application/json",
-            "Content-Type": "application/json",
-            "X-FreeScout-API-Key": FREESCOUT_KEY,
-        },
-        json=payload,
-        timeout=15,
-    )
-    resp.raise_for_status()
-
-
-def is_promotional_or_spam(message, body_text: str) -> bool:
-    """Return True if the message looks like a newsletter or spam."""
-    labels = set(message.get("labelIds", []))
-    if labels & PROMO_LABELS:
-        return True
-    headers = {h.get("name", "").lower(): h.get("value", "") for h in message.get("payload", {}).get("headers", [])}
-    if "list-unsubscribe" in headers or "list-id" in headers:
-        return True
-    if "unsubscribe" in body_text.lower():
-        return True
-    return False
-
-
-def classify_email(text: str) -> dict:
-    """Classify an email and return a dict with type and importance."""
-    client = OpenAI(api_key=OPENAI_API_KEY)
-    try:
-        response = client.chat.completions.create(
-            model=CLASSIFY_MODEL,
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "Categorize the email as lead, customer, or other. Return ONLY JSON {\"type\":\"lead|customer|other\",\"importance\":1-10}. NO other text."
-                    ),
-                },
-                {"role": "user", "content": text},
-            ],
-            temperature=0,
-            max_tokens=CLASSIFY_MAX_TOKENS,
-        )
-        return json.loads(response.choices[0].message.content)
-    except Exception as e:
-        print(f"Error classifying email: {e}")
-        return {"type": "other", "importance": 0}
-
 
 # -------------------------------------------------------
 # 5) OpenAI Integration
