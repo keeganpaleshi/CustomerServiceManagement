@@ -37,3 +37,32 @@ Edit `config.yaml` to adjust limits and model settings. Key options include:
 - `limits.max_drafts` – maximum number of drafts created per run.
 - `gmail.query` – default Gmail search query.
 - `http.timeout` – HTTP request timeout in seconds.
+
+## FreeScout status updates
+
+Run the bot with `--poll-freescout` to periodically check FreeScout for recent
+conversation updates. A short summary email is sent to your own inbox after each
+poll. Use `--poll-interval` to configure how often (in seconds) the endpoint is
+queried.
+
+### Webhook alternative
+
+Instead of polling, you can point FreeScout's webhook integration at a small
+Flask app which calls `send_update_email` from `gmail_bot.py`.
+
+```python
+from flask import Flask, request
+from gmail_bot import get_gmail_service, send_update_email
+
+app = Flask(__name__)
+svc = get_gmail_service()
+
+@app.post("/freescout")
+def freescout_hook():
+    payload = request.get_json()
+    send_update_email(svc, str(payload))
+    return "", 204
+```
+
+Deploy the webhook on a server with HTTPS and set the URL in FreeScout's
+settings to have Gmail updated whenever a conversation changes.
