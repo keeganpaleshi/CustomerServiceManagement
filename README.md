@@ -7,11 +7,13 @@
 3. Ignores `other` and automatically skips promotional or newsletter emails
    based on Gmail labels or unsubscribe headers.
 4. For leads & customers:
-   * Drafts a reply with **o3** (never sends).
-   * Runs a self-critique loop until the draft scores ≥ 8.
-   * Saves the draft to Gmail.
-   * Opens a ticket in FreeScout.
-5. Prints a one-line log per processed email.
+    * Drafts a reply with **o3** (never sends).
+    * Runs a self-critique loop until the draft scores ≥ 8.
+    * Saves the draft to Gmail.
+    * Opens a ticket in FreeScout when classified as a lead or customer.
+5. For messages lacking detail or when ticket creation fails:
+    * Drafts a reply asking for additional information.
+6. Polls FreeScout for recent ticket updates and logs the status.
 
 ---
 
