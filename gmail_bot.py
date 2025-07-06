@@ -165,17 +165,28 @@ def create_ticket(subject: str, sender: str, body: str):
         "customer": {"email": sender},
         "threads": [{"type": "customer", "text": body}],
     }
-    r = requests.post(
-        url,
-        headers={
-            "Accept": "application/json",
-            "Content-Type": "application/json",
-            "X-FreeScout-API-Key": FREESCOUT_KEY,
-        },
-        json=payload,
-        timeout=15,
-    )
-    r.raise_for_status()
+    for attempt in range(MAX_RETRIES):
+        try:
+            r = requests.post(
+                url,
+                headers={
+                    "Accept": "application/json",
+                    "Content-Type": "application/json",
+                    "X-FreeScout-API-Key": FREESCOUT_KEY,
+                },
+                json=payload,
+                timeout=15,
+            )
+            if r.status_code >= 400:
+                raise requests.HTTPError(f"HTTP {r.status_code}")
+            return
+        except Exception as e:
+            if attempt == MAX_RETRIES - 1:
+                print(
+                    f"Failed to create ticket for {sender} after {MAX_RETRIES} attempts: {e}"
+                )
+            else:
+                continue
 
 
 def main():
