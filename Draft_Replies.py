@@ -2,6 +2,7 @@ import os
 import pickle
 import base64
 import json
+import requests
 from email.mime.text import MIMEText
 from google.auth.transport.requests import Request
 from google_auth_oauthlib.flow import InstalledAppFlow
@@ -49,6 +50,11 @@ def parse_args():
     parser.add_argument("--gmail-query", default=GMAIL_QUERY, help="Gmail search query")
     parser.add_argument("--timeout", type=int, default=HTTP_TIMEOUT, help="HTTP request timeout")
     return parser.parse_args()
+
+# Ticketing configuration
+TICKET_SYSTEM = CFG["ticket"]["system"]
+FREESCOUT_URL = CFG["ticket"]["freescout_url"]
+FREESCOUT_KEY = CFG["ticket"]["freescout_key"]
 
 # Labels that indicate promotional or spam content. Any message with these
 # Gmail labels will be skipped.
@@ -204,6 +210,37 @@ def create_draft(service, user_id, message_body, thread_id=None):
     except Exception as error:
         print(f"An error occurred creating the draft: {error}")
         return None
+
+
+def thread_has_draft(service, thread_id):
+    """Return True if a Gmail thread already contains a draft."""
+    data = service.users().threads().get(userId="me", id=thread_id).execute()
+    return any(
+        "DRAFT" in (m.get("labelIds") or []) for m in data.get("messages", [])
+    )
+
+
+def create_ticket(subject: str, sender: str, body: str):
+    if TICKET_SYSTEM != "freescout":
+        return
+    url = f"{FREESCOUT_URL.rstrip('/')}/api/conversations"
+    payload = {
+        "type": "email",
+        "subject": subject or "(no subject)",
+        "customer": {"email": sender},
+        "threads": [{"type": "customer", "text": body}],
+    }
+    resp = requests.post(
+        url,
+        headers={
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+            "X-FreeScout-API-Key": FREESCOUT_KEY,
+        },
+        json=payload,
+        timeout=15,
+    )
+    resp.raise_for_status()
 
 
 def is_promotional_or_spam(message, body_text: str) -> bool:
