@@ -21,6 +21,7 @@ with open(os.path.join(os.path.dirname(__file__), "config.yaml")) as f:
 SCOPES               = CFG["gmail"]["scopes"]
 GMAIL_CLIENT_SECRET  = CFG["gmail"]["client_secret_file"]
 GMAIL_TOKEN_FILE     = CFG["gmail"]["token_file"]
+GMAIL_QUERY          = CFG["gmail"].get("query", "is:unread")
 
 # OpenAI models & API key
 OPENAI_API_KEY       = os.getenv(CFG["openai"]["api_key_env"])
@@ -74,12 +75,20 @@ def get_gmail_service(creds_filename=None, token_filename=None):
     return build("gmail", "v1", credentials=creds)
 
 def fetch_all_unread_messages(service):
+    """Return a list of message refs matching the configured query."""
+    query = GMAIL_QUERY
     unread, token = [], None
     while True:
-        resp = service.users().messages().list(userId="me", q="is:unread", pageToken=token).execute()
+        resp = (
+            service.users()
+            .messages()
+            .list(userId="me", q=query, pageToken=token)
+            .execute()
+        )
         unread.extend(resp.get("messages", []))
         token = resp.get("nextPageToken")
-        if not token: break
+        if not token:
+            break
     return unread
 
 def create_base64_message(sender, to, subject, body):
