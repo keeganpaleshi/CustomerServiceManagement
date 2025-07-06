@@ -1,16 +1,33 @@
-import base64
 import argparse
-from utils import (
-    get_gmail_service, fetch_all_unread_messages, create_base64_message,
-    create_draft, thread_has_draft, is_promotional_or_spam,
-    critic_email, classify_email, create_ticket,
-    GMAIL_QUERY, HTTP_TIMEOUT, MAX_DRAFTS, CRITIC_THRESHOLD, MAX_RETRIES
-)
-
+import base64
+import json
 import time
 from datetime import datetime, timedelta
 
+import requests
+from openai import OpenAI
+
 from Draft_Replies import generate_ai_reply
+from utils import (
+    get_gmail_service,
+    fetch_all_unread_messages,
+    create_base64_message,
+    create_draft,
+    thread_has_draft,
+    is_promotional_or_spam,
+    critic_email,
+    classify_email,
+    GMAIL_QUERY,
+    HTTP_TIMEOUT,
+    MAX_DRAFTS,
+    CRITIC_THRESHOLD,
+    MAX_RETRIES,
+    OPENAI_API_KEY,
+    CLASSIFY_MODEL,
+    TICKET_SYSTEM,
+    FREESCOUT_URL,
+    FREESCOUT_KEY,
+)
 
 
 def parse_args():
@@ -41,121 +58,11 @@ PROMO_LABELS = {
     "CATEGORY_FORUMS",
 }
 
-# Ticketing
-TICKET_SYSTEM        = CFG["ticket"]["system"]
-FREESCOUT_URL        = CFG["ticket"]["freescout_url"]
-FREESCOUT_KEY        = CFG["ticket"]["freescout_key"]
+# Ticketing constants are loaded from utils
 
 if not OPENAI_API_KEY:
-    raise ValueError(f"Please set your {CFG['openai']['api_key_env']} environment variable.")
-
-def get_gmail_service(creds_filename=None, token_filename=None):
-    """Authenticate with Gmail using OAuth2.
-
-    Filenames can be provided as arguments or will default to the values
-    specified in ``config.yaml``.
-    """
-    creds_filename = creds_filename or GMAIL_CLIENT_SECRET
-    token_filename = token_filename or GMAIL_TOKEN_FILE
-    creds = None
-    if os.path.exists(token_filename):
-        with open(token_filename, "rb") as t:
-            creds = pickle.load(t)
-    if not creds or not creds.valid:
-        if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
-        else:
-            flow = InstalledAppFlow.from_client_secrets_file(creds_filename, SCOPES)
-            creds = flow.run_local_server(port=0)
-        with open(token_filename, "wb") as t:
-            pickle.dump(creds, t)
-    return build("gmail", "v1", credentials=creds)
-
-def fetch_all_unread_messages(service, query: str = GMAIL_QUERY):
-    unread, token = [], None
-    while True:
-        resp = (
-            service.users()
-            .messages()
-            .list(userId="me", q=query, pageToken=token)
-            .execute()
-        )
-        unread.extend(resp.get("messages", []))
-        token = resp.get("nextPageToken")
-        if not token:
-            break
-    return unread
-
-def create_base64_message(sender, to, subject, body):
-    from email.mime.text import MIMEText
-    msg = MIMEText(body)
-    msg["to"], msg["from"], msg["subject"] = to, sender, subject
-    return {"raw": base64.urlsafe_b64encode(msg.as_bytes()).decode()}
-
-def create_draft(service, user_id, msg_body, thread_id=None):
-    data = {"message": msg_body}
-    if thread_id: data["message"]["threadId"] = thread_id
-    return service.users().drafts().create(userId=user_id, body=data).execute()
-
-def thread_has_draft(service, thread_id):
-    data = service.users().threads().get(userId="me", id=thread_id).execute()
-    return any(
-        "DRAFT" in (m.get("labelIds") or []) for m in data.get("messages", [])
-    )
-
-def is_promotional_or_spam(message, body_text: str) -> bool:
-    """Return True if the message looks like a newsletter or spam."""
-    labels = set(message.get("labelIds", []))
-    if labels & PROMO_LABELS:
-        return True
-    headers = {h.get("name", "").lower(): h.get("value", "") for h in message.get("payload", {}).get("headers", [])}
-    if "list-unsubscribe" in headers or "list-id" in headers:
-        return True
-    if "unsubscribe" in body_text.lower():
-        return True
-    return False
-
-def critic_email(draft: str, original: str) -> dict:
-    """Self-grade a draft reply using GPT-4.1."""
-    client = OpenAI(api_key=OPENAI_API_KEY)
-    resp = client.chat.completions.create(
-        model=CLASSIFY_MODEL,
-        messages=[
-            {
-                "role": "system",
-                "content": (
-                    "Return ONLY JSON {\"score\":1-10,\"feedback\":\"...\"} "
-                    "rating on correctness, tone, length."
-                ),
-            },
-            {"role": "assistant", "content": draft},
-            {"role": "user", "content": f"Original email:\n\n{original}"},
-        ],
-    )
-    return json.loads(resp.choices[0].message.content)
-
-def classify_email(text: str) -> dict:
-    """Classify an email and return a dict with type and importance."""
-    client = OpenAI(api_key=OPENAI_API_KEY)
-    try:
-        response = client.chat.completions.create(
-            model=CLASSIFY_MODEL,
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "Categorize the email as lead, customer, or other. Return ONLY JSON {\"type\":\"lead|customer|other\",\"importance\":1-10}. NO other text."
-                    ),
-                },
-                {"role": "user", "content": text},
-            ],
-            temperature=0,
-            max_tokens=CLASSIFY_MAX_TOKENS,
-        )
-        return json.loads(response.choices[0].message.content)
-    except Exception as e:
-        print(f"Error classifying email: {e}")
-        return {"type": "other", "importance": 0}
+    raise ValueError(
+        "Please set your OPENAI_API_KEY environment variable.")
 
 
 def route_email(
@@ -217,7 +124,6 @@ def route_email(
         create_draft(service, "me", msg, thread_id=thread_id)
 
 
-
 def create_ticket(subject: str, sender: str, body: str, timeout: int = HTTP_TIMEOUT, retries: int = 3):
     """Create a ticket in FreeScout with basic retry logic."""
     if TICKET_SYSTEM != "freescout":
@@ -252,31 +158,6 @@ def create_ticket(subject: str, sender: str, body: str, timeout: int = HTTP_TIME
             sleep_time = 2 ** (attempt - 1)
             print(f"Ticket creation error: {e}. Retrying in {sleep_time}s...")
             time.sleep(sleep_time)
-
-
-def route_email(service, thread_id: str, subject: str, sender: str, body: str, snippet: str, timeout: int = HTTP_TIMEOUT):
-    """Classify an email and either open a ticket or create a draft."""
-    cls = classify_email(f"Subject:{subject}\n\n{body}")
-    email_type = cls.get("type", "other")
-    importance = cls.get("importance", 0)
-
-    if email_type == "other":
-        return "skipped", importance
-
-    if importance >= 8:
-        created = create_ticket(subject, sender, body, timeout=timeout)
-        if created:
-            return "ticket", importance
-
-    if not thread_has_draft(service, thread_id):
-        request_text = (
-            "Thanks for reaching out. Could you provide more details about your request so we can assist?"
-        )
-        draft_msg = create_base64_message("me", sender, f"Re: {subject}", request_text)
-        create_draft(service, "me", draft_msg, thread_id=thread_id)
-        return "draft", importance
-
-    return "none", importance
 
 
 def poll_ticket_updates(limit: int = 10, timeout: int = HTTP_TIMEOUT):
@@ -341,12 +222,12 @@ def send_update_email(service, summary: str):
 
 def poll_freescout_updates(service, interval: int = 300, timeout: int = HTTP_TIMEOUT):
     """Continuously poll FreeScout and email a summary of new conversations."""
-    label_id = ensure_label(service, "FreeScout Updates")
+    ensure_label(service, "FreeScout Updates")
     since = datetime.utcnow() - timedelta(minutes=5)
     while True:
         convs = fetch_recent_conversations(since.isoformat(), timeout=timeout)
         if convs:
-            lines = [f"#{c.get('id')} {c.get('subject','')[:50]} [{c.get('status')}]" for c in convs]
+            lines = [f"#{c.get('id')} {c.get('subject', '')[:50]} [{c.get('status')}]" for c in convs]
             summary = "\n".join(lines)
             send_update_email(service, summary)
         since = datetime.utcnow()
@@ -382,14 +263,9 @@ def main():
             print(f"{ref['id'][:8]}… skipped promotional/spam")
             continue
 
-        action, importance = route_email(
-            svc, thread, subject, sender, body, snippet, timeout=args.timeout
-        )
-        print(f"{ref['id'][:8]}… {action:<6} imp={importance}")
-
         # ---- classification ----
         cls = classify_email(f"Subject:{subject}\n\n{body}")
-        email_type, importance = cls["type"], cls["importance"]
+        email_type = cls["type"]
 
         # skip others
         if email_type == "other":
