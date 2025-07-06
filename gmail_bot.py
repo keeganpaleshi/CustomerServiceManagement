@@ -12,6 +12,7 @@ import pickle, base64
 from openai import OpenAI
 from Draft_Replies import generate_ai_reply
 import yaml
+import time
 
 # Load YAML config
 with open(os.path.join(os.path.dirname(__file__), "config.yaml")) as f:
@@ -154,10 +155,36 @@ def classify_email(text: str) -> dict:
         return {"type": "other", "importance": 0}
 
 
-
-def create_ticket(subject: str, sender: str, body: str):
+def poll_ticket_updates():
+    """Poll FreeScout for recent ticket updates and log basic info."""
     if TICKET_SYSTEM != "freescout":
         return
+
+    url = f"{FREESCOUT_URL.rstrip('/')}/api/conversations?modified=1h"
+    try:
+        resp = requests.get(
+            url,
+            headers={
+                "Accept": "application/json",
+                "X-FreeScout-API-Key": FREESCOUT_KEY,
+            },
+            timeout=15,
+        )
+        resp.raise_for_status()
+        for conv in resp.json().get("data", []):
+            num = conv.get("number") or conv.get("id")
+            status = conv.get("status")
+            print(f"Ticket {num}: status={status}")
+    except Exception as e:
+        print(f"Error polling ticket updates: {e}")
+
+
+
+def create_ticket(subject: str, sender: str, body: str, retries: int = 3) -> str | None:
+    """Create a ticket in FreeScout and return its ID."""
+    if TICKET_SYSTEM != "freescout":
+        return None
+
     url = f"{FREESCOUT_URL.rstrip('/')}/api/conversations"
     payload = {
         "type": "email",
@@ -165,22 +192,76 @@ def create_ticket(subject: str, sender: str, body: str):
         "customer": {"email": sender},
         "threads": [{"type": "customer", "text": body}],
     }
-    r = requests.post(
-        url,
-        headers={
-            "Accept": "application/json",
-            "Content-Type": "application/json",
-            "X-FreeScout-API-Key": FREESCOUT_KEY,
-        },
-        json=payload,
-        timeout=15,
-    )
-    r.raise_for_status()
+
+    for attempt in range(retries):
+        try:
+            resp = requests.post(
+                url,
+                headers={
+                    "Accept": "application/json",
+                    "Content-Type": "application/json",
+                    "X-FreeScout-API-Key": FREESCOUT_KEY,
+                },
+                json=payload,
+                timeout=15,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            return str(data.get("id") or data.get("conversation", {}).get("id"))
+        except Exception as e:
+            if attempt == retries - 1:
+                print(f"Failed to create ticket: {e}")
+                return None
+            wait = 2 ** attempt
+            print(f"Error creating ticket (attempt {attempt + 1}): {e}; retrying in {wait}s")
+            time.sleep(wait)
+
+    return None
+
+
+def route_email(service, msg):
+    """Classify an email then create a ticket or info-request draft."""
+    subject = next((h["value"] for h in msg["payload"]["headers"] if h["name"] == "Subject"), "")
+    sender = next((h["value"] for h in msg["payload"]["headers"] if h["name"] == "From"), "")
+    thread = msg["threadId"]
+
+    part = msg["payload"]["parts"][0]["body"]["data"]
+    body = base64.urlsafe_b64decode(part).decode("utf-8", "ignore")
+    snippet = msg.get("snippet", "")
+
+    if is_promotional_or_spam(msg, body):
+        print(f"{msg['id'][:8]}… skipped promotional/spam")
+        return
+
+    cls = classify_email(f"Subject:{subject}\n\n{body}")
+    email_type = cls["type"]
+    importance = cls["importance"]
+
+    if email_type in ("lead", "customer"):
+        ticket_id = create_ticket(subject, sender, body)
+        if ticket_id:
+            print(f"{msg['id'][:8]}… ticket {ticket_id} created ({email_type}, imp={importance})")
+            return
+        else:
+            print(f"{msg['id'][:8]}… ticket creation failed; drafting reply")
+
+    # For other emails or failed ticket creation, draft a reply asking for more info
+    if not thread_has_draft(service, thread):
+        draft_text = generate_ai_reply(
+            subject,
+            sender,
+            "Ask the sender for more information so we can assist further.",
+            email_type,
+        )
+        msg_draft = create_base64_message("me", sender, f"Re: {subject}", draft_text)
+        create_draft(service, "me", msg_draft, thread_id=thread)
+    print(f"{msg['id'][:8]}… draft info-request imp={importance}")
 
 
 def main():
 
     svc = get_gmail_service()
+    poll_ticket_updates()
     for ref in fetch_all_unread_messages(svc)[:MAX_DRAFTS]:
         msg = (
             svc.users()
@@ -188,56 +269,7 @@ def main():
             .get(userId="me", id=ref["id"], format="full")
             .execute()
         )
-        subject = next(
-            (h["value"] for h in msg["payload"]["headers"] if h["name"] == "Subject"),
-            "",
-        )
-        sender = next(
-            (h["value"] for h in msg["payload"]["headers"] if h["name"] == "From"),
-            "",
-        )
-        thread = msg["threadId"]
-
-        # decode first text/plain part
-        part = msg["payload"]["parts"][0]["body"]["data"]
-        body = base64.urlsafe_b64decode(part).decode("utf-8", "ignore")
-        snippet = msg.get("snippet", "")
-
-        # Skip obvious newsletters or spam before any AI calls
-        if is_promotional_or_spam(msg, body):
-            print(f"{ref['id'][:8]}… skipped promotional/spam")
-            continue
-
-        # ---- classification ----
-        cls = classify_email(f"Subject:{subject}\n\n{body}")
-        email_type, importance = cls["type"], cls["importance"]
-
-        # skip others
-        if email_type == "other":
-            continue
-
-        # ---- draft creation with critic ----
-        if not thread_has_draft(svc, thread):
-            draft_text = generate_ai_reply(subject, sender, snippet, email_type)
-            for _ in range(MAX_RETRIES):
-                rating = critic_email(draft_text, body)
-                if rating["score"] >= CRITIC_THRESHOLD:
-                    break
-                draft_text = generate_ai_reply(
-                    subject,
-                    sender,
-                    f"{snippet}\n\nCritic feedback: {rating['feedback']}",
-                    email_type,
-                )
-            msg_draft = create_base64_message(
-                "me", sender, f"Re: {subject}", draft_text
-            )
-            create_draft(svc, "me", msg_draft, thread_id=thread)
-
-        # ---- ticket for lead/customer ----
-        create_ticket(subject, sender, body)
-
-        print(f"{ref['id'][:8]}… {email_type:<8} imp={importance}")
+        route_email(svc, msg)
 
 
 if __name__ == "__main__":
