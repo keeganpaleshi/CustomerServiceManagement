@@ -59,6 +59,9 @@ PROMO_LABELS = {
     "CATEGORY_FORUMS",
 }
 
+# Label used to mark messages that already have a ticket to avoid duplicates
+TICKET_LABEL_NAME = "Ticketed"
+
 # Ticketing constants are loaded from utils
 
 if not OPENAI_API_KEY:
@@ -74,13 +77,14 @@ def route_email(
     thread_id: str,
     cls: dict,
     has_existing_draft: bool,
+    ticket_label_id: str | None,
     timeout: int = HTTP_TIMEOUT,
 ) -> str:
     """Route an email based on priority and information level.
 
     Returns an action string:
     - "ignored" if the email type is not handled
-    - "ticketed" if a ticket was created
+    - "ticketed" if a ticket was created (and labeled)
     - "followup_draft" if a simple follow-up draft was created
     - "no_action" if the message should proceed to full draft creation
     """
@@ -116,7 +120,11 @@ def route_email(
         print(f"Priority check failed: {e}")
 
     if high_priority or needs_info:
-        create_ticket(subject, sender, body, timeout=timeout)
+        ticket = create_ticket(subject, sender, body, timeout=timeout)
+        if ticket_label_id and ticket is not None:
+            service.users().threads().modify(
+                userId="me", id=thread_id, body={"addLabelIds": [ticket_label_id]}
+            ).execute()
         return "ticketed"
 
     # Otherwise ask for more details if we haven't drafted already
@@ -260,6 +268,9 @@ def main():
     args = parse_args()
 
     svc = get_gmail_service()
+    ticket_label_id = None
+    if TICKET_SYSTEM == "freescout":
+        ticket_label_id = ensure_label(svc, TICKET_LABEL_NAME)
     for ref in fetch_all_unread_messages(svc, query=args.gmail_query)[:MAX_DRAFTS]:
         msg = (
             svc.users()
@@ -277,6 +288,10 @@ def main():
         )
         sender = parseaddr(raw_sender)[1] or raw_sender
         thread = msg["threadId"]
+
+        if ticket_label_id and ticket_label_id in set(msg.get("labelIds", [])):
+            print(f"{ref['id'][:8]}… skipped (ticket already created)")
+            continue
 
         def decode_base64url(data: str) -> str:
             """Decode base64url strings that may be missing padding."""
@@ -340,6 +355,7 @@ def main():
             thread,
             cls,
             has_existing_draft=has_draft,
+            ticket_label_id=ticket_label_id,
             timeout=args.timeout,
         )
 
