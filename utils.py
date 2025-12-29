@@ -37,8 +37,13 @@ PROMO_LABELS = {
 }
 
 TICKET_SYSTEM = CFG["ticket"]["system"]
-FREESCOUT_URL = CFG["ticket"]["freescout_url"]
-FREESCOUT_KEY = CFG["ticket"]["freescout_key"]
+FREESCOUT_URL = os.getenv("FREESCOUT_URL") or CFG["ticket"].get("freescout_url", "")
+FREESCOUT_KEY = os.getenv("FREESCOUT_KEY") or CFG["ticket"].get("freescout_key", "")
+
+if TICKET_SYSTEM == "freescout" and (not FREESCOUT_URL or not FREESCOUT_KEY):
+    raise ValueError(
+        "Please set FREESCOUT_URL and FREESCOUT_KEY via environment variables or config.yaml."
+    )
 
 
 # ----- Gmail helpers -----

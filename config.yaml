@@ -40,8 +40,8 @@ limits:
 
 ticket:
   system:         "freescout"        # or "helpscout", "freshdesk", etc.
-  freescout_url:  ""                 # fill in your desk URL
-  freescout_key:  ""                 # or set FREESCOUT_KEY env var
+  freescout_url:  ""                 # fill in your desk URL or set FREESCOUT_URL env var
+  freescout_key:  ""                 # fill in your API key or set FREESCOUT_KEY env var
 
 gmail:
   scopes:
