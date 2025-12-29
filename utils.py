@@ -1,57 +1,104 @@
-import os
-import json
 import base64
+import json
+import os
 import pickle
+import time
+from dataclasses import dataclass
+from functools import lru_cache
 from email.mime.text import MIMEText
+from pathlib import Path
+from typing import Optional, Sequence
 
 import requests
 import yaml
+from google.auth.transport.requests import Request
 from googleapiclient.discovery import build
 from google_auth_oauthlib.flow import InstalledAppFlow
-from google.auth.transport.requests import Request
 from openai import OpenAI
 
 
-with open(os.path.join(os.path.dirname(__file__), "config.yaml")) as f:
-    CFG = yaml.safe_load(f)
+@dataclass
+class RuntimeSettings:
+    scopes: Sequence[str]
+    client_secret_file: str
+    gmail_query: str
+    max_drafts: int
+    critic_threshold: int
+    max_retries: int
+    token_file: str
+    http_timeout: int
+    openai_api_key: Optional[str]
+    openai_api_key_env: str
+    classify_model: str
+    classify_max_tokens: int
+    ticket_system: str
+    freescout_url: str
+    freescout_key: str
+    draft_model: str
+    draft_max_tokens: int
+    draft_system_message: str
 
-SCOPES = CFG["gmail"]["scopes"]
-GMAIL_CLIENT_SECRET = CFG["gmail"]["client_secret_file"]
-GMAIL_QUERY = CFG["gmail"].get("query", "is:unread")
-MAX_DRAFTS = CFG.get("limits", {}).get("max_drafts", 100)
-CRITIC_THRESHOLD = CFG["thresholds"]["critic_threshold"]
-MAX_RETRIES = CFG["thresholds"]["max_retries"]
-GMAIL_TOKEN_FILE = CFG["gmail"]["token_file"]
-HTTP_TIMEOUT = CFG.get("http", {}).get("timeout", 15)
 
-OPENAI_API_KEY = os.getenv(CFG["openai"]["api_key_env"])
-CLASSIFY_MODEL = CFG["openai"]["classify_model"]
-CLASSIFY_MAX_TOKENS = CFG["openai"].get("classify_max_tokens", 50)
+@lru_cache(maxsize=1)
+def load_config() -> dict:
+    cfg_path = Path(__file__).with_name("config.yaml")
+    with cfg_path.open() as f:
+        return yaml.safe_load(f)
 
-PROMO_LABELS = {
-    "SPAM",
-    "CATEGORY_PROMOTIONS",
-    "CATEGORY_SOCIAL",
-    "CATEGORY_UPDATES",
-    "CATEGORY_FORUMS",
-}
 
-TICKET_SYSTEM = CFG["ticket"]["system"]
-FREESCOUT_URL = os.getenv("FREESCOUT_URL") or CFG["ticket"].get("freescout_url", "")
-FREESCOUT_KEY = os.getenv("FREESCOUT_KEY") or CFG["ticket"].get("freescout_key", "")
+@lru_cache(maxsize=1)
+def get_settings() -> RuntimeSettings:
+    cfg = load_config()
+    ticket_cfg = cfg.get("ticket", {})
+    openai_cfg = cfg.get("openai", {})
+    gmail_cfg = cfg.get("gmail", {})
+    limits = cfg.get("limits", {})
+    thresholds = cfg.get("thresholds", {})
 
-if TICKET_SYSTEM == "freescout" and (not FREESCOUT_URL or not FREESCOUT_KEY):
-    raise ValueError(
-        "Please set FREESCOUT_URL and FREESCOUT_KEY via environment variables or config.yaml."
+    return RuntimeSettings(
+        scopes=gmail_cfg.get("scopes", []),
+        client_secret_file=gmail_cfg.get("client_secret_file", ""),
+        gmail_query=gmail_cfg.get("query", "is:unread"),
+        max_drafts=limits.get("max_drafts", 100),
+        critic_threshold=thresholds.get("critic_threshold", 7),
+        max_retries=thresholds.get("max_retries", 3),
+        token_file=gmail_cfg.get("token_file", "token.json"),
+        http_timeout=cfg.get("http", {}).get("timeout", 15),
+        openai_api_key=os.getenv(openai_cfg.get("api_key_env", "OPENAI_API_KEY")),
+        openai_api_key_env=openai_cfg.get("api_key_env", "OPENAI_API_KEY"),
+        classify_model=openai_cfg.get("classify_model", "gpt-4.1-mini"),
+        classify_max_tokens=openai_cfg.get("classify_max_tokens", 50),
+        ticket_system=ticket_cfg.get("system", ""),
+        freescout_url=os.getenv("FREESCOUT_URL")
+        or ticket_cfg.get("freescout_url", ""),
+        freescout_key=os.getenv("FREESCOUT_KEY")
+        or ticket_cfg.get("freescout_key", ""),
+        draft_model=openai_cfg.get("draft_model", "gpt-4.1"),
+        draft_max_tokens=openai_cfg.get("draft_max_tokens", 16384),
+        draft_system_message=openai_cfg.get("draft_system_message", ""),
     )
 
 
 # ----- Gmail helpers -----
 
-def get_gmail_service(creds_filename=None, token_filename=None):
+
+def _require_openai_key(settings: Optional[RuntimeSettings] = None) -> str:
+    settings = settings or get_settings()
+    if not settings.openai_api_key:
+        raise ValueError(
+            f"Please set your {settings.openai_api_key_env} environment variable."
+        )
+    return settings.openai_api_key
+
+
+def get_gmail_service(
+    creds_filename: Optional[str] = None, token_filename: Optional[str] = None
+):
     """Return an authenticated Gmail service instance."""
-    creds_filename = creds_filename or GMAIL_CLIENT_SECRET
-    token_filename = token_filename or GMAIL_TOKEN_FILE
+
+    settings = get_settings()
+    creds_filename = creds_filename or settings.client_secret_file
+    token_filename = token_filename or settings.token_file
     creds = None
     if os.path.exists(token_filename):
         with open(token_filename, "rb") as t:
@@ -60,7 +107,9 @@ def get_gmail_service(creds_filename=None, token_filename=None):
         if creds and creds.expired and creds.refresh_token:
             creds.refresh(Request())
         else:
-            flow = InstalledAppFlow.from_client_secrets_file(creds_filename, SCOPES)
+            flow = InstalledAppFlow.from_client_secrets_file(
+                creds_filename, settings.scopes
+            )
             creds = flow.run_local_server(port=0)
         with open(token_filename, "wb") as t:
             pickle.dump(creds, t)
@@ -102,8 +151,18 @@ def thread_has_draft(service, thread_id):
 
 
 def is_promotional_or_spam(message, body_text):
+    settings = get_settings()
+
     labels = set(message.get("labelIds", []))
-    if labels & PROMO_LABELS:
+    promo_labels = {
+        "SPAM",
+        "CATEGORY_PROMOTIONS",
+        "CATEGORY_SOCIAL",
+        "CATEGORY_UPDATES",
+        "CATEGORY_FORUMS",
+    }
+
+    if labels & promo_labels:
         return True
     headers = {
         h.get("name", "").lower(): h.get("value", "")
@@ -116,11 +175,13 @@ def is_promotional_or_spam(message, body_text):
     return False
 
 
-def critic_email(draft, original):
+def critic_email(draft, original, settings: Optional[RuntimeSettings] = None):
     """Self-grade a draft reply using GPT-4.1."""
-    client = OpenAI(api_key=OPENAI_API_KEY)
+
+    settings = settings or get_settings()
+    client = OpenAI(api_key=_require_openai_key(settings))
     resp = client.chat.completions.create(
-        model=CLASSIFY_MODEL,
+        model=settings.classify_model,
         messages=[
             {
                 "role": "system",
@@ -135,12 +196,14 @@ def critic_email(draft, original):
     return json.loads(resp.choices[0].message.content)
 
 
-def classify_email(text):
+def classify_email(text, settings: Optional[RuntimeSettings] = None):
     """Classify an email and return a dict with type and importance."""
-    client = OpenAI(api_key=OPENAI_API_KEY)
+
+    settings = settings or get_settings()
+    client = OpenAI(api_key=_require_openai_key(settings))
     try:
         resp = client.chat.completions.create(
-            model=CLASSIFY_MODEL,
+            model=settings.classify_model,
             messages=[
                 {
                     "role": "system",
@@ -151,7 +214,7 @@ def classify_email(text):
                 {"role": "user", "content": text},
             ],
             temperature=0,
-            max_tokens=CLASSIFY_MAX_TOKENS,
+            max_tokens=settings.classify_max_tokens,
         )
         return json.loads(resp.choices[0].message.content)
     except Exception as e:
@@ -159,24 +222,51 @@ def classify_email(text):
         return {"type": "other", "importance": 0}
 
 
-def create_ticket(subject, sender, body, timeout=HTTP_TIMEOUT):
-    if TICKET_SYSTEM != "freescout":
+def create_ticket(
+    subject,
+    sender,
+    body,
+    timeout: Optional[int] = None,
+    retries: Optional[int] = None,
+    settings: Optional[RuntimeSettings] = None,
+):
+    settings = settings or get_settings()
+    if settings.ticket_system != "freescout":
         return
-    url = f"{FREESCOUT_URL.rstrip('/')}/api/conversations"
+
+    if not settings.freescout_url or not settings.freescout_key:
+        raise ValueError(
+            "Please set FREESCOUT_URL and FREESCOUT_KEY via environment variables or config.yaml."
+        )
+
+    effective_timeout = timeout if timeout is not None else settings.http_timeout
+    attempts = retries if retries is not None else max(1, settings.max_retries)
+
+    url = f"{settings.freescout_url.rstrip('/')}/api/conversations"
     payload = {
         "type": "email",
         "subject": subject or "(no subject)",
         "customer": {"email": sender},
         "threads": [{"type": "customer", "text": body}],
     }
-    r = requests.post(
-        url,
-        headers={
-            "Accept": "application/json",
-            "Content-Type": "application/json",
-            "X-FreeScout-API-Key": FREESCOUT_KEY,
-        },
-        json=payload,
-        timeout=timeout,
-    )
-    r.raise_for_status()
+
+    for attempt in range(1, attempts + 1):
+        try:
+            resp = requests.post(
+                url,
+                headers={
+                    "Accept": "application/json",
+                    "Content-Type": "application/json",
+                    "X-FreeScout-API-Key": settings.freescout_key,
+                },
+                json=payload,
+                timeout=effective_timeout,
+            )
+            resp.raise_for_status()
+            return resp.json()
+        except requests.RequestException as exc:
+            if attempt == attempts:
+                raise
+            backoff = 2 ** (attempt - 1)
+            print(f"Ticket creation error: {exc}. Retrying in {backoff}s...")
+            time.sleep(backoff)

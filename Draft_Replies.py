@@ -1,96 +1,45 @@
-from openai import OpenAI
-import os
-import base64
-import yaml
 import argparse
+import base64
+from typing import Optional
+
+from openai import OpenAI
+
 from utils import (
-    get_gmail_service, fetch_all_unread_messages, create_base64_message,
-    create_draft, thread_has_draft, is_promotional_or_spam,
-    critic_email, classify_email, create_ticket
+    classify_email,
+    create_base64_message,
+    create_draft,
+    create_ticket,
+    critic_email,
+    fetch_all_unread_messages,
+    get_gmail_service,
+    get_settings,
+    is_promotional_or_spam,
+    thread_has_draft,
 )
 
+
 # -------------------------------------------------------
-# 1) Configuration
+# Configuration helpers
 # -------------------------------------------------------
-# Load YAML config
-with open(os.path.join(os.path.dirname(__file__), "config.yaml")) as f:
-    CFG = yaml.safe_load(f)
 
-# Gmail API scope
-SCOPES = CFG["gmail"]["scopes"]
-
-# Load OpenAI API key from env (never store in plain text!)
-OPENAI_API_KEY = os.getenv(CFG["openai"]["api_key_env"])
-if not OPENAI_API_KEY:
-    raise ValueError(
-        f"Please set your {CFG['openai']['api_key_env']} environment variable.")
-
-# Default to the o3 model unless overridden in config
-DRAFT_MODEL = CFG["openai"]["draft_model"]
-DRAFT_MAX_TOKENS = CFG["openai"].get("draft_max_tokens", 16384)
-DRAFT_SYSTEM_MSG = CFG["openai"].get("draft_system_message", "")
-
-# Use the same model for general OpenAI calls by default
-OPENAI_MODEL = DRAFT_MODEL
-
-# Model used when classifying incoming emails
-CLASSIFY_MODEL = CFG["openai"]["classify_model"]
-CLASSIFY_MAX_TOKENS = CFG["openai"].get("classify_max_tokens", 50)
-
-# Critic settings
-CRITIC_THRESHOLD = CFG["thresholds"]["critic_threshold"]
-MAX_RETRIES = CFG["thresholds"]["max_retries"]
-
-MAX_DRAFTS = CFG.get("limits", {}).get("max_drafts", 100)
-GMAIL_QUERY = CFG["gmail"].get("query", "is:unread")
-HTTP_TIMEOUT = CFG.get("http", {}).get("timeout", 15)
-
-
-def parse_args():
+def parse_args(settings):
     parser = argparse.ArgumentParser(description="Draft Gmail replies")
-    parser.add_argument("--gmail-query", default=GMAIL_QUERY,
-                        help="Gmail search query")
-    parser.add_argument("--timeout", type=int,
-                        default=HTTP_TIMEOUT, help="HTTP request timeout")
+    parser.add_argument(
+        "--gmail-query", default=settings.gmail_query, help="Gmail search query"
+    )
+    parser.add_argument(
+        "--timeout",
+        type=int,
+        default=settings.http_timeout,
+        help="HTTP request timeout",
+    )
     return parser.parse_args()
 
 
-# Ticketing configuration
-TICKET_SYSTEM = CFG["ticket"]["system"]
-FREESCOUT_URL = CFG["ticket"]["freescout_url"]
-FREESCOUT_KEY = CFG["ticket"]["freescout_key"]
-
-# Labels that indicate promotional or spam content. Any message with these
-# Gmail labels will be skipped.
-PROMO_LABELS = {
-    "SPAM",
-    "CATEGORY_PROMOTIONS",
-    "CATEGORY_SOCIAL",
-    "CATEGORY_UPDATES",
-    "CATEGORY_FORUMS",
-}
-
-
-# We'll use the new v1.0.0+ style:
-
-
 # -------------------------------------------------------
-# Module 1 - Classify incoming email
+# Email helpers
 # -------------------------------------------------------
 
-
-# The classify_email function is defined later with error handling.
-
-
-# -------------------------------------------------------
-# Module 3 - Evaluate AI Drafts
-# -------------------------------------------------------
-# 2) Gmail Service Setup
-# -------------------------------------------------------
-# 3) Fetching Unread Messages
-# -------------------------------------------------------
-# 4) Email Processing Helpers
-# -------------------------------------------------------
 def get_header_value(message, header_name):
     """
     Extract a specific header (e.g., 'Subject', 'From') from a message detail.
@@ -100,18 +49,23 @@ def get_header_value(message, header_name):
         if header.get("name", "").lower() == header_name.lower():
             return header.get("value", "")
     return ""
-# 5) OpenAI Integration
 
 
 # -------------------------------------------------------
-def generate_ai_reply(subject, sender, snippet_or_body, email_type):
-    """
-    Generate a draft reply using OpenAI's new library (>=1.0.0).
-    """
-    # Create a client instance with your API key
-    client = OpenAI(api_key=OPENAI_API_KEY)
+# OpenAI Integration
+# -------------------------------------------------------
 
-    # Example prompt; tailor as needed
+def generate_ai_reply(subject, sender, snippet_or_body, email_type, settings=None):
+    """Generate a draft reply using OpenAI's new library (>=1.0.0)."""
+
+    settings = settings or get_settings()
+    if not settings.openai_api_key:
+        raise ValueError(
+            f"Please set your {settings.openai_api_key_env} environment variable."
+        )
+
+    client = OpenAI(api_key=settings.openai_api_key)
+
     instructions = (
         f"[Email type: {email_type}]\n\n"
         "You are an AI email assistant. The user received an email.\n"
@@ -122,15 +76,14 @@ def generate_ai_reply(subject, sender, snippet_or_body, email_type):
     )
     try:
         response = client.chat.completions.create(
-            model=DRAFT_MODEL,
+            model=settings.draft_model,
             messages=[
-                {"role": "system", "content": DRAFT_SYSTEM_MSG},
+                {"role": "system", "content": settings.draft_system_message},
                 {"role": "user", "content": instructions},
             ],
-            max_tokens=DRAFT_MAX_TOKENS,
+            max_tokens=settings.draft_max_tokens,
             temperature=0.7,
         )
-        # Extract the actual reply text
         return response.choices[0].message.content.strip()
 
     except Exception as e:
@@ -144,10 +97,12 @@ def generate_ai_reply(subject, sender, snippet_or_body, email_type):
 
 
 # -------------------------------------------------------
-# 6) Main Flow
+# Main Flow
 # -------------------------------------------------------
+
 def main():
-    args = parse_args()
+    settings = get_settings()
+    args = parse_args(settings)
     """
     1) Authenticate & build Gmail service.
     2) Fetch unread messages & limit to the configured amount.
@@ -159,18 +114,15 @@ def main():
     service = get_gmail_service()
 
     # Fetch all unread, then limit for "most recent" processing
-    unread_messages = fetch_all_unread_messages(
-        service, query=args.gmail_query)
+    unread_messages = fetch_all_unread_messages(service, query=args.gmail_query)
     if not unread_messages:
         print("No unread messages found.")
         return
 
-    # We assume the API returns them from newest to oldest, but that can vary.
-    # If you want the strictly newest ``MAX_DRAFTS``, you may want to reverse
-    # or sort by ``internalDate``.
-    unread_messages = unread_messages[:MAX_DRAFTS]
+    unread_messages = unread_messages[: settings.max_drafts]
     print(
-        f"Fetched {len(unread_messages)} unread messages (limited to {MAX_DRAFTS}).")
+        f"Fetched {len(unread_messages)} unread messages (limited to {settings.max_drafts})."
+    )
 
     # Process each unread message
     for msg_ref in unread_messages:
@@ -201,20 +153,22 @@ def main():
                     data = part.get("body", {}).get("data", "")
                     if data:
                         body_txt = base64.urlsafe_b64decode(
-                            data.encode("utf-8")).decode("utf-8")
+                            data.encode("utf-8")
+                        ).decode("utf-8")
                         break
         else:
             data = payload.get("body", {}).get("data", "")
             if data:
-                body_txt = base64.urlsafe_b64decode(
-                    data.encode("utf-8")).decode("utf-8")
+                body_txt = base64.urlsafe_b64decode(data.encode("utf-8")).decode(
+                    "utf-8"
+                )
 
         # Skip newsletters or spam before using any AI models
         if is_promotional_or_spam(msg_detail, body_txt):
             print(f"{msg_id[:8]}… skipped promotional/spam")
             continue
 
-        cls = classify_email(f"Subject:{subject}\n\n{body_txt}")
+        cls = classify_email(f"Subject:{subject}\n\n{body_txt}", settings=settings)
         email_type = cls["type"]
         importance = cls["importance"]
         if email_type == "other":
@@ -231,22 +185,26 @@ def main():
         # 2) If not, generate a new draft
         reply_subject = f"Re: {subject}" if subject else "Re: (no subject)"
         draft_body_text = generate_ai_reply(
-            subject, sender, snippet, email_type)
+            subject, sender, snippet, email_type, settings=settings
+        )
 
         # Self-grade the AI-generated reply to ensure quality
         critique = critic_email(
             draft_body_text,
             f"Subject:{subject}\n\n{body_txt}",
+            settings=settings,
         )
         score = critique.get("score", 0)
-        if score < CRITIC_THRESHOLD:
+        if score < settings.critic_threshold:
             print(
-                f"Draft for message {msg_id} scored {score} (<{CRITIC_THRESHOLD}). Creating ticket."
+                f"Draft for message {msg_id} scored {score} (<{settings.critic_threshold}). Creating ticket."
             )
-            create_ticket(subject, sender, body_txt, timeout=args.timeout)
+            create_ticket(
+                subject, sender, body_txt, timeout=args.timeout, settings=settings
+            )
             continue
         else:
-            print(f"Draft score {score} >= {CRITIC_THRESHOLD}; saving draft.")
+            print(f"Draft score {score} >= {settings.critic_threshold}; saving draft.")
 
         draft_message = create_base64_message(
             "me", sender, reply_subject, draft_body_text

@@ -4,37 +4,37 @@ import json
 import time
 from datetime import datetime, timedelta
 from email.utils import parseaddr
+from typing import Dict, Optional
 
 import requests
 from openai import OpenAI
 
 from Draft_Replies import generate_ai_reply
 from utils import (
-    get_gmail_service,
-    fetch_all_unread_messages,
+    classify_email,
     create_base64_message,
     create_draft,
-    thread_has_draft,
-    is_promotional_or_spam,
+    create_ticket,
     critic_email,
-    classify_email,
-    GMAIL_QUERY,
-    HTTP_TIMEOUT,
-    MAX_DRAFTS,
-    CRITIC_THRESHOLD,
-    MAX_RETRIES,
-    OPENAI_API_KEY,
-    CLASSIFY_MODEL,
-    TICKET_SYSTEM,
-    FREESCOUT_URL,
-    FREESCOUT_KEY,
+    fetch_all_unread_messages,
+    get_gmail_service,
+    get_settings,
+    is_promotional_or_spam,
+    thread_has_draft,
 )
 
 
-def parse_args():
+def parse_args(settings):
     parser = argparse.ArgumentParser(description="Process Gmail messages")
-    parser.add_argument("--gmail-query", default=GMAIL_QUERY, help="Gmail search query")
-    parser.add_argument("--timeout", type=int, default=HTTP_TIMEOUT, help="HTTP request timeout")
+    parser.add_argument(
+        "--gmail-query", default=settings.gmail_query, help="Gmail search query"
+    )
+    parser.add_argument(
+        "--timeout",
+        type=int,
+        default=settings.http_timeout,
+        help="HTTP request timeout",
+    )
     parser.add_argument(
         "--poll-freescout",
         action="store_true",
@@ -49,23 +49,6 @@ def parse_args():
     return parser.parse_args()
 
 
-# Gmail label IDs that indicate promotional or spammy content. Messages with
-# any of these labels will be skipped entirely.
-PROMO_LABELS = {
-    "SPAM",
-    "CATEGORY_PROMOTIONS",
-    "CATEGORY_SOCIAL",
-    "CATEGORY_UPDATES",
-    "CATEGORY_FORUMS",
-}
-
-# Ticketing constants are loaded from utils
-
-if not OPENAI_API_KEY:
-    raise ValueError(
-        "Please set your OPENAI_API_KEY environment variable.")
-
-
 def route_email(
     service,
     subject: str,
@@ -74,7 +57,8 @@ def route_email(
     thread_id: str,
     cls: dict,
     has_existing_draft: bool,
-    timeout: int = HTTP_TIMEOUT,
+    settings,
+    timeout: Optional[int] = None,
 ) -> str:
     """Route an email based on priority and information level.
 
@@ -93,9 +77,13 @@ def route_email(
     high_priority = importance >= 8
     needs_info = False
     try:
-        client = OpenAI(api_key=OPENAI_API_KEY)
+        if not settings.openai_api_key:
+            raise ValueError(
+                f"Please set your {settings.openai_api_key_env} environment variable."
+            )
+        client = OpenAI(api_key=settings.openai_api_key)
         resp = client.chat.completions.create(
-            model=CLASSIFY_MODEL,
+            model=settings.classify_model,
             messages=[
                 {
                     "role": "system",
@@ -116,7 +104,13 @@ def route_email(
         print(f"Priority check failed: {e}")
 
     if high_priority or needs_info:
-        create_ticket(subject, sender, body, timeout=timeout)
+        create_ticket(
+            subject,
+            sender,
+            body,
+            timeout=timeout or settings.http_timeout,
+            settings=settings,
+        )
         return "ticketed"
 
     # Otherwise ask for more details if we haven't drafted already
@@ -132,57 +126,26 @@ def route_email(
     return "no_action"
 
 
-def create_ticket(subject: str, sender: str, body: str, timeout: int = HTTP_TIMEOUT, retries: int = 3):
-    """Create a ticket in FreeScout with basic retry logic."""
-    if TICKET_SYSTEM != "freescout":
-        return None
-
-    url = f"{FREESCOUT_URL.rstrip('/')}/api/conversations"
-    payload = {
-        "type": "email",
-        "subject": subject or "(no subject)",
-        "customer": {"email": sender},
-        "threads": [{"type": "customer", "text": body}],
-    }
-
-    for attempt in range(1, retries + 1):
-        try:
-            resp = requests.post(
-                url,
-                headers={
-                    "Accept": "application/json",
-                    "Content-Type": "application/json",
-                    "X-FreeScout-API-Key": FREESCOUT_KEY,
-                },
-                json=payload,
-                timeout=timeout,
-            )
-            resp.raise_for_status()
-            return resp.json()
-        except requests.RequestException as e:
-            if attempt == retries:
-                print(f"Failed to create ticket after {retries} attempts: {e}")
-                return None
-            sleep_time = 2 ** (attempt - 1)
-            print(f"Ticket creation error: {e}. Retrying in {sleep_time}s...")
-            time.sleep(sleep_time)
-
-
-def poll_ticket_updates(limit: int = 10, timeout: int = HTTP_TIMEOUT):
+def poll_ticket_updates(settings, limit: int = 10, timeout: Optional[int] = None):
     """Fetch recent ticket updates from FreeScout."""
-    if TICKET_SYSTEM != "freescout":
+
+    if (
+        settings.ticket_system != "freescout"
+        or not settings.freescout_url
+        or not settings.freescout_key
+    ):
         return []
 
-    url = f"{FREESCOUT_URL.rstrip('/')}/api/conversations"
+    url = f"{settings.freescout_url.rstrip('/')}/api/conversations"
     try:
         resp = requests.get(
             url,
             headers={
                 "Accept": "application/json",
-                "X-FreeScout-API-Key": FREESCOUT_KEY,
+                "X-FreeScout-API-Key": settings.freescout_key,
             },
             params={"limit": limit},
-            timeout=timeout,
+            timeout=timeout or settings.http_timeout,
         )
         resp.raise_for_status()
         return resp.json().get("data", [])
@@ -191,10 +154,19 @@ def poll_ticket_updates(limit: int = 10, timeout: int = HTTP_TIMEOUT):
         return []
 
 
-def fetch_recent_conversations(since_iso: str | None = None, timeout: int = HTTP_TIMEOUT):
+def fetch_recent_conversations(
+    settings, since_iso: Optional[str] = None, timeout: Optional[int] = None
+):
     """Return list of recent FreeScout conversations since a given ISO time."""
 
-    url = f"{FREESCOUT_URL.rstrip('/')}/api/conversations"
+    if (
+        settings.ticket_system != "freescout"
+        or not settings.freescout_url
+        or not settings.freescout_key
+    ):
+        return []
+
+    url = f"{settings.freescout_url.rstrip('/')}/api/conversations"
 
     params = None
     if since_iso:
@@ -205,10 +177,10 @@ def fetch_recent_conversations(since_iso: str | None = None, timeout: int = HTTP
         url,
         headers={
             "Accept": "application/json",
-            "X-FreeScout-API-Key": FREESCOUT_KEY,
+            "X-FreeScout-API-Key": settings.freescout_key,
         },
         params=params,
-        timeout=timeout,
+        timeout=timeout or settings.http_timeout,
     )
     resp.raise_for_status()
 
@@ -235,19 +207,23 @@ def ensure_label(service, name: str) -> str:
     return created["id"]
 
 
-def send_update_email(service, summary: str, label_id: str | None = None):
+def send_update_email(service, summary: str, label_id: Optional[str] = None):
     msg = create_base64_message("me", "me", "FreeScout Updates", summary)
     if label_id:
         msg["labelIds"] = [label_id]
     service.users().messages().send(userId="me", body=msg).execute()
 
 
-def poll_freescout_updates(service, interval: int = 300, timeout: int = HTTP_TIMEOUT):
+def poll_freescout_updates(
+    service, settings, interval: int = 300, timeout: Optional[int] = None
+):
     """Continuously poll FreeScout and email a summary of new conversations."""
     label_id = ensure_label(service, "FreeScout Updates")
     since = datetime.utcnow() - timedelta(minutes=5)
     while True:
-        convs = fetch_recent_conversations(since.isoformat(), timeout=timeout)
+        convs = fetch_recent_conversations(
+            settings, since.isoformat(), timeout=timeout
+        )
         if convs:
             lines = [f"#{c.get('id')} {c.get('subject', '')[:50]} [{c.get('status')}]" for c in convs]
             summary = "\n".join(lines)
@@ -257,10 +233,13 @@ def poll_freescout_updates(service, interval: int = 300, timeout: int = HTTP_TIM
 
 
 def main():
-    args = parse_args()
+    settings = get_settings()
+    args = parse_args(settings)
 
     svc = get_gmail_service()
-    for ref in fetch_all_unread_messages(svc, query=args.gmail_query)[:MAX_DRAFTS]:
+    for ref in fetch_all_unread_messages(svc, query=args.gmail_query)[
+        : settings.max_drafts
+    ]:
         msg = (
             svc.users()
             .messages()
@@ -293,7 +272,7 @@ def main():
                 print(f"Failed to decode message body: {exc}")
                 return ""
 
-        def extract_plain_text(payload: dict | None) -> str:
+        def extract_plain_text(payload: Optional[Dict]) -> str:
             """Recursively search a payload tree for the first text/plain body."""
 
             if not payload:
@@ -327,7 +306,7 @@ def main():
             continue
 
         # ---- classification ----
-        cls = classify_email(f"Subject:{subject}\n\n{body}")
+        cls = classify_email(f"Subject:{subject}\n\n{body}", settings=settings)
         email_type = cls["type"]
 
         has_draft = thread_has_draft(svc, thread)
@@ -340,6 +319,7 @@ def main():
             thread,
             cls,
             has_existing_draft=has_draft,
+            settings=settings,
             timeout=args.timeout,
         )
 
@@ -351,9 +331,9 @@ def main():
 
         # ---- draft creation with critic ----
         draft_text = generate_ai_reply(subject, sender, snippet, email_type)
-        for _ in range(MAX_RETRIES):
-            rating = critic_email(draft_text, body)
-            if rating["score"] >= CRITIC_THRESHOLD:
+        for _ in range(settings.max_retries):
+            rating = critic_email(draft_text, body, settings=settings)
+            if rating["score"] >= settings.critic_threshold:
                 break
             draft_text = generate_ai_reply(
                 subject,
@@ -366,13 +346,14 @@ def main():
         )
         create_draft(svc, "me", msg_draft, thread_id=thread)
 
-    updates = poll_ticket_updates()
+    updates = poll_ticket_updates(settings, timeout=args.timeout)
     if updates:
         print(f"Fetched {len(updates)} ticket updates from FreeScout")
 
     if args.poll_freescout:
         poll_freescout_updates(
             svc,
+            settings,
             interval=args.poll_interval,
             timeout=args.timeout,
         )
