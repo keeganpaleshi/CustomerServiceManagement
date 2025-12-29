@@ -20,8 +20,8 @@
 ```bash
 pip install google-api-python-client google-auth-oauthlib openai requests
 export OPENAI_API_KEY="sk-…"
-export FREESCOUT_URL="https://desk.example.com"
-export FREESCOUT_KEY="your-freescout-api-key"
+export FREESCOUT_URL="https://desk.example.com"   # or set in config.yaml
+export FREESCOUT_KEY="your-freescout-api-key"      # or set in config.yaml
 python gmail_bot.py
 
 OAuth – the first run opens a browser window; token is cached in token.pickle.
