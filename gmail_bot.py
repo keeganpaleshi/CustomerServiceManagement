@@ -73,18 +73,22 @@ def route_email(
     body: str,
     thread_id: str,
     cls: dict,
+    has_existing_draft: bool,
     timeout: int = HTTP_TIMEOUT,
-) -> None:
+) -> str:
     """Route an email based on priority and information level.
 
-    If the message is high priority or lacks sufficient information, open a
-    ticket. Otherwise, create a draft requesting additional details.
+    Returns an action string:
+    - "ignored" if the email type is not handled
+    - "ticketed" if a ticket was created
+    - "followup_draft" if a simple follow-up draft was created
+    - "no_action" if the message should proceed to full draft creation
     """
 
     email_type = cls.get("type")
     importance = cls.get("importance", 0)
     if email_type == "other":
-        return
+        return "ignored"
 
     high_priority = importance >= 8
     needs_info = False
@@ -113,16 +117,19 @@ def route_email(
 
     if high_priority or needs_info:
         create_ticket(subject, sender, body, timeout=timeout)
-        return
+        return "ticketed"
 
-    # Otherwise ask for more details
-    if not thread_has_draft(service, thread_id):
+    # Otherwise ask for more details if we haven't drafted already
+    if not has_existing_draft:
         followup = (
             "Thank you for contacting us. Could you provide more details about "
             "your request so we can assist you?"
         )
         msg = create_base64_message("me", sender, f"Re: {subject}", followup)
         create_draft(service, "me", msg, thread_id=thread_id)
+        return "followup_draft"
+
+    return "no_action"
 
 
 def create_ticket(subject: str, sender: str, body: str, timeout: int = HTTP_TIMEOUT, retries: int = 3):
@@ -309,38 +316,41 @@ def main():
         cls = classify_email(f"Subject:{subject}\n\n{body}")
         email_type = cls["type"]
 
-        # skip others
-        if email_type == "other":
-            continue
+        has_draft = thread_has_draft(svc, thread)
 
-        # ---- draft creation with critic ----
-        if not thread_has_draft(svc, thread):
-            draft_text = generate_ai_reply(subject, sender, snippet, email_type)
-            for _ in range(MAX_RETRIES):
-                rating = critic_email(draft_text, body)
-                if rating["score"] >= CRITIC_THRESHOLD:
-                    break
-                draft_text = generate_ai_reply(
-                    subject,
-                    sender,
-                    f"{snippet}\n\nCritic feedback: {rating['feedback']}",
-                    email_type,
-                )
-            msg_draft = create_base64_message(
-                "me", sender, f"Re: {subject}", draft_text
-            )
-            create_draft(svc, "me", msg_draft, thread_id=thread)
-
-        # ---- ticket or follow-up ----
-        route_email(
+        action = route_email(
             svc,
             subject,
             sender,
             body,
             thread,
             cls,
+            has_existing_draft=has_draft,
             timeout=args.timeout,
         )
+
+        if action in {"ignored", "ticketed", "followup_draft"}:
+            continue
+
+        if has_draft:
+            continue
+
+        # ---- draft creation with critic ----
+        draft_text = generate_ai_reply(subject, sender, snippet, email_type)
+        for _ in range(MAX_RETRIES):
+            rating = critic_email(draft_text, body)
+            if rating["score"] >= CRITIC_THRESHOLD:
+                break
+            draft_text = generate_ai_reply(
+                subject,
+                sender,
+                f"{snippet}\n\nCritic feedback: {rating['feedback']}",
+                email_type,
+            )
+        msg_draft = create_base64_message(
+            "me", sender, f"Re: {subject}", draft_text
+        )
+        create_draft(svc, "me", msg_draft, thread_id=thread)
 
     updates = poll_ticket_updates()
     if updates:
