@@ -12,6 +12,7 @@ from utils import (
     get_gmail_service,
     fetch_all_unread_messages,
     create_base64_message,
+    create_ticket,
     create_draft,
     thread_has_draft,
     is_promotional_or_spam,
@@ -47,16 +48,6 @@ def parse_args():
     )
     return parser.parse_args()
 
-
-# Gmail label IDs that indicate promotional or spammy content. Messages with
-# any of these labels will be skipped entirely.
-PROMO_LABELS = {
-    "SPAM",
-    "CATEGORY_PROMOTIONS",
-    "CATEGORY_SOCIAL",
-    "CATEGORY_UPDATES",
-    "CATEGORY_FORUMS",
-}
 
 TICKET_LABEL_NAME = "Ticketed"
 
@@ -135,42 +126,6 @@ def route_email(
         )
         msg = create_base64_message("me", sender, f"Re: {subject}", followup)
         create_draft(service, "me", msg, thread_id=thread_id)
-
-
-def create_ticket(subject: str, sender: str, body: str, timeout: int = HTTP_TIMEOUT, retries: int = 3):
-    """Create a ticket in FreeScout with basic retry logic."""
-    if TICKET_SYSTEM != "freescout":
-        return None
-
-    url = f"{FREESCOUT_URL.rstrip('/')}/api/conversations"
-    payload = {
-        "type": "email",
-        "subject": subject or "(no subject)",
-        "customer": {"email": sender},
-        "threads": [{"type": "customer", "text": body}],
-    }
-
-    for attempt in range(1, retries + 1):
-        try:
-            resp = requests.post(
-                url,
-                headers={
-                    "Accept": "application/json",
-                    "Content-Type": "application/json",
-                    "X-FreeScout-API-Key": FREESCOUT_KEY,
-                },
-                json=payload,
-                timeout=timeout,
-            )
-            resp.raise_for_status()
-            return resp.json()
-        except requests.RequestException as e:
-            if attempt == retries:
-                print(f"Failed to create ticket after {retries} attempts: {e}")
-                return None
-            sleep_time = 2 ** (attempt - 1)
-            print(f"Ticket creation error: {e}. Retrying in {sleep_time}s...")
-            time.sleep(sleep_time)
 
 
 def poll_ticket_updates(limit: int = 10, timeout: int = HTTP_TIMEOUT):

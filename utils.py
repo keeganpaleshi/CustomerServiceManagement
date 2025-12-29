@@ -2,6 +2,7 @@ import os
 import json
 import base64
 import pickle
+import time
 from email.mime.text import MIMEText
 
 import requests
@@ -154,9 +155,11 @@ def classify_email(text):
         return {"type": "other", "importance": 0}
 
 
-def create_ticket(subject, sender, body, timeout=HTTP_TIMEOUT):
+def create_ticket(subject, sender, body, timeout=HTTP_TIMEOUT, retries=3):
+    """Create a FreeScout ticket with simple retry logic."""
     if TICKET_SYSTEM != "freescout":
-        return
+        return None
+
     url = f"{FREESCOUT_URL.rstrip('/')}/api/conversations"
     payload = {
         "type": "email",
@@ -164,14 +167,25 @@ def create_ticket(subject, sender, body, timeout=HTTP_TIMEOUT):
         "customer": {"email": sender},
         "threads": [{"type": "customer", "text": body}],
     }
-    r = requests.post(
-        url,
-        headers={
-            "Accept": "application/json",
-            "Content-Type": "application/json",
-            "X-FreeScout-API-Key": FREESCOUT_KEY,
-        },
-        json=payload,
-        timeout=timeout,
-    )
-    r.raise_for_status()
+
+    for attempt in range(1, retries + 1):
+        try:
+            resp = requests.post(
+                url,
+                headers={
+                    "Accept": "application/json",
+                    "Content-Type": "application/json",
+                    "X-FreeScout-API-Key": FREESCOUT_KEY,
+                },
+                json=payload,
+                timeout=timeout,
+            )
+            resp.raise_for_status()
+            return resp.json()
+        except requests.RequestException as exc:
+            if attempt == retries:
+                print(f"Failed to create ticket after {retries} attempts: {exc}")
+                return None
+            delay = 2 ** (attempt - 1)
+            print(f"Ticket creation error: {exc}. Retrying in {delay}s...")
+            time.sleep(delay)
