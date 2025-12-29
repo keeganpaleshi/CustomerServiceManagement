@@ -1,52 +1,69 @@
-from openai import OpenAI
 import os
 import base64
 import yaml
 import argparse
+
 from utils import (
-    get_gmail_service, fetch_all_unread_messages, create_base64_message,
-    create_draft, thread_has_draft, is_promotional_or_spam,
-    critic_email, classify_email, create_ticket
+    classify_email,
+    create_base64_message,
+    create_draft,
+    create_ticket,
+    critic_email,
+    fetch_all_unread_messages,
+    get_gmail_service,
+    get_openai_client,
+    is_promotional_or_spam,
+    thread_has_draft,
 )
 
 # -------------------------------------------------------
 # 1) Configuration
 # -------------------------------------------------------
-# Load YAML config
-with open(os.path.join(os.path.dirname(__file__), "config.yaml")) as f:
-    CFG = yaml.safe_load(f)
+CFG = None
+OPENAI_API_KEY = None
+DRAFT_MODEL = None
+DRAFT_MAX_TOKENS = None
+DRAFT_SYSTEM_MSG = None
+CLASSIFY_MODEL = None
+CLASSIFY_MAX_TOKENS = None
+CRITIC_THRESHOLD = None
+MAX_RETRIES = None
+MAX_DRAFTS = None
+GMAIL_QUERY = None
+HTTP_TIMEOUT = None
 
-# Gmail API scope
-SCOPES = CFG["gmail"]["scopes"]
 
-# Load OpenAI API key from env (never store in plain text!)
-OPENAI_API_KEY = os.getenv(CFG["openai"]["api_key_env"])
-if not OPENAI_API_KEY:
-    raise ValueError(
-        f"Please set your {CFG['openai']['api_key_env']} environment variable.")
+def ensure_settings_loaded():
+    """Lazily load configuration and environment values."""
 
-# Default to the o3 model unless overridden in config
-DRAFT_MODEL = CFG["openai"]["draft_model"]
-DRAFT_MAX_TOKENS = CFG["openai"].get("draft_max_tokens", 16384)
-DRAFT_SYSTEM_MSG = CFG["openai"].get("draft_system_message", "")
+    global CFG, OPENAI_API_KEY, DRAFT_MODEL, DRAFT_MAX_TOKENS, DRAFT_SYSTEM_MSG
+    global CLASSIFY_MODEL, CLASSIFY_MAX_TOKENS, CRITIC_THRESHOLD
+    global MAX_RETRIES, MAX_DRAFTS, GMAIL_QUERY, HTTP_TIMEOUT
 
-# Use the same model for general OpenAI calls by default
-OPENAI_MODEL = DRAFT_MODEL
+    if CFG is not None:
+        return
 
-# Model used when classifying incoming emails
-CLASSIFY_MODEL = CFG["openai"]["classify_model"]
-CLASSIFY_MAX_TOKENS = CFG["openai"].get("classify_max_tokens", 50)
+    with open(os.path.join(os.path.dirname(__file__), "config.yaml")) as f:
+        CFG = yaml.safe_load(f)
 
-# Critic settings
-CRITIC_THRESHOLD = CFG["thresholds"]["critic_threshold"]
-MAX_RETRIES = CFG["thresholds"]["max_retries"]
+    OPENAI_API_KEY = os.getenv(CFG["openai"]["api_key_env"])
+    DRAFT_MODEL = CFG["openai"]["draft_model"]
+    DRAFT_MAX_TOKENS = CFG["openai"].get("draft_max_tokens", 16384)
+    DRAFT_SYSTEM_MSG = CFG["openai"].get("draft_system_message", "")
 
-MAX_DRAFTS = CFG.get("limits", {}).get("max_drafts", 100)
-GMAIL_QUERY = CFG["gmail"].get("query", "is:unread")
-HTTP_TIMEOUT = CFG.get("http", {}).get("timeout", 15)
+    CLASSIFY_MODEL = CFG["openai"]["classify_model"]
+    CLASSIFY_MAX_TOKENS = CFG["openai"].get("classify_max_tokens", 50)
+
+    CRITIC_THRESHOLD = CFG["thresholds"]["critic_threshold"]
+    MAX_RETRIES = CFG["thresholds"]["max_retries"]
+
+    MAX_DRAFTS = CFG.get("limits", {}).get("max_drafts", 100)
+    GMAIL_QUERY = CFG["gmail"].get("query", "is:unread")
+    HTTP_TIMEOUT = CFG.get("http", {}).get("timeout", 15)
 
 
 def parse_args():
+    ensure_settings_loaded()
     parser = argparse.ArgumentParser(description="Draft Gmail replies")
     parser.add_argument("--gmail-query", default=GMAIL_QUERY,
                         help="Gmail search query")
@@ -108,8 +125,8 @@ def generate_ai_reply(subject, sender, snippet_or_body, email_type):
     """
     Generate a draft reply using OpenAI's new library (>=1.0.0).
     """
-    # Create a client instance with your API key
-    client = OpenAI(api_key=OPENAI_API_KEY)
+    ensure_settings_loaded()
+    client = get_openai_client()
 
     # Example prompt; tailor as needed
     instructions = (

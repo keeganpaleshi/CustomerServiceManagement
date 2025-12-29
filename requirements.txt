@@ -1,6 +1,6 @@
-openai
-google-auth
-google-auth-oauthlib
-google-api-python-client
-requests
-pyyaml
+openai>=1.35.7,<2.0.0
+google-auth>=2.34.0,<3.0.0
+google-auth-oauthlib>=1.2.1,<2.0.0
+google-api-python-client>=2.152.0,<3.0.0
+requests>=2.32.3,<3.0.0
+PyYAML>=6.0.1,<7.0.0
