@@ -3,6 +3,7 @@ import base64
 import json
 import time
 from datetime import datetime, timedelta
+from email.utils import parseaddr
 
 import requests
 from openai import OpenAI
@@ -249,10 +250,11 @@ def main():
             (h["value"] for h in msg["payload"]["headers"] if h["name"] == "Subject"),
             "",
         )
-        sender = next(
+        raw_sender = next(
             (h["value"] for h in msg["payload"]["headers"] if h["name"] == "From"),
             "",
         )
+        sender = parseaddr(raw_sender)[1] or raw_sender
         thread = msg["threadId"]
 
         def decode_base64url(data: str) -> str:
