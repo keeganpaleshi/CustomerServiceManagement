@@ -72,22 +72,6 @@ def parse_args():
     return parser.parse_args()
 
 
-# Ticketing configuration
-TICKET_SYSTEM = CFG["ticket"]["system"]
-FREESCOUT_URL = CFG["ticket"]["freescout_url"]
-FREESCOUT_KEY = CFG["ticket"]["freescout_key"]
-
-# Labels that indicate promotional or spam content. Any message with these
-# Gmail labels will be skipped.
-PROMO_LABELS = {
-    "SPAM",
-    "CATEGORY_PROMOTIONS",
-    "CATEGORY_SOCIAL",
-    "CATEGORY_UPDATES",
-    "CATEGORY_FORUMS",
-}
-
-
 # We'll use the new v1.0.0+ style:
 
 

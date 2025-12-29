@@ -140,7 +140,7 @@ def fetch_recent_conversations(since_iso: Optional[str] = None, timeout: Optiona
         url,
         headers={
             "Accept": "application/json",
-            "X-FreeScout-API-Key": FREESCOUT_KEY,
+            "X-FreeScout-API-Key": utils.FREESCOUT_KEY,
         },
         params=params,
         timeout=timeout,
