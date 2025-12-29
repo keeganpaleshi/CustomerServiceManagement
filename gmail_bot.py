@@ -58,6 +58,8 @@ PROMO_LABELS = {
     "CATEGORY_FORUMS",
 }
 
+TICKET_LABEL_NAME = "Ticketed"
+
 # Ticketing constants are loaded from utils
 
 if not OPENAI_API_KEY:
@@ -73,6 +75,8 @@ def route_email(
     thread_id: str,
     cls: dict,
     timeout: int = HTTP_TIMEOUT,
+    ticket_label_id: str | None = None,
+    message_labels: list[str] | None = None,
 ) -> None:
     """Route an email based on priority and information level.
 
@@ -110,8 +114,17 @@ def route_email(
     except Exception as e:
         print(f"Priority check failed: {e}")
 
+    already_ticketed = ticket_label_id and ticket_label_id in (message_labels or [])
+
     if high_priority or needs_info:
-        create_ticket(subject, sender, body, timeout=timeout)
+        if already_ticketed:
+            if ticket_label_id:
+                label_thread_as_ticketed(service, thread_id, ticket_label_id)
+            print(f"{thread_id[:8]}… ticket already exists; skipping")
+            return
+        created = create_ticket(subject, sender, body, timeout=timeout)
+        if created and ticket_label_id:
+            label_thread_as_ticketed(service, thread_id, ticket_label_id)
         return
 
     # Otherwise ask for more details
@@ -215,6 +228,12 @@ def ensure_label(service, name: str) -> str:
     return created["id"]
 
 
+def label_thread_as_ticketed(service, thread_id: str, label_id: str) -> None:
+    """Tag a thread as ticketed and mark messages as read."""
+    body = {"addLabelIds": [label_id], "removeLabelIds": ["UNREAD"]}
+    service.users().threads().modify(userId="me", id=thread_id, body=body).execute()
+
+
 def send_update_email(service, summary: str):
     msg = create_base64_message("me", "me", "FreeScout Updates", summary)
     service.users().messages().send(userId="me", body=msg).execute()
@@ -238,6 +257,9 @@ def main():
     args = parse_args()
 
     svc = get_gmail_service()
+    ticket_label_id = (
+        ensure_label(svc, TICKET_LABEL_NAME) if TICKET_SYSTEM == "freescout" else None
+    )
     for ref in fetch_all_unread_messages(svc, query=args.gmail_query)[:MAX_DRAFTS]:
         msg = (
             svc.users()
@@ -254,6 +276,12 @@ def main():
             "",
         )
         thread = msg["threadId"]
+        labels = msg.get("labelIds", [])
+
+        if ticket_label_id in labels:
+            label_thread_as_ticketed(svc, thread, ticket_label_id)
+            print(f"{ref['id'][:8]}… already ticketed; marked read")
+            continue
 
         def decode_base64url(data: str) -> str:
             """Decode base64url strings that may be missing padding."""
@@ -338,6 +366,8 @@ def main():
             thread,
             cls,
             timeout=args.timeout,
+            ticket_label_id=ticket_label_id,
+            message_labels=labels,
         )
 
     updates = poll_ticket_updates()
