@@ -235,21 +235,23 @@ def ensure_label(service, name: str) -> str:
     return created["id"]
 
 
-def send_update_email(service, summary: str):
+def send_update_email(service, summary: str, label_id: str | None = None):
     msg = create_base64_message("me", "me", "FreeScout Updates", summary)
+    if label_id:
+        msg["labelIds"] = [label_id]
     service.users().messages().send(userId="me", body=msg).execute()
 
 
 def poll_freescout_updates(service, interval: int = 300, timeout: int = HTTP_TIMEOUT):
     """Continuously poll FreeScout and email a summary of new conversations."""
-    ensure_label(service, "FreeScout Updates")
+    label_id = ensure_label(service, "FreeScout Updates")
     since = datetime.utcnow() - timedelta(minutes=5)
     while True:
         convs = fetch_recent_conversations(since.isoformat(), timeout=timeout)
         if convs:
             lines = [f"#{c.get('id')} {c.get('subject', '')[:50]} [{c.get('status')}]" for c in convs]
             summary = "\n".join(lines)
-            send_update_email(service, summary)
+            send_update_email(service, summary, label_id=label_id)
         since = datetime.utcnow()
         time.sleep(interval)
 
