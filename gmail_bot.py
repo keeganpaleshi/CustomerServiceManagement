@@ -255,8 +255,24 @@ def main():
         )
         thread = msg["threadId"]
 
-        part = msg["payload"]["parts"][0]["body"].get("data", "")
-        body = base64.urlsafe_b64decode(part).decode("utf-8", "ignore")
+        # Extract plain text body from multipart messages
+        payload = msg.get("payload", {})
+        body = ""
+        if "parts" in payload:
+            for part in payload.get("parts", []):
+                if part.get("mimeType") == "text/plain":
+                    data = part.get("body", {}).get("data", "")
+                    if data:
+                        body = base64.urlsafe_b64decode(data.encode("utf-8")).decode(
+                            "utf-8", "ignore"
+                        )
+                        break
+        else:
+            data = payload.get("body", {}).get("data", "")
+            if data:
+                body = base64.urlsafe_b64decode(data.encode("utf-8")).decode(
+                    "utf-8", "ignore"
+                )
         snippet = msg.get("snippet", "")
 
         if is_promotional_or_spam(msg, body):
