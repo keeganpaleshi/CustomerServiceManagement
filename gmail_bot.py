@@ -185,8 +185,14 @@ def poll_ticket_updates(limit: int = 10, timeout: int = HTTP_TIMEOUT):
 
 def fetch_recent_conversations(since_iso: str | None = None, timeout: int = HTTP_TIMEOUT):
     """Return list of recent FreeScout conversations since a given ISO time."""
+
     url = f"{FREESCOUT_URL.rstrip('/')}/api/conversations"
-    params = {"updated_since": since_iso} if since_iso else None
+
+    params = None
+    if since_iso:
+        # Support multiple possible FreeScout filter names to avoid missing updates
+        params = {"updated_since": since_iso, "updated_from": since_iso}
+
     resp = requests.get(
         url,
         headers={
@@ -197,7 +203,13 @@ def fetch_recent_conversations(since_iso: str | None = None, timeout: int = HTTP
         timeout=timeout,
     )
     resp.raise_for_status()
-    return resp.json() or []
+
+    data = resp.json() or []
+    if isinstance(data, dict):
+        return data.get("data") or data.get("conversations") or []
+    if isinstance(data, list):
+        return data
+    return []
 
 
 def ensure_label(service, name: str) -> str:
