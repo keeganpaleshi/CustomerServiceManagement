@@ -255,16 +255,18 @@ def main():
             .get(userId="me", id=ref["id"], format="full")
             .execute()
         )
-        subject = next(
-            (h["value"] for h in msg["payload"]["headers"] if h["name"] == "Subject"),
-            "",
-        )
-        raw_sender = next(
-            (h["value"] for h in msg["payload"]["headers"] if h["name"] == "From"),
-            "",
-        )
+        def get_header_value(payload: Optional[dict], name: str, default: str = "") -> str:
+            headers = (payload or {}).get("headers") or []
+            for header in headers:
+                if header.get("name") == name:
+                    return header.get("value", default)
+            return default
+
+        payload = msg.get("payload", {})
+        subject = get_header_value(payload, "Subject")
+        raw_sender = get_header_value(payload, "From")
         sender = parseaddr(raw_sender)[1] or raw_sender
-        thread = msg["threadId"]
+        thread = msg.get("threadId", "")
 
         if ticket_label_id and ticket_label_id in set(msg.get("labelIds", [])):
             print(f"{ref['id'][:8]}… skipped (ticket already created)")
@@ -310,7 +312,6 @@ def main():
 
             return ""
 
-        payload = msg.get("payload", {})
         body = extract_plain_text(payload)
         snippet = msg.get("snippet", "")
 
