@@ -56,6 +56,9 @@ def _load_settings() -> Dict[str, Any]:
         or cfg["ticket"].get("freescout_url", ""),
         "FREESCOUT_KEY": os.getenv("FREESCOUT_KEY")
         or cfg["ticket"].get("freescout_key", ""),
+        "FREESCOUT_WEBHOOK_SECRET": cfg["ticket"].get("webhook_secret", ""),
+        "FREESCOUT_POLL_INTERVAL": cfg["ticket"].get("poll_interval", 300),
+        "FREESCOUT_ACTIONS": cfg["ticket"].get("actions", {}),
     }
 
 
@@ -87,6 +90,88 @@ def require_ticket_settings() -> tuple[str, str]:
             "Please set FREESCOUT_URL and FREESCOUT_KEY via environment variables or config.yaml."
         )
     return url, key
+
+
+class FreeScoutClient:
+    """Minimal FreeScout API helper for conversations."""
+
+    def __init__(self, base_url: str, api_key: str, timeout: int = 15):
+        self.base_url = base_url.rstrip("/")
+        self.api_key = api_key
+        self.timeout = timeout
+
+    def _headers(self) -> Dict[str, str]:
+        return {
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+            "X-FreeScout-API-Key": self.api_key,
+        }
+
+    def get_conversation(self, conversation_id: int) -> Dict[str, Any]:
+        resp = requests.get(
+            f"{self.base_url}/api/conversations/{conversation_id}",
+            headers=self._headers(),
+            timeout=self.timeout,
+        )
+        resp.raise_for_status()
+        data = resp.json() or {}
+        if isinstance(data, dict):
+            return data.get("conversation") or data.get("data") or data
+        return {}
+
+    def update_conversation(
+        self,
+        conversation_id: int,
+        priority: Optional[str] = None,
+        assignee: Optional[int] = None,
+        tags: Optional[list[str]] = None,
+        custom_fields: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {}
+        if priority:
+            payload["priority"] = priority
+        if assignee is not None:
+            payload["user_id"] = assignee
+        if tags is not None:
+            payload["tags"] = tags
+        if custom_fields:
+            payload["custom_fields"] = custom_fields
+
+        if not payload:
+            return {}
+
+        resp = requests.put(
+            f"{self.base_url}/api/conversations/{conversation_id}",
+            headers=self._headers(),
+            json=payload,
+            timeout=self.timeout,
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+    def add_internal_note(
+        self, conversation_id: int, text: str, user_id: Optional[int] = None
+    ) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {"type": "note", "text": text}
+        if user_id:
+            payload["user_id"] = user_id
+        resp = requests.post(
+            f"{self.base_url}/api/conversations/{conversation_id}/threads",
+            headers=self._headers(),
+            json=payload,
+            timeout=self.timeout,
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+    def add_suggested_reply(
+        self, conversation_id: int, text: str, user_id: Optional[int] = None
+    ) -> Dict[str, Any]:
+        return self.add_internal_note(
+            conversation_id,
+            f"Suggested reply:\n\n{text}",
+            user_id=user_id,
+        )
 
 
 # ----- Gmail helpers -----

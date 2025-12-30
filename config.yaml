@@ -42,6 +42,18 @@ ticket:
   system:         "freescout"        # or "helpscout", "freshdesk", etc.
   freescout_url:  ""                 # fill in your desk URL or set FREESCOUT_URL env var
   freescout_key:  ""                 # fill in your API key or set FREESCOUT_KEY env var
+  webhook_secret: ""                 # shared secret for validating webhook requests
+  poll_interval: 300                 # seconds between FreeScout polls when --poll-freescout is enabled
+  actions:
+    update_priority: true           # automatically set priority based on AI classification
+    priority_high_threshold: 8      # importance score (1-10) that counts as high priority
+    assign_to_user_id: null         # FreeScout user ID to assign tickets to (null = no assignment)
+    apply_tags: true                # tag conversations with the detected type/importance
+    custom_fields:
+      type_field_id: null           # FreeScout custom field ID used to store "lead"/"customer"/"other"
+      importance_field_id: null     # FreeScout custom field ID used to store the numeric importance
+    post_internal_notes: true       # add an internal note summarizing the classification
+    post_suggested_reply: true      # add an internal note containing a suggested AI reply
 
 gmail:
   scopes:

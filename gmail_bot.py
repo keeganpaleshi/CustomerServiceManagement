@@ -19,10 +19,12 @@ from utils import (
     fetch_all_unread_messages,
     get_gmail_service,
     get_settings,
+    FreeScoutClient,
     is_promotional_or_spam,
     thread_has_draft,
     extract_plain_text,
     require_openai_api_key,
+    require_ticket_settings,
 )
 
 
@@ -46,7 +48,7 @@ def parse_args(settings: Optional[Dict] = None):
     parser.add_argument(
         "--poll-interval",
         type=int,
-        default=300,
+        default=settings.get("FREESCOUT_POLL_INTERVAL", 300),
         help="Seconds between FreeScout polls",
     )
     parser.add_argument(
@@ -169,6 +171,51 @@ def poll_ticket_updates(limit: int = 10, timeout: Optional[int] = None):
         return []
 
 
+def _build_freescout_client(timeout: Optional[int] = None) -> Optional[FreeScoutClient]:
+    settings = get_settings()
+    if settings["TICKET_SYSTEM"] != "freescout":
+        return None
+    url, key = require_ticket_settings()
+    http_timeout = timeout if timeout is not None else settings["HTTP_TIMEOUT"]
+    return FreeScoutClient(url, key, timeout=http_timeout)
+
+
+def _extract_latest_thread_text(conversation: dict) -> str:
+    threads = conversation.get("threads") or conversation.get("data") or []
+    if isinstance(threads, dict):
+        threads = threads.get("threads", [])
+
+    customer_threads = [
+        t
+        for t in threads
+        if isinstance(t, dict) and t.get("type") in {"customer", "message", "reply"}
+    ]
+    if not customer_threads:
+        return conversation.get("last_text", "") or conversation.get("text", "")
+
+    latest = customer_threads[-1]
+    return latest.get("text", "") or latest.get("body", "")
+
+
+def _build_tags(cls: dict, high_priority: bool) -> list[str]:
+    tags = [cls.get("type", "other")]
+    if high_priority:
+        tags.append("high-priority")
+    return tags
+
+
+def _prepare_custom_fields(cls: dict, settings: dict) -> dict:
+    fields_cfg = settings.get("FREESCOUT_ACTIONS", {}).get("custom_fields", {})
+    custom_fields: dict = {}
+    type_field = fields_cfg.get("type_field_id")
+    importance_field = fields_cfg.get("importance_field_id")
+    if type_field:
+        custom_fields[str(type_field)] = cls.get("type")
+    if importance_field:
+        custom_fields[str(importance_field)] = cls.get("importance")
+    return custom_fields
+
+
 def fetch_recent_conversations(
     since_iso: Optional[str] = None, timeout: Optional[int] = None
 ):
@@ -212,27 +259,136 @@ def send_update_email(service, summary: str, label_id: Optional[str] = None):
     service.users().messages().send(userId="me", body=msg).execute()
 
 
-def poll_freescout_updates(
-    service, interval: int = 300, timeout: Optional[int] = None
+def process_freescout_conversation(
+    client: FreeScoutClient,
+    conversation: dict,
+    actions_cfg: dict,
+    settings: dict,
 ):
-    """Continuously poll FreeScout and email a summary of new conversations."""
+    conv_id = conversation.get("id")
+    if not conv_id:
+        return
+
+    try:
+        details = client.get_conversation(conv_id)
+    except requests.RequestException as exc:
+        print(f"Failed to fetch conversation {conv_id}: {exc}")
+        return
+
+    subject = details.get("subject") or conversation.get("subject") or "(no subject)"
+    latest_text = _extract_latest_thread_text(details) or conversation.get("last_text", "")
+
+    cls = classify_email(f"Subject:{subject}\n\n{latest_text}")
+    importance = cls.get("importance", 0)
+    high_priority = importance >= actions_cfg.get("priority_high_threshold", 8)
+
+    tags = None
+    if actions_cfg.get("apply_tags", True):
+        tags = _build_tags(cls, high_priority)
+
+    custom_fields = _prepare_custom_fields(cls, settings)
+    if not custom_fields:
+        custom_fields = None
+
+    priority_value = None
+    if actions_cfg.get("update_priority", True):
+        priority_value = "urgent" if high_priority else "normal"
+
+    assignee = actions_cfg.get("assign_to_user_id")
+
+    try:
+        client.update_conversation(
+            conv_id,
+            priority=priority_value,
+            assignee=assignee,
+            tags=tags,
+            custom_fields=custom_fields,
+        )
+    except requests.RequestException as exc:
+        print(f"Failed to update conversation {conv_id}: {exc}")
+
+    note_lines = [
+        f"AI classification: {cls.get('type', 'unknown')}",
+        f"Importance: {importance}",
+    ]
+    if high_priority:
+        note_lines.append("Marked as high priority")
+
+    if actions_cfg.get("post_internal_notes", True):
+        try:
+            client.add_internal_note(conv_id, "\n".join(note_lines))
+        except requests.RequestException as exc:
+            print(f"Failed to add internal note to {conv_id}: {exc}")
+
+    if actions_cfg.get("post_suggested_reply", True):
+        try:
+            suggestion = generate_ai_reply(
+                subject,
+                "customer",
+                latest_text,
+                cls.get("type", "other"),
+            )
+            client.add_suggested_reply(conv_id, suggestion)
+        except requests.RequestException as exc:
+            print(f"Failed to add suggested reply to {conv_id}: {exc}")
+
+
+def poll_freescout_updates(
+    interval: int = 300, timeout: Optional[int] = None
+):
+    """Continuously poll FreeScout and classify new/updated conversations."""
+
     settings = get_settings()
     http_timeout = timeout if timeout is not None else settings["HTTP_TIMEOUT"]
-    label_id = ensure_label(service, "FreeScout Updates")
+    client = _build_freescout_client(timeout=http_timeout)
+    if not client:
+        print("FreeScout polling skipped because ticket system is not set to freescout.")
+        return
+
+    actions_cfg = settings.get("FREESCOUT_ACTIONS", {})
     since = datetime.utcnow() - timedelta(minutes=5)
     while True:
         convs = fetch_recent_conversations(since.isoformat(), timeout=http_timeout)
-        if convs:
-            lines = [f"#{c.get('id')} {c.get('subject', '')[:50]} [{c.get('status')}]" for c in convs]
-            summary = "\n".join(lines)
-            send_update_email(service, summary, label_id=label_id)
+        for conv in convs:
+            process_freescout_conversation(client, conv, actions_cfg, settings)
         since = datetime.utcnow()
         time.sleep(interval)
+
+
+def freescout_webhook_handler(payload: dict, headers: dict) -> tuple[str, int]:
+    """Generic webhook handler usable by Flask or FastAPI routes."""
+
+    settings = get_settings()
+    secret = settings.get("FREESCOUT_WEBHOOK_SECRET", "")
+    if secret and headers.get("X-Webhook-Secret") != secret:
+        return "invalid signature", 401
+
+    if not payload:
+        return "missing payload", 400
+
+    conv_id = payload.get("conversation_id") or payload.get("id")
+    if not conv_id:
+        return "missing conversation id", 400
+
+    client = _build_freescout_client(timeout=settings["HTTP_TIMEOUT"])
+    if not client:
+        return "freescout disabled", 503
+
+    actions_cfg = settings.get("FREESCOUT_ACTIONS", {})
+    process_freescout_conversation(client, {"id": conv_id}, actions_cfg, settings)
+    return "ok", 200
 
 
 def main():
     settings = get_settings()
     args = parse_args(settings)
+
+    if args.poll_freescout:
+        poll_freescout_updates(
+            interval=args.poll_interval,
+            timeout=args.timeout,
+        )
+        return
 
     svc = get_gmail_service(use_console=args.console_auth)
     ticket_label_id = None
@@ -318,13 +474,6 @@ def main():
     updates = poll_ticket_updates()
     if updates:
         print(f"Fetched {len(updates)} ticket updates from FreeScout")
-
-    if args.poll_freescout:
-        poll_freescout_updates(
-            svc,
-            interval=args.poll_interval,
-            timeout=args.timeout,
-        )
 
 
 if __name__ == "__main__":
