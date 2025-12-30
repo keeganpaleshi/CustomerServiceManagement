@@ -69,6 +69,10 @@ Set the following keys in `config.yaml` under `ticket:`:
 - `actions.assign_to_user_id` – FreeScout user ID to auto-assign (optional).
 - `actions.apply_tags` – tag conversations with the detected type and a
   `high-priority` tag when applicable.
+- `mailbox_id` – FreeScout mailbox ID used when creating conversations (required
+  for ticket creation).
+- `gmail_thread_field_id` / `gmail_message_field_id` – custom field IDs to store
+  the Gmail `threadId`/`messageId` on the ticket for traceability (optional).
 - `actions.custom_fields.type_field_id` / `importance_field_id` – custom field
   IDs to store the classification and importance (optional).
 - `actions.post_internal_notes` – add an internal note summarizing the

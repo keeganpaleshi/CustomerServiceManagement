@@ -56,6 +56,13 @@ def _load_settings() -> Dict[str, Any]:
         or cfg["ticket"].get("freescout_url", ""),
         "FREESCOUT_KEY": os.getenv("FREESCOUT_KEY")
         or cfg["ticket"].get("freescout_key", ""),
+        "FREESCOUT_MAILBOX_ID": cfg["ticket"].get("mailbox_id"),
+        "FREESCOUT_GMAIL_THREAD_FIELD_ID": cfg["ticket"].get(
+            "gmail_thread_field_id"
+        ),
+        "FREESCOUT_GMAIL_MESSAGE_FIELD_ID": cfg["ticket"].get(
+            "gmail_message_field_id"
+        ),
         "FREESCOUT_WEBHOOK_SECRET": cfg["ticket"].get("webhook_secret", ""),
         "FREESCOUT_POLL_INTERVAL": cfg["ticket"].get("poll_interval", 300),
         "FREESCOUT_ACTIONS": cfg["ticket"].get("actions", {}),
@@ -400,6 +407,9 @@ def create_ticket(
     subject: str,
     sender: str,
     body: str,
+    *,
+    thread_id: Optional[str] = None,
+    message_id: Optional[str] = None,
     timeout: Optional[int] = None,
     retries: int = 3,
 ):
@@ -408,12 +418,36 @@ def create_ticket(
         return None
 
     url, key = require_ticket_settings()
+    mailbox_id = settings.get("FREESCOUT_MAILBOX_ID")
+    if not mailbox_id:
+        raise RuntimeError("ticket.mailbox_id must be configured for FreeScout")
+
+    custom_fields: Dict[str, Any] = {}
+    gmail_thread_field = settings.get("FREESCOUT_GMAIL_THREAD_FIELD_ID")
+    gmail_message_field = settings.get("FREESCOUT_GMAIL_MESSAGE_FIELD_ID")
+
+    if gmail_thread_field and thread_id:
+        custom_fields[str(gmail_thread_field)] = thread_id
+    if gmail_message_field and message_id:
+        custom_fields[str(gmail_message_field)] = message_id
+
     payload = {
         "type": "email",
+        "mailboxId": mailbox_id,
         "subject": subject or "(no subject)",
         "customer": {"email": sender},
-        "threads": [{"type": "customer", "text": body}],
+        "imported": True,
+        "threads": [
+            {
+                "type": "customer",
+                "body": body or "(no body)",
+                "imported": True,
+            }
+        ],
     }
+
+    if custom_fields:
+        payload["custom_fields"] = custom_fields
 
     http_timeout = timeout if timeout is not None else settings["HTTP_TIMEOUT"]
     for attempt in range(1, retries + 1):
