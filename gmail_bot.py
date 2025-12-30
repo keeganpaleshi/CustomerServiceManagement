@@ -49,6 +49,12 @@ def parse_args(settings: Optional[Dict] = None):
         default=300,
         help="Seconds between FreeScout polls",
     )
+    parser.add_argument(
+        "--console-auth",
+        action="store_true",
+        default=settings["GMAIL_USE_CONSOLE"],
+        help="Use console-based OAuth (paste auth code) instead of opening a browser",
+    )
     return parser.parse_args()
 
 
@@ -228,7 +234,7 @@ def main():
     settings = get_settings()
     args = parse_args(settings)
 
-    svc = get_gmail_service()
+    svc = get_gmail_service(use_console=args.console_auth)
     ticket_label_id = None
     if settings["TICKET_SYSTEM"] == "freescout":
         ticket_label_id = ensure_label(svc, TICKET_LABEL_NAME)

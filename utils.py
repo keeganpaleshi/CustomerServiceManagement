@@ -50,6 +50,7 @@ def _load_settings() -> Dict[str, Any]:
             "CATEGORY_UPDATES",
             "CATEGORY_FORUMS",
         },
+        "GMAIL_USE_CONSOLE": cfg["gmail"].get("use_console_oauth", False),
         "TICKET_SYSTEM": cfg["ticket"]["system"],
         "FREESCOUT_URL": os.getenv("FREESCOUT_URL")
         or cfg["ticket"].get("freescout_url", ""),
@@ -92,7 +93,9 @@ def require_ticket_settings() -> tuple[str, str]:
 
 
 def get_gmail_service(
-    creds_filename: Optional[str] = None, token_filename: Optional[str] = None
+    creds_filename: Optional[str] = None,
+    token_filename: Optional[str] = None,
+    use_console: Optional[bool] = None,
 ):
     """Return an authenticated Gmail service instance."""
 
@@ -100,6 +103,11 @@ def get_gmail_service(
     creds_filename = creds_filename or settings["GMAIL_CLIENT_SECRET"]
     token_filename = token_filename or settings["GMAIL_TOKEN_FILE"]
     creds = None
+    use_console = (
+        use_console
+        if use_console is not None
+        else settings.get("GMAIL_USE_CONSOLE", False)
+    )
     if os.path.exists(token_filename):
         with open(token_filename, "rb") as t:
             creds = pickle.load(t)
@@ -110,7 +118,10 @@ def get_gmail_service(
             flow = InstalledAppFlow.from_client_secrets_file(
                 creds_filename, settings["SCOPES"]
             )
-            creds = flow.run_local_server(port=0)
+            if use_console:
+                creds = flow.run_console()
+            else:
+                creds = flow.run_local_server(port=0)
         with open(token_filename, "wb") as t:
             pickle.dump(creds, t)
     return build("gmail", "v1", credentials=creds)
