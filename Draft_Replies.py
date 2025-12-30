@@ -28,6 +28,12 @@ def parse_args(settings: Optional[Dict] = None):
                         help="Gmail search query")
     parser.add_argument("--timeout", type=int,
                         default=settings["HTTP_TIMEOUT"], help="HTTP request timeout")
+    parser.add_argument(
+        "--console-auth",
+        action="store_true",
+        default=settings["GMAIL_USE_CONSOLE"],
+        help="Use console-based OAuth (paste auth code) instead of opening a browser",
+    )
     return parser.parse_args()
 
 
@@ -104,7 +110,7 @@ def main():
        - Generate AI-based draft.
        - Create the draft (email remains unread).
     """
-    service = get_gmail_service()
+    service = get_gmail_service(use_console=args.console_auth)
 
     # Fetch all unread, then limit for "most recent" processing
     unread_messages = fetch_all_unread_messages(

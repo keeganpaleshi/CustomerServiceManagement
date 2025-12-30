@@ -48,6 +48,8 @@ gmail:
     - "https://www.googleapis.com/auth/gmail.modify"
   client_secret_file: "client_secret.json"
   token_file:         "token.pickle"
+  # Set to true to force console-based OAuth (paste auth code) instead of opening a browser
+  use_console_oauth:  false
   # Default Gmail search query
   query: "is:unread"
 

@@ -25,6 +25,8 @@ export FREESCOUT_KEY="your-freescout-api-key"      # or set in config.yaml
 python gmail_bot.py
 
 OAuth – the first run opens a browser window; token is cached in token.pickle.
+Pass `--console-auth` or set `gmail.use_console_oauth: true` in `config.yaml`
+to use the copy/paste console flow when no browser is available.
 ```
 ### Development
 
