@@ -293,12 +293,14 @@ def main():
         draft_text = generate_ai_reply(subject, sender, snippet, email_type)
         for _ in range(settings["MAX_RETRIES"]):
             rating = critic_email(draft_text, body)
-            if rating["score"] >= settings["CRITIC_THRESHOLD"]:
+            score = rating.get("score", 0) if isinstance(rating, dict) else 0
+            feedback = rating.get("feedback", "") if isinstance(rating, dict) else ""
+            if score >= settings["CRITIC_THRESHOLD"]:
                 break
             draft_text = generate_ai_reply(
                 subject,
                 sender,
-                f"{snippet}\n\nCritic feedback: {rating['feedback']}",
+                f"{snippet}\n\nCritic feedback: {feedback}",
                 email_type,
             )
         msg_draft = create_base64_message(

@@ -243,20 +243,36 @@ def is_promotional_or_spam(message, body_text):
 def critic_email(draft, original):
     """Self-grade a draft reply using GPT-4.1."""
     client = OpenAI(api_key=require_openai_api_key())
-    resp = client.chat.completions.create(
-        model=_load_settings()["CLASSIFY_MODEL"],
-        messages=[
-            {
-                "role": "system",
-                "content": (
-                    "Return ONLY JSON {\"score\":1-10,\"feedback\":\"...\"} rating on correctness, tone, length."
-                ),
-            },
-            {"role": "assistant", "content": draft},
-            {"role": "user", "content": f"Original email:\n\n{original}"},
-        ],
-    )
-    return json.loads(resp.choices[0].message.content)
+    default_rating = {
+        "score": 0,
+        "feedback": "Critic check failed; please review manually.",
+    }
+
+    try:
+        resp = client.chat.completions.create(
+            model=_load_settings()["CLASSIFY_MODEL"],
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "Return ONLY JSON {\"score\":1-10,\"feedback\":\"...\"} rating on correctness, tone, length."
+                    ),
+                },
+                {"role": "assistant", "content": draft},
+                {"role": "user", "content": f"Original email:\n\n{original}"},
+            ],
+        )
+        parsed = json.loads(resp.choices[0].message.content)
+        if not isinstance(parsed, dict):
+            return default_rating
+
+        return {
+            "score": parsed.get("score", 0),
+            "feedback": parsed.get("feedback", ""),
+        }
+    except Exception as exc:
+        print(f"Error critiquing email draft: {exc}")
+        return default_rating
 
 
 def classify_email(text):
