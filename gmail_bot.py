@@ -16,6 +16,7 @@ from utils import (
     create_draft,
     create_ticket,
     critic_email,
+    ensure_label,
     fetch_all_unread_messages,
     get_gmail_service,
     get_settings,
@@ -196,21 +197,6 @@ def fetch_recent_conversations(
     except requests.RequestException as e:
         print(f"Error polling FreeScout: {e}")
         return []
-
-
-def ensure_label(service, name: str) -> str:
-    """Return Gmail label ID, creating the label if needed."""
-    labels = service.users().labels().list(userId="me").execute().get("labels", [])
-    for lab in labels:
-        if lab.get("name") == name:
-            return lab["id"]
-    body = {
-        "name": name,
-        "labelListVisibility": "labelShow",
-        "messageListVisibility": "show",
-    }
-    created = service.users().labels().create(userId="me", body=body).execute()
-    return created["id"]
 
 
 def send_update_email(service, summary: str, label_id: Optional[str] = None):
