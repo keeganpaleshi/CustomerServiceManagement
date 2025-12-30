@@ -260,6 +260,11 @@ def main():
 
         body = extract_plain_text(payload)
         snippet = msg.get("snippet", "")
+        full_email_text = body.strip() if body else ""
+        if not full_email_text and snippet:
+            full_email_text = snippet
+        elif snippet and snippet not in full_email_text:
+            full_email_text = f"{full_email_text}\n\nSnippet: {snippet}"
 
         if is_promotional_or_spam(msg, body):
             print(f"{ref['id'][:8]}… skipped promotional/spam")
@@ -290,15 +295,15 @@ def main():
             continue
 
         # ---- draft creation with critic ----
-        draft_text = generate_ai_reply(subject, sender, snippet, email_type)
+        draft_text = generate_ai_reply(subject, sender, full_email_text, email_type)
         for _ in range(settings["MAX_RETRIES"]):
-            rating = critic_email(draft_text, body)
+            rating = critic_email(draft_text, full_email_text)
             if rating["score"] >= settings["CRITIC_THRESHOLD"]:
                 break
             draft_text = generate_ai_reply(
                 subject,
                 sender,
-                f"{snippet}\n\nCritic feedback: {rating['feedback']}",
+                f"{full_email_text}\n\nCritic feedback: {rating['feedback']}",
                 email_type,
             )
         msg_draft = create_base64_message(
