@@ -290,7 +290,8 @@ def main():
             continue
 
         # ---- draft creation with critic ----
-        draft_text = generate_ai_reply(subject, sender, snippet, email_type)
+        reply_context = body.strip() or snippet
+        draft_text = generate_ai_reply(subject, sender, reply_context, email_type)
         for _ in range(settings["MAX_RETRIES"]):
             rating = critic_email(draft_text, body)
             score = rating.get("score", 0) if isinstance(rating, dict) else 0
@@ -300,7 +301,7 @@ def main():
             draft_text = generate_ai_reply(
                 subject,
                 sender,
-                f"{snippet}\n\nCritic feedback: {feedback}",
+                f"{reply_context}\n\nCritic feedback: {feedback}",
                 email_type,
             )
         msg_draft = create_base64_message(
