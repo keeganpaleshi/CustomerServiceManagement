@@ -20,6 +20,7 @@ from utils import (
     get_gmail_service,
     get_settings,
     is_promotional_or_spam,
+    thread_has_draft,
     require_openai_api_key,
 )
 
