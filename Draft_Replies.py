@@ -10,7 +10,9 @@ from utils import (
     create_draft,
     create_ticket,
     critic_email,
+    ensure_label,
     fetch_all_unread_messages,
+    apply_label_to_thread,
     get_gmail_service,
     get_settings,
     is_promotional_or_spam,
@@ -117,6 +119,7 @@ def main():
         f"Fetched {len(unread_messages)} unread messages (limited to {settings['MAX_DRAFTS']}).")
 
     # Process each unread message
+    ticket_label_id = ensure_label(service, "Ticketed")
     for msg_ref in unread_messages:
         msg_id = msg_ref["id"]
         msg_detail = (
@@ -135,6 +138,13 @@ def main():
         sender = get_header_value(msg_detail, "From")
         thread_id = msg_detail.get("threadId")
         snippet = msg_detail.get("snippet", "")
+        label_ids = set(msg_detail.get("labelIds", []))
+
+        if ticket_label_id and ticket_label_id in label_ids:
+            print(
+                f"Skipping message {msg_id} (thread {thread_id}) because it already has the ticket label."
+            )
+            continue
 
         # Decode the plain text body if available
         body_txt = ""
@@ -187,7 +197,11 @@ def main():
             print(
                 f"Draft for message {msg_id} scored {score} (<{settings['CRITIC_THRESHOLD']}). Creating ticket."
             )
-            create_ticket(subject, sender, body_txt, timeout=args.timeout)
+            ticket_response = create_ticket(
+                subject, sender, body_txt, timeout=args.timeout
+            )
+            if ticket_response and ticket_label_id:
+                apply_label_to_thread(service, thread_id, ticket_label_id)
             continue
         else:
             print(

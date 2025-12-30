@@ -13,6 +13,7 @@ import yaml
 from google.auth.transport.requests import Request
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
 from openai import OpenAI
 
 
@@ -147,6 +148,42 @@ def create_draft(service, user_id, msg_body, thread_id=None):
 def thread_has_draft(service, thread_id):
     data = service.users().threads().get(userId="me", id=thread_id).execute()
     return any("DRAFT" in (m.get("labelIds") or []) for m in data.get("messages", []))
+
+
+def ensure_label(service, label_name: str) -> Optional[str]:
+    """Return an existing label's ID, creating it when missing."""
+
+    try:
+        labels = (
+            service.users().labels().list(userId="me", fields="labels/id,labels/name").execute()
+        ).get("labels", [])
+        for label in labels:
+            if label.get("name") == label_name:
+                return label.get("id")
+
+        body = {
+            "name": label_name,
+            "labelListVisibility": "labelShow",
+            "messageListVisibility": "show",
+        }
+        created = service.users().labels().create(userId="me", body=body).execute()
+        return created.get("id")
+    except HttpError as exc:
+        print(f"Error ensuring label '{label_name}': {exc}")
+        return None
+
+
+def apply_label_to_thread(service, thread_id: str, label_id: str) -> bool:
+    """Add a label to a thread; return True on success."""
+
+    try:
+        service.users().threads().modify(
+            userId="me", id=thread_id, body={"addLabelIds": [label_id]}
+        ).execute()
+        return True
+    except HttpError as exc:
+        print(f"Failed to apply label to thread {thread_id}: {exc}")
+        return False
 
 
 def is_promotional_or_spam(message, body_text):
