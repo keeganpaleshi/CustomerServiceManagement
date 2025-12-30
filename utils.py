@@ -431,19 +431,19 @@ def create_ticket(
     if gmail_message_field and message_id:
         custom_fields[str(gmail_message_field)] = message_id
 
+    thread_payload = {
+        "type": "customer",
+        "body": body or "(no body)",
+        "imported": True,
+    }
+
     payload = {
         "type": "email",
         "mailboxId": mailbox_id,
         "subject": subject or "(no subject)",
         "customer": {"email": sender},
         "imported": True,
-        "threads": [
-            {
-                "type": "customer",
-                "body": body or "(no body)",
-                "imported": True,
-            }
-        ],
+        "threads": [thread_payload],
     }
 
     if custom_fields:
