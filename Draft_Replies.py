@@ -180,7 +180,7 @@ def main():
             draft_body_text,
             f"Subject:{subject}\n\n{body_txt}",
         )
-        score = critique.get("score", 0)
+        score = critique.get("score", 0) if isinstance(critique, dict) else 0
         if score < settings["CRITIC_THRESHOLD"]:
             print(
                 f"Draft for message {msg_id} scored {score} (<{settings['CRITIC_THRESHOLD']}). Creating ticket."
