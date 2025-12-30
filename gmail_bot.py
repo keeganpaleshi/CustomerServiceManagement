@@ -79,6 +79,7 @@ def route_email(
     sender: str,
     body: str,
     thread_id: str,
+    message_id: str,
     cls: dict,
     has_existing_draft: bool,
     ticket_label_id: Optional[str],
@@ -127,7 +128,14 @@ def route_email(
         print(f"Priority check failed: {e}")
 
     if high_priority or needs_info:
-        ticket = create_ticket(subject, sender, body, timeout=http_timeout)
+        ticket = create_ticket(
+            subject,
+            sender,
+            body,
+            thread_id=thread_id,
+            message_id=message_id,
+            timeout=http_timeout,
+        )
         if ticket_label_id and ticket is not None:
             service.users().threads().modify(
                 userId="me", id=thread_id, body={"addLabelIds": [ticket_label_id]}
@@ -415,6 +423,7 @@ def main():
         raw_sender = get_header_value(payload, "From")
         sender = parseaddr(raw_sender)[1] or raw_sender
         thread = msg.get("threadId", "")
+        message_id = ref.get("id", "")
 
         if ticket_label_id and ticket_label_id in set(msg.get("labelIds", [])):
             print(f"{ref['id'][:8]}… skipped (ticket already created)")
@@ -439,6 +448,7 @@ def main():
             sender,
             body,
             thread,
+            message_id,
             cls,
             has_existing_draft=has_draft,
             ticket_label_id=ticket_label_id,

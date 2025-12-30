@@ -192,7 +192,12 @@ def main():
                 f"Draft for message {msg_id} scored {score} (<{settings['CRITIC_THRESHOLD']}). Creating ticket."
             )
             ticket_response = create_ticket(
-                subject, sender, body_txt, timeout=args.timeout
+                subject,
+                sender,
+                body_txt,
+                thread_id=thread_id,
+                message_id=msg_id,
+                timeout=args.timeout,
             )
             if ticket_response and ticket_label_id:
                 apply_label_to_thread(service, thread_id, ticket_label_id)
