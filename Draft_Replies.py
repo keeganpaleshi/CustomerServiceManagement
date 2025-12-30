@@ -1,18 +1,18 @@
 import argparse
-import base64
 from typing import Dict, Optional
 
 from openai import OpenAI
 
 from utils import (
+    apply_label_to_thread,
     classify_email,
     create_base64_message,
     create_draft,
     create_ticket,
     critic_email,
     ensure_label,
+    extract_plain_text,
     fetch_all_unread_messages,
-    apply_label_to_thread,
     get_gmail_service,
     get_settings,
     is_promotional_or_spam,
@@ -41,25 +41,6 @@ def get_header_value(message, header_name):
         if header.get("name", "").lower() == header_name.lower():
             return header.get("value", "")
     return ""
-
-
-def decode_base64url(data: str) -> str:
-    """Decode base64url strings that may be missing padding.
-
-    Returns a UTF-8 string and gracefully handles malformed input by
-    returning an empty string instead of raising.
-    """
-
-    if not data:
-        return ""
-
-    padding = "=" * (-len(data) % 4)
-    try:
-        return base64.urlsafe_b64decode((data + padding).encode("utf-8")).decode(
-            "utf-8", "ignore"
-        )
-    except (base64.binascii.Error, ValueError):
-        return ""
 # 5) OpenAI Integration
 
 
@@ -165,20 +146,9 @@ def main():
             )
             continue
 
-        # Decode the plain text body if available
-        body_txt = ""
+        # Decode the plain text body if available, including nested multiparts
         payload = msg_detail.get("payload", {})
-        if "parts" in payload:
-            for part in payload.get("parts", []):
-                if part.get("mimeType") == "text/plain":
-                    data = part.get("body", {}).get("data", "")
-                    if data:
-                        body_txt = decode_base64url(data)
-                        break
-        else:
-            data = payload.get("body", {}).get("data", "")
-            if data:
-                body_txt = decode_base64url(data)
+        body_txt = extract_plain_text(payload)
 
         # Skip newsletters or spam before using any AI models
         if is_promotional_or_spam(msg_detail, body_txt):

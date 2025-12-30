@@ -16,6 +16,7 @@ from utils import (
     create_draft,
     create_ticket,
     critic_email,
+    extract_plain_text,
     fetch_all_unread_messages,
     get_gmail_service,
     get_settings,
@@ -269,46 +270,6 @@ def main():
         if ticket_label_id and ticket_label_id in set(msg.get("labelIds", [])):
             print(f"{ref['id'][:8]}… skipped (ticket already created)")
             continue
-
-        def decode_base64url(data: str) -> str:
-            """Decode base64url strings that may be missing padding."""
-
-            if not data:
-                return ""
-
-            padding = "=" * (-len(data) % 4)
-            try:
-                return base64.urlsafe_b64decode((data + padding).encode("utf-8")).decode(
-                    "utf-8", "ignore"
-                )
-            except (base64.binascii.Error, ValueError) as exc:
-                print(f"Failed to decode message body: {exc}")
-                return ""
-
-        def extract_plain_text(payload: Optional[dict]) -> str:
-            """Recursively search a payload tree for the first text/plain body."""
-
-            if not payload:
-                return ""
-
-            mime_type = payload.get("mimeType", "")
-            body_data = payload.get("body", {}).get("data")
-
-            # Use the body if this part is plain text
-            if mime_type == "text/plain" and body_data:
-                return decode_base64url(body_data)
-
-            # Multipart containers or parts with children
-            for part in payload.get("parts", []) or []:
-                text = extract_plain_text(part)
-                if text:
-                    return text
-
-            # Fallback: single-part messages store data directly on payload
-            if body_data:
-                return decode_base64url(body_data)
-
-            return ""
 
         payload = msg.get("payload", {})
         body = extract_plain_text(payload)
