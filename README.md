@@ -47,31 +47,64 @@ Edit `config.yaml` to adjust limits and model settings. Key options include:
 - `gmail.query` – default Gmail search query.
 - `http.timeout` – HTTP request timeout in seconds.
 
-## FreeScout status updates
+## Working fully inside FreeScout
 
-Run the bot with `--poll-freescout` to periodically check FreeScout for recent
-conversation updates. A short summary email is sent to your own inbox after each
-poll. Use `--poll-interval` to configure how often (in seconds) the endpoint is
-queried.
+Reps can now triage and respond without Gmail drafts. FreeScout conversations
+can be ingested either by polling from `gmail_bot.py` or via a lightweight
+webhook handler. The bot uses the FreeScout API to fetch the conversation's
+latest customer message, classifies it with OpenAI, and then updates the ticket
+in place: priority, assignment, tags, custom fields, and internal notes with an
+optional suggested reply.
 
-### Webhook alternative
+### Configure actions
 
-Instead of polling, you can point FreeScout's webhook integration at a small
-Flask app which calls `send_update_email` from `gmail_bot.py`.
+Set the following keys in `config.yaml` under `ticket:`:
 
-```python
-from flask import Flask, request
-from gmail_bot import get_gmail_service, send_update_email
+- `webhook_secret` – shared secret to validate webhook calls (header
+  `X-Webhook-Secret`).
+- `poll_interval` – how often to poll FreeScout when running with
+  `--poll-freescout`.
+- `actions.update_priority` – set FreeScout priority using the AI importance
+  score; `actions.priority_high_threshold` controls the urgency cutoff.
+- `actions.assign_to_user_id` – FreeScout user ID to auto-assign (optional).
+- `actions.apply_tags` – tag conversations with the detected type and a
+  `high-priority` tag when applicable.
+- `actions.custom_fields.type_field_id` / `importance_field_id` – custom field
+  IDs to store the classification and importance (optional).
+- `actions.post_internal_notes` – add an internal note summarizing the
+  classification.
+- `actions.post_suggested_reply` – add an internal note containing a suggested
+  AI reply so agents can reply directly from FreeScout.
 
-app = Flask(__name__)
-svc = get_gmail_service()
+### Scheduled polling
 
-@app.post("/freescout")
-def freescout_hook():
-    payload = request.get_json()
-    send_update_email(svc, str(payload))
-    return "", 204
+```bash
+python gmail_bot.py --poll-freescout --poll-interval 300
 ```
 
-Deploy the webhook on a server with HTTPS and set the URL in FreeScout's
-settings to have Gmail updated whenever a conversation changes.
+The bot fetches recent conversations from FreeScout, classifies the newest
+customer thread, updates ticket metadata, and posts notes/suggestions based on
+the configured toggles.
+
+### Webhook handler
+
+Add this minimal FastAPI or Flask endpoint to receive FreeScout webhooks and
+let `gmail_bot` do the rest:
+
+```python
+from fastapi import FastAPI, Header, Request
+from gmail_bot import freescout_webhook_handler
+
+app = FastAPI()
+
+@app.post("/freescout")
+async def freescout(payload: Request, x_webhook_secret: str | None = Header(None)):
+    body = await payload.json()
+    message, status = freescout_webhook_handler(body, {"X-Webhook-Secret": x_webhook_secret})
+    return message, status
+```
+
+Deploy the webhook with HTTPS and set the URL inside FreeScout's webhook
+settings. The handler validates `X-Webhook-Secret` (when configured) and then
+fetches the conversation from FreeScout before applying the same classification
+and update flow used by the poller.
