@@ -174,23 +174,27 @@ def fetch_recent_conversations(
         # Support multiple possible FreeScout filter names to avoid missing updates
         params = {"updated_since": since_iso, "updated_from": since_iso}
 
-    resp = requests.get(
-        url,
-        headers={
-            "Accept": "application/json",
-            "X-FreeScout-API-Key": settings["FREESCOUT_KEY"],
-        },
-        params=params,
-        timeout=http_timeout,
-    )
-    resp.raise_for_status()
+    try:
+        resp = requests.get(
+            url,
+            headers={
+                "Accept": "application/json",
+                "X-FreeScout-API-Key": settings["FREESCOUT_KEY"],
+            },
+            params=params,
+            timeout=http_timeout,
+        )
+        resp.raise_for_status()
 
-    data = resp.json() or []
-    if isinstance(data, dict):
-        return data.get("data") or data.get("conversations") or []
-    if isinstance(data, list):
-        return data
-    return []
+        data = resp.json() or []
+        if isinstance(data, dict):
+            return data.get("data") or data.get("conversations") or []
+        if isinstance(data, list):
+            return data
+        return []
+    except requests.RequestException as e:
+        print(f"Error polling FreeScout: {e}")
+        return []
 
 
 def ensure_label(service, name: str) -> str:
