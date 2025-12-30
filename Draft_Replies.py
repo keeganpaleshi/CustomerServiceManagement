@@ -41,6 +41,25 @@ def get_header_value(message, header_name):
         if header.get("name", "").lower() == header_name.lower():
             return header.get("value", "")
     return ""
+
+
+def decode_base64url(data: str) -> str:
+    """Decode base64url strings that may be missing padding.
+
+    Returns a UTF-8 string and gracefully handles malformed input by
+    returning an empty string instead of raising.
+    """
+
+    if not data:
+        return ""
+
+    padding = "=" * (-len(data) % 4)
+    try:
+        return base64.urlsafe_b64decode((data + padding).encode("utf-8")).decode(
+            "utf-8", "ignore"
+        )
+    except (base64.binascii.Error, ValueError):
+        return ""
 # 5) OpenAI Integration
 
 
@@ -154,14 +173,12 @@ def main():
                 if part.get("mimeType") == "text/plain":
                     data = part.get("body", {}).get("data", "")
                     if data:
-                        body_txt = base64.urlsafe_b64decode(
-                            data.encode("utf-8")).decode("utf-8")
+                        body_txt = decode_base64url(data)
                         break
         else:
             data = payload.get("body", {}).get("data", "")
             if data:
-                body_txt = base64.urlsafe_b64decode(
-                    data.encode("utf-8")).decode("utf-8")
+                body_txt = decode_base64url(data)
 
         # Skip newsletters or spam before using any AI models
         if is_promotional_or_spam(msg_detail, body_txt):
