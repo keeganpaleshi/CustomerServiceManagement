@@ -75,12 +75,15 @@ def generate_ai_reply(subject, sender, snippet_or_body, email_type):
 
     except Exception as e:
         print(f"Error calling OpenAI API: {e}")
-        return (
-            "Hello,\n\n"
-            "I'm sorry, but I couldn't generate a response at this time. "
-            "Please review this email manually.\n\n"
-            "Best,\nAutomated Script"
-        )
+        fallback_lines = [
+            "Hello,",
+            "",
+            "I'm sorry, but I couldn't generate a response at this time. Please review this email manually.",
+            "",
+            "Best,",
+            "Automated Script",
+        ]
+        return "\n".join(fallback_lines)
 
 
 # -------------------------------------------------------
