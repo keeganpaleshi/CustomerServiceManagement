@@ -413,6 +413,12 @@ def create_ticket(
     timeout: Optional[int] = None,
     retries: int = 3,
 ):
+    """Create a FreeScout conversation using a body-based thread payload.
+
+    FreeScout's API examples (https://api-docs.freescout.net) use the `body`
+    key inside each thread. We stick to that format and avoid the legacy
+    `text` key to prevent duplicate or conflicting thread definitions.
+    """
     settings = _load_settings()
     if settings["TICKET_SYSTEM"] != "freescout":
         return None
