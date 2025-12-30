@@ -132,6 +132,44 @@ def fetch_all_unread_messages(service, query):
     return unread
 
 
+def decode_base64url(data: str) -> str:
+    """Decode base64url strings that may be missing padding."""
+
+    if not data:
+        return ""
+
+    padding = "=" * (-len(data) % 4)
+    try:
+        return base64.urlsafe_b64decode((data + padding).encode("utf-8")).decode(
+            "utf-8", "ignore"
+        )
+    except (base64.binascii.Error, ValueError):
+        return ""
+
+
+def extract_plain_text(payload: Optional[dict]) -> str:
+    """Recursively search a payload tree for the first text/plain body."""
+
+    if not payload:
+        return ""
+
+    mime_type = payload.get("mimeType", "")
+    body_data = payload.get("body", {}).get("data")
+
+    if mime_type == "text/plain" and body_data:
+        return decode_base64url(body_data)
+
+    for part in payload.get("parts", []) or []:
+        text = extract_plain_text(part)
+        if text:
+            return text
+
+    if body_data:
+        return decode_base64url(body_data)
+
+    return ""
+
+
 def create_base64_message(sender, to, subject, body):
     msg = MIMEText(body)
     msg["to"], msg["from"], msg["subject"] = to, sender, subject
