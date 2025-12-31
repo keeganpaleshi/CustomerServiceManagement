@@ -207,13 +207,21 @@ class FreeScoutClient:
         text: str,
         *,
         imported: bool = True,
+        customer_email: Optional[str] = None,
         customer: Optional[Dict[str, Any]] = None,
+        custom_field_values: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Append a customer message to an existing conversation."""
 
         payload: Dict[str, Any] = {"type": "customer", "text": text, "imported": imported}
         if customer:
             payload["customer"] = customer
+        elif customer_email:
+            payload["customer"] = {"email": customer_email}
+
+        serialized_fields = _serialize_custom_fields(custom_field_values)
+        if serialized_fields:
+            payload["customFields"] = serialized_fields
 
         resp = requests.post(
             f"{self.base_url}/api/conversations/{conversation_id}/threads",
