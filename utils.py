@@ -99,7 +99,9 @@ def require_ticket_settings() -> tuple[str, str]:
     return url, key
 
 
-def _serialize_custom_fields(custom_fields: Optional[Dict[str, Any]]) -> Optional[list[dict]]:
+def _serialize_custom_fields(
+    custom_field_values: Optional[Dict[str, Any]]
+) -> Optional[list[dict]]:
     """Convert a dict of custom fields to FreeScout's camelCase payload.
 
     FreeScout expects a ``customFields`` array shaped as ``{"id": <int>, "value": <any>}``.
@@ -107,11 +109,11 @@ def _serialize_custom_fields(custom_fields: Optional[Dict[str, Any]]) -> Optiona
     properly-formatted list, skipping any ``None`` values.
     """
 
-    if not custom_fields:
+    if not custom_field_values:
         return None
 
     formatted: list[dict] = []
-    for field_id, value in custom_fields.items():
+    for field_id, value in custom_field_values.items():
         if value is None:
             continue
 
@@ -466,9 +468,10 @@ def create_ticket(
 ):
     """Create a FreeScout conversation using only documented fields.
 
-    The payload uses FreeScout's ``threads`` with ``text`` (not ``body``) and
-    encodes custom field values in the camelCase ``customFields`` array. This
-    avoids sending duplicate snake/camel keys that the API never documents.
+    The payload uses FreeScout's ``threads`` with ``text`` (no ``body`` key)
+    and encodes custom field values solely in the camelCase ``customFields``
+    array. This keeps outbound JSON aligned with the official FreeScout
+    request schema.
     """
     settings = _load_settings()
     if settings["TICKET_SYSTEM"] != "freescout":
