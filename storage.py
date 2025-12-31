@@ -15,6 +15,9 @@ class TicketStore:
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path)
+        conn.execute("PRAGMA journal_mode=WAL;")
+        conn.execute("PRAGMA synchronous=NORMAL;")
+        conn.execute("PRAGMA busy_timeout=5000;")
         conn.row_factory = sqlite3.Row
         return conn
 
@@ -51,6 +54,40 @@ class TicketStore:
                 (gmail_message_id,),
             ).fetchone()
             return dict(row) if row else None
+
+    def processed_success(self, gmail_message_id: str) -> bool:
+        record = self.get_processed_message(gmail_message_id)
+        return bool(record and record.get("status") == "success")
+
+    def mark_success(
+        self,
+        *,
+        gmail_message_id: str,
+        gmail_thread_id: Optional[str],
+        freescout_conversation_id: Optional[int],
+    ) -> None:
+        self.record_processed_message(
+            gmail_message_id=gmail_message_id,
+            gmail_thread_id=gmail_thread_id,
+            freescout_conversation_id=freescout_conversation_id,
+            status="success",
+        )
+
+    def mark_failed(
+        self,
+        *,
+        gmail_message_id: str,
+        gmail_thread_id: Optional[str],
+        freescout_conversation_id: Optional[int],
+        error: str,
+    ) -> None:
+        self.record_processed_message(
+            gmail_message_id=gmail_message_id,
+            gmail_thread_id=gmail_thread_id,
+            freescout_conversation_id=freescout_conversation_id,
+            status="failed",
+            error=error,
+        )
 
     def record_processed_message(
         self,

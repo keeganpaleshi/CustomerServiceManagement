@@ -405,7 +405,7 @@ def main():
     ]:
         message_id = ref.get("id", "")
         processed = store.get_processed_message(message_id)
-        if processed and processed.get("status") == "success":
+        if store.processed_success(message_id):
             print(f"{message_id[:8]}… skipped (already processed)")
             continue
         if processed and processed.get("status") == "failed":
@@ -449,28 +449,25 @@ def main():
                     subject=subject,
                 )
                 store.upsert_thread_conversation(thread, conv_id)
-                store.record_processed_message(
+                store.mark_success(
                     gmail_message_id=message_id,
                     gmail_thread_id=thread,
                     freescout_conversation_id=conv_id,
-                    status="success",
                 )
                 continue
             except requests.RequestException as exc:
-                store.record_processed_message(
+                store.mark_failed(
                     gmail_message_id=message_id,
                     gmail_thread_id=thread,
                     freescout_conversation_id=conv_id,
-                    status="failed",
                     error=str(exc),
                 )
                 continue
         elif conv_id and not freescout_client:
-            store.record_processed_message(
+            store.mark_failed(
                 gmail_message_id=message_id,
                 gmail_thread_id=thread,
                 freescout_conversation_id=conv_id,
-                status="failed",
                 error="freescout disabled",
             )
             continue
@@ -489,21 +486,19 @@ def main():
         )
 
         if action == "ticket_failed":
-            store.record_processed_message(
+            store.mark_failed(
                 gmail_message_id=message_id,
                 gmail_thread_id=thread,
                 freescout_conversation_id=None,
-                status="failed",
                 error=error or "ticket creation failed",
             )
             continue
 
         if action == "ticketed":
-            store.record_processed_message(
+            store.mark_success(
                 gmail_message_id=message_id,
                 gmail_thread_id=thread,
                 freescout_conversation_id=conversation_id,
-                status="success",
             )
             if conversation_id:
                 store.upsert_thread_conversation(thread, conversation_id)
