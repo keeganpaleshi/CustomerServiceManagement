@@ -22,7 +22,6 @@ from utils import (
     get_settings,
     FreeScoutClient,
     is_promotional_or_spam,
-    thread_has_draft,
     extract_plain_text,
     require_openai_api_key,
     require_ticket_settings,
@@ -125,7 +124,6 @@ def route_email(
     message_id: str,
     cls: dict,
     has_existing_draft: bool,
-    ticket_label_id: Optional[str],
     timeout: Optional[int] = None,
 ) -> str:
     """Route an email based on priority and information level.
@@ -171,7 +169,7 @@ def route_email(
         print(f"Priority check failed: {e}")
 
     if high_priority or needs_info:
-        ticket = create_ticket(
+        create_ticket(
             subject,
             sender,
             body,
@@ -179,10 +177,6 @@ def route_email(
             message_id=message_id,
             timeout=http_timeout,
         )
-        if ticket_label_id and ticket is not None:
-            service.users().threads().modify(
-                userId="me", id=thread_id, body={"addLabelIds": [ticket_label_id]}
-            ).execute()
         return "ticketed"
 
     # Otherwise ask for more details if we haven't drafted already
@@ -509,10 +503,14 @@ def main():
                 conv_id = _extract_conv_id(ticket) if ticket else None
                 if conv_id is None:
                     print(f"{ref['id'][:8]}… failed to create ticket")
+                    ingestion_db.mark_failure(
+                        message_id, thread, conv_id, "ticket creation returned no id"
+                    )
                     continue
                 ingestion_db.set_thread_conv(thread, conv_id)
         except requests.RequestException as exc:
             print(f"{ref['id'][:8]}… error while syncing to FreeScout: {exc}")
+            ingestion_db.mark_failure(message_id, thread, conv_id, str(exc))
             continue
 
         ingestion_db.mark_success(message_id, thread, conv_id)

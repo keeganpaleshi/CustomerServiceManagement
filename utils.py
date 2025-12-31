@@ -196,7 +196,7 @@ class FreeScoutClient:
     ) -> Dict[str, Any]:
         payload: Dict[str, Any] = {
             "type": "customer",
-            "body": body or "(no body)",
+            "text": body or "(no body)",
             "imported": imported,
         }
 
@@ -204,7 +204,7 @@ class FreeScoutClient:
             payload["customer"] = {"email": customer_email}
 
         if custom_fields:
-            payload["custom_fields"] = custom_fields
+            payload["customFields"] = custom_fields
 
         resp = requests.post(
             f"{self.base_url}/api/conversations/{conversation_id}/threads",
@@ -235,6 +235,8 @@ class GmailIngestionDB:
                     message_id TEXT PRIMARY KEY,
                     thread_id TEXT,
                     conv_id INTEGER,
+                    status TEXT DEFAULT 'success',
+                    error TEXT,
                     processed_at REAL DEFAULT (strftime('%s','now'))
                 )
                 """
@@ -248,12 +250,24 @@ class GmailIngestionDB:
                 )
                 """
             )
+            cur = conn.execute("PRAGMA table_info(processed_messages)")
+            columns = {row[1] for row in cur.fetchall()}
+            if "status" not in columns:
+                conn.execute(
+                    "ALTER TABLE processed_messages ADD COLUMN status TEXT DEFAULT 'success'"
+                )
+            if "error" not in columns:
+                conn.execute("ALTER TABLE processed_messages ADD COLUMN error TEXT")
             conn.commit()
 
     def processed_success(self, message_id: str) -> bool:
         with self._connect() as conn:
             cur = conn.execute(
-                "SELECT 1 FROM processed_messages WHERE message_id = ?", (message_id,)
+                """
+                SELECT 1 FROM processed_messages
+                WHERE message_id = ? AND status = 'success'
+                """,
+                (message_id,)
             )
             return cur.fetchone() is not None
 
@@ -282,10 +296,35 @@ class GmailIngestionDB:
         with self._connect() as conn:
             conn.execute(
                 """
-                INSERT OR IGNORE INTO processed_messages(message_id, thread_id, conv_id)
-                VALUES(?, ?, ?)
+                INSERT INTO processed_messages(message_id, thread_id, conv_id, status, error, processed_at)
+                VALUES(?, ?, ?, 'success', NULL, strftime('%s','now'))
+                ON CONFLICT(message_id) DO UPDATE SET
+                    thread_id = excluded.thread_id,
+                    conv_id = excluded.conv_id,
+                    status = 'success',
+                    error = NULL,
+                    processed_at = excluded.processed_at
                 """,
                 (message_id, thread_id, conv_id),
+            )
+            conn.commit()
+
+    def mark_failure(
+        self, message_id: str, thread_id: str, conv_id: Optional[int], error: str
+    ) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO processed_messages(message_id, thread_id, conv_id, status, error, processed_at)
+                VALUES(?, ?, ?, 'failed', ?, strftime('%s','now'))
+                ON CONFLICT(message_id) DO UPDATE SET
+                    thread_id = COALESCE(excluded.thread_id, processed_messages.thread_id),
+                    conv_id = COALESCE(excluded.conv_id, processed_messages.conv_id),
+                    status = 'failed',
+                    error = excluded.error,
+                    processed_at = excluded.processed_at
+                """,
+                (message_id, thread_id, conv_id, error[:500] if error else None),
             )
             conn.commit()
 
@@ -522,11 +561,12 @@ def create_ticket(
     timeout: Optional[int] = None,
     retries: int = 3,
 ):
-    """Create a FreeScout conversation using a body-based thread payload.
+    """Create a FreeScout conversation using a body/text thread payload.
 
-    FreeScout's API examples (https://api-docs.freescout.net) use the `body`
-    key inside each thread. We stick to that format and avoid the legacy
-    `text` key to prevent duplicate or conflicting thread definitions.
+    FreeScout examples show both `text` and `customFields`. We populate both
+    `text` and `body` for the initial customer thread to keep payloads
+    compatible with prior integrations while storing Gmail metadata in
+    `customFields` when configured.
     """
     settings = _load_settings()
     if settings["TICKET_SYSTEM"] != "freescout":
@@ -548,6 +588,7 @@ def create_ticket(
 
     thread_payload = {
         "type": "customer",
+        "text": body or "(no body)",
         "body": body or "(no body)",
         "imported": True,
     }
@@ -562,7 +603,7 @@ def create_ticket(
     }
 
     if custom_fields:
-        payload["custom_fields"] = custom_fields
+        payload["customFields"] = custom_fields
 
     http_timeout = timeout if timeout is not None else settings["HTTP_TIMEOUT"]
     for attempt in range(1, retries + 1):
