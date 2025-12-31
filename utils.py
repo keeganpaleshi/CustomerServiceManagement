@@ -464,7 +464,12 @@ def create_ticket(
     timeout: Optional[int] = None,
     retries: int = 3,
 ):
-    """Create a FreeScout conversation using a text-based thread payload."""
+    """Create a FreeScout conversation using only documented fields.
+
+    The payload uses FreeScout's ``threads`` with ``text`` (not ``body``) and
+    encodes custom field values in the camelCase ``customFields`` array. This
+    avoids sending duplicate snake/camel keys that the API never documents.
+    """
     settings = _load_settings()
     if settings["TICKET_SYSTEM"] != "freescout":
         return None
@@ -474,14 +479,14 @@ def create_ticket(
     if not mailbox_id:
         raise RuntimeError("ticket.mailbox_id must be configured for FreeScout")
 
-    custom_fields: Dict[str, Any] = {}
+    custom_field_values: Dict[str, Any] = {}
     gmail_thread_field = settings.get("FREESCOUT_GMAIL_THREAD_FIELD_ID")
     gmail_message_field = settings.get("FREESCOUT_GMAIL_MESSAGE_FIELD_ID")
 
     if gmail_thread_field and thread_id:
-        custom_fields[str(gmail_thread_field)] = thread_id
+        custom_field_values[str(gmail_thread_field)] = thread_id
     if gmail_message_field and message_id:
-        custom_fields[str(gmail_message_field)] = message_id
+        custom_field_values[str(gmail_message_field)] = message_id
 
     thread_payload = {
         "type": "customer",
@@ -489,7 +494,7 @@ def create_ticket(
         "imported": True,
     }
 
-    serialized_fields = _serialize_custom_fields(custom_fields)
+    serialized_fields = _serialize_custom_fields(custom_field_values)
     tags: Optional[list[str]] = None
     if not serialized_fields:
         # Fallback when no FreeScout custom field IDs are configured.
