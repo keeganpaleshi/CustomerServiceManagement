@@ -448,6 +448,7 @@ def main():
                     customer_email=sender,
                     subject=subject,
                 )
+                store.upsert_thread_conversation(thread, conv_id)
                 store.record_processed_message(
                     gmail_message_id=message_id,
                     gmail_thread_id=thread,
