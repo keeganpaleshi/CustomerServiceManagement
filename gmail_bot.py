@@ -78,7 +78,6 @@ def route_email(
     thread_id: str,
     message_id: str,
     cls: dict,
-    has_existing_draft: bool,
     timeout: Optional[int] = None,
 ) -> Tuple[str, Optional[int], Optional[str]]:
     """Route an email based on priority and information level.
@@ -87,7 +86,6 @@ def route_email(
     - "ignored" if the email type is not handled
     - "ticketed" if a ticket was created
     - "ticket_failed" if ticket creation failed
-    - "followup_draft" if a simple follow-up draft was created
     - "no_action" if the message should proceed to full draft creation
     """
 
@@ -137,16 +135,6 @@ def route_email(
             return "ticket_failed", None, "ticket creation failed"
         conversation_id = _extract_conversation_id_from_ticket(ticket)
         return "ticketed", conversation_id, None
-
-    # Otherwise ask for more details if we haven't drafted already
-    if not has_existing_draft:
-        followup = (
-            "Thank you for contacting us. Could you provide more details about "
-            "your request so we can assist you?"
-        )
-        msg = create_base64_message("me", sender, f"Re: {subject}", followup)
-        create_draft(service, "me", msg, thread_id=thread_id)
-        return "followup_draft", None, None
 
     return "no_action", None, None
 
@@ -472,7 +460,6 @@ def main():
             thread,
             message_id,
             cls,
-            has_existing_draft=has_draft,
             timeout=args.timeout,
         )
 
@@ -497,7 +484,7 @@ def main():
                 store.upsert_thread_conversation(thread, conversation_id)
             continue
 
-        if action in {"ignored", "followup_draft"}:
+        if action == "ignored":
             continue
 
         if has_draft:
