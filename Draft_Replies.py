@@ -5,15 +5,11 @@ from openai import OpenAI
 
 from utils import (
     classify_email,
-    create_base64_message,
-    create_draft,
     create_ticket,
-    critic_email,
     fetch_all_unread_messages,
     get_gmail_service,
     get_settings,
     is_promotional_or_spam,
-    thread_has_draft,
     extract_plain_text,
     require_openai_api_key,
 )
@@ -159,53 +155,14 @@ def main():
             continue
         print(f"{msg_id[:8]}… type={email_type}, imp={importance}")
 
-        # 1) Check if there's already a draft in this thread
-        if thread_has_draft(service, thread_id):
-            print(
-                f"Skipping message {msg_id} (thread {thread_id}) because a draft already exists."
-            )
-            continue
-
-        # 2) If not, generate a new draft
-        reply_subject = f"Re: {subject}" if subject else "Re: (no subject)"
-        draft_body_text = generate_ai_reply(
-            subject, sender, snippet, email_type)
-
-        # Self-grade the AI-generated reply to ensure quality
-        critique = critic_email(
-            draft_body_text,
-            f"Subject:{subject}\n\n{body_txt}",
+        create_ticket(
+            subject,
+            sender,
+            body_txt,
+            thread_id=thread_id,
+            message_id=msg_id,
+            timeout=args.timeout,
         )
-        score = critique.get("score", 0) if isinstance(critique, dict) else 0
-        if score < settings["CRITIC_THRESHOLD"]:
-            print(
-                f"Draft for message {msg_id} scored {score} (<{settings['CRITIC_THRESHOLD']}). Creating ticket."
-            )
-            create_ticket(
-                subject,
-                sender,
-                body_txt,
-                thread_id=thread_id,
-                message_id=msg_id,
-                timeout=args.timeout,
-            )
-            continue
-        else:
-            print(
-                f"Draft score {score} >= {settings['CRITIC_THRESHOLD']}; saving draft."
-            )
-
-        draft_message = create_base64_message(
-            "me", sender, reply_subject, draft_body_text
-        )
-
-        draft = create_draft(service, "me", draft_message, thread_id=thread_id)
-        if draft:
-            print(
-                f"Draft created for unread email from {sender} (subject: '{subject}')"
-            )
-        else:
-            print(f"Failed to create draft for message ID {msg_id}")
 
 
 if __name__ == "__main__":

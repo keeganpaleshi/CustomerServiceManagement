@@ -143,7 +143,7 @@ class FreeScoutClient:
         if tags is not None:
             payload["tags"] = tags
         if custom_fields:
-            payload["custom_fields"] = custom_fields
+            payload["customFields"] = custom_fields
 
         if not payload:
             return {}
@@ -442,12 +442,7 @@ def create_ticket(
     timeout: Optional[int] = None,
     retries: int = 3,
 ):
-    """Create a FreeScout conversation using a body-based thread payload.
-
-    FreeScout's API examples (https://api-docs.freescout.net) use the `body`
-    key inside each thread. We stick to that format and avoid the legacy
-    `text` key to prevent duplicate or conflicting thread definitions.
-    """
+    """Create a FreeScout conversation using the `text` thread payload."""
     settings = _load_settings()
     if settings["TICKET_SYSTEM"] != "freescout":
         return None
@@ -468,7 +463,7 @@ def create_ticket(
 
     thread_payload = {
         "type": "customer",
-        "body": body or "(no body)",
+        "text": body or "(no body)",
         "imported": True,
     }
 
@@ -482,7 +477,7 @@ def create_ticket(
     }
 
     if custom_fields:
-        payload["custom_fields"] = custom_fields
+        payload["customFields"] = custom_fields
 
     http_timeout = timeout if timeout is not None else settings["HTTP_TIMEOUT"]
     for attempt in range(1, retries + 1):
