@@ -10,6 +10,7 @@ from openai import OpenAI
 
 from Draft_Replies import generate_ai_reply
 from utils import (
+    GmailIngestionDB,
     classify_email,
     create_base64_message,
     create_draft,
@@ -57,6 +58,11 @@ def parse_args(settings: Optional[Dict] = None):
         default=settings["GMAIL_USE_CONSOLE"],
         help="Use console-based OAuth (paste auth code) instead of opening a browser",
     )
+    parser.add_argument(
+        "--label-imported",
+        action="store_true",
+        help="Optionally label processed Gmail messages for debugging",
+    )
     return parser.parse_args()
 
 
@@ -70,8 +76,45 @@ PROMO_LABELS = {
     "CATEGORY_FORUMS",
 }
 
-# Label used to mark messages that already have a ticket to avoid duplicates
-TICKET_LABEL_NAME = "Ticketed"
+IMPORTED_LABEL_NAME = "CSM_IMPORTED"
+
+
+def _extract_conv_id(ticket_resp: dict) -> Optional[int]:
+    if not isinstance(ticket_resp, dict):
+        return None
+
+    convo = ticket_resp.get("conversation")
+    data = ticket_resp.get("data")
+
+    candidates = [ticket_resp.get("id")]
+
+    if isinstance(convo, dict):
+        candidates.append(convo.get("id"))
+    if isinstance(data, dict):
+        candidates.append(data.get("id"))
+
+    for candidate in candidates:
+        if candidate is None:
+            continue
+        try:
+            return int(candidate)
+        except (TypeError, ValueError):
+            continue
+
+    return None
+
+
+def _build_gmail_custom_fields(thread_id: str, message_id: str, settings: dict) -> dict:
+    custom_fields: dict = {}
+    gmail_thread_field = settings.get("FREESCOUT_GMAIL_THREAD_FIELD_ID")
+    gmail_message_field = settings.get("FREESCOUT_GMAIL_MESSAGE_FIELD_ID")
+
+    if gmail_thread_field and thread_id:
+        custom_fields[str(gmail_thread_field)] = thread_id
+    if gmail_message_field and message_id:
+        custom_fields[str(gmail_message_field)] = message_id
+
+    return custom_fields
 
 def route_email(
     service,
@@ -399,9 +442,16 @@ def main():
         return
 
     svc = get_gmail_service(use_console=args.console_auth)
-    ticket_label_id = None
-    if settings["TICKET_SYSTEM"] == "freescout":
-        ticket_label_id = ensure_label(svc, TICKET_LABEL_NAME)
+    import_label_id = None
+    if args.label_imported:
+        import_label_id = ensure_label(svc, IMPORTED_LABEL_NAME)
+
+    freescout_client = _build_freescout_client(timeout=args.timeout)
+    if not freescout_client:
+        print("Ticket ingestion skipped because FreeScout is not configured.")
+        return
+
+    ingestion_db = GmailIngestionDB(settings["STATE_DB_PATH"])
     for ref in fetch_all_unread_messages(svc, query=args.gmail_query)[
         : settings["MAX_DRAFTS"]
     ]:
@@ -425,8 +475,8 @@ def main():
         thread = msg.get("threadId", "")
         message_id = ref.get("id", "")
 
-        if ticket_label_id and ticket_label_id in set(msg.get("labelIds", [])):
-            print(f"{ref['id'][:8]}… skipped (ticket already created)")
+        if ingestion_db.processed_success(message_id):
+            print(f"{ref['id'][:8]}… skipped (already processed)")
             continue
 
         body = extract_plain_text(payload)
@@ -436,50 +486,40 @@ def main():
             print(f"{ref['id'][:8]}… skipped promotional/spam")
             continue
 
-        # ---- classification ----
-        cls = classify_email(f"Subject:{subject}\n\n{body}")
-        email_type = cls["type"]
+        conv_id = ingestion_db.get_conv_id(thread)
+        custom_fields = _build_gmail_custom_fields(thread, message_id, settings)
 
-        has_draft = thread_has_draft(svc, thread)
-
-        action = route_email(
-            svc,
-            subject,
-            sender,
-            body,
-            thread,
-            message_id,
-            cls,
-            has_existing_draft=has_draft,
-            ticket_label_id=ticket_label_id,
-            timeout=args.timeout,
-        )
-
-        if action in {"ignored", "ticketed", "followup_draft"}:
+        try:
+            if conv_id is not None:
+                freescout_client.add_customer_thread(
+                    conv_id,
+                    body or snippet,
+                    customer_email=sender,
+                    custom_fields=custom_fields or None,
+                )
+            else:
+                ticket = create_ticket(
+                    subject,
+                    sender,
+                    body or snippet,
+                    thread_id=thread,
+                    message_id=message_id,
+                    timeout=args.timeout,
+                )
+                conv_id = _extract_conv_id(ticket) if ticket else None
+                if conv_id is None:
+                    print(f"{ref['id'][:8]}… failed to create ticket")
+                    continue
+                ingestion_db.set_thread_conv(thread, conv_id)
+        except requests.RequestException as exc:
+            print(f"{ref['id'][:8]}… error while syncing to FreeScout: {exc}")
             continue
 
-        if has_draft:
-            continue
-
-        # ---- draft creation with critic ----
-        reply_context = body.strip() or snippet
-        draft_text = generate_ai_reply(subject, sender, reply_context, email_type)
-        for _ in range(settings["MAX_RETRIES"]):
-            rating = critic_email(draft_text, body)
-            score = rating.get("score", 0) if isinstance(rating, dict) else 0
-            feedback = rating.get("feedback", "") if isinstance(rating, dict) else ""
-            if score >= settings["CRITIC_THRESHOLD"]:
-                break
-            draft_text = generate_ai_reply(
-                subject,
-                sender,
-                f"{reply_context}\n\nCritic feedback: {feedback}",
-                email_type,
-            )
-        msg_draft = create_base64_message(
-            "me", sender, f"Re: {subject}", draft_text
-        )
-        create_draft(svc, "me", msg_draft, thread_id=thread)
+        ingestion_db.mark_success(message_id, thread, conv_id)
+        if import_label_id:
+            svc.users().messages().modify(
+                userId="me", id=message_id, body={"addLabelIds": [import_label_id]}
+            ).execute()
 
     updates = poll_ticket_updates()
     if updates:

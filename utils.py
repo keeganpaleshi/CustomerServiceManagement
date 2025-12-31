@@ -2,11 +2,12 @@ import base64
 import json
 import os
 import pickle
+import sqlite3
 import time
 from email.mime.text import MIMEText
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Union
 
 import requests
 import yaml
@@ -66,6 +67,10 @@ def _load_settings() -> Dict[str, Any]:
         "FREESCOUT_WEBHOOK_SECRET": cfg["ticket"].get("webhook_secret", ""),
         "FREESCOUT_POLL_INTERVAL": cfg["ticket"].get("poll_interval", 300),
         "FREESCOUT_ACTIONS": cfg["ticket"].get("actions", {}),
+        "STATE_DB_PATH": (
+            (cfg.get("state", {}) or {}).get("db_path")
+            or str(Path(__file__).with_name("ingestion_state.sqlite"))
+        ),
     }
 
 
@@ -179,6 +184,110 @@ class FreeScoutClient:
             f"Suggested reply:\n\n{text}",
             user_id=user_id,
         )
+
+    def add_customer_thread(
+        self,
+        conversation_id: int,
+        body: str,
+        *,
+        customer_email: Optional[str] = None,
+        imported: bool = True,
+        custom_fields: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {
+            "type": "customer",
+            "body": body or "(no body)",
+            "imported": imported,
+        }
+
+        if customer_email:
+            payload["customer"] = {"email": customer_email}
+
+        if custom_fields:
+            payload["custom_fields"] = custom_fields
+
+        resp = requests.post(
+            f"{self.base_url}/api/conversations/{conversation_id}/threads",
+            headers=self._headers(),
+            json=payload,
+            timeout=self.timeout,
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+
+class GmailIngestionDB:
+    """Lightweight SQLite store for Gmail ingestion idempotency."""
+
+    def __init__(self, db_path: Union[str, Path]):
+        self.db_path = Path(db_path)
+        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        self._ensure_tables()
+
+    def _connect(self):
+        return sqlite3.connect(self.db_path)
+
+    def _ensure_tables(self):
+        with self._connect() as conn:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS processed_messages (
+                    message_id TEXT PRIMARY KEY,
+                    thread_id TEXT,
+                    conv_id INTEGER,
+                    processed_at REAL DEFAULT (strftime('%s','now'))
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS thread_conversations (
+                    thread_id TEXT PRIMARY KEY,
+                    conv_id INTEGER,
+                    updated_at REAL DEFAULT (strftime('%s','now'))
+                )
+                """
+            )
+            conn.commit()
+
+    def processed_success(self, message_id: str) -> bool:
+        with self._connect() as conn:
+            cur = conn.execute(
+                "SELECT 1 FROM processed_messages WHERE message_id = ?", (message_id,)
+            )
+            return cur.fetchone() is not None
+
+    def get_conv_id(self, thread_id: str) -> Optional[int]:
+        with self._connect() as conn:
+            cur = conn.execute(
+                "SELECT conv_id FROM thread_conversations WHERE thread_id = ?", (thread_id,)
+            )
+            row = cur.fetchone()
+            return int(row[0]) if row and row[0] is not None else None
+
+    def set_thread_conv(self, thread_id: str, conv_id: int) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO thread_conversations(thread_id, conv_id)
+                VALUES(?, ?)
+                ON CONFLICT(thread_id) DO UPDATE SET conv_id = excluded.conv_id,
+                    updated_at = strftime('%s','now')
+                """,
+                (thread_id, conv_id),
+            )
+            conn.commit()
+
+    def mark_success(self, message_id: str, thread_id: str, conv_id: int) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO processed_messages(message_id, thread_id, conv_id)
+                VALUES(?, ?, ?)
+                """,
+                (message_id, thread_id, conv_id),
+            )
+            conn.commit()
 
 
 # ----- Gmail helpers -----
