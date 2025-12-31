@@ -158,7 +158,7 @@ class FreeScoutClient:
         priority: Optional[str] = None,
         assignee: Optional[int] = None,
         tags: Optional[list[str]] = None,
-        custom_fields: Optional[Dict[str, Any]] = None,
+        custom_field_values: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         payload: Dict[str, Any] = {}
         if priority:
@@ -168,7 +168,7 @@ class FreeScoutClient:
         if tags is not None:
             payload["tags"] = tags
 
-        serialized_fields = _serialize_custom_fields(custom_fields)
+        serialized_fields = _serialize_custom_fields(custom_field_values)
         if serialized_fields:
             payload["customFields"] = serialized_fields
 

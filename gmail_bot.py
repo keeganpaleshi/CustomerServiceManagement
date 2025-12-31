@@ -310,7 +310,7 @@ def process_freescout_conversation(
             priority=priority_value,
             assignee=assignee,
             tags=tags,
-            custom_fields=custom_fields,
+            custom_field_values=custom_fields,
         )
     except requests.RequestException as exc:
         print(f"Failed to update conversation {conv_id}: {exc}")
