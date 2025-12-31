@@ -66,6 +66,7 @@ def _load_settings() -> Dict[str, Any]:
         "FREESCOUT_WEBHOOK_SECRET": cfg["ticket"].get("webhook_secret", ""),
         "FREESCOUT_POLL_INTERVAL": cfg["ticket"].get("poll_interval", 300),
         "FREESCOUT_ACTIONS": cfg["ticket"].get("actions", {}),
+        "SQLITE_PATH": cfg["ticket"].get("sqlite_path", "./csm.sqlite"),
     }
 
 
@@ -142,7 +143,7 @@ class FreeScoutClient:
         if tags is not None:
             payload["tags"] = tags
         if custom_fields:
-            payload["custom_fields"] = custom_fields
+            payload["customFields"] = custom_fields
 
         if not payload:
             return {}
@@ -179,6 +180,34 @@ class FreeScoutClient:
             f"Suggested reply:\n\n{text}",
             user_id=user_id,
         )
+
+    def add_customer_thread(
+        self,
+        conversation_id: int,
+        body: str,
+        *,
+        customer_email: Optional[str] = None,
+        subject: Optional[str] = None,
+        imported: bool = True,
+    ) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {
+            "type": "customer",
+            "body": body or "(no body)",
+            "imported": imported,
+        }
+        if customer_email:
+            payload["customer"] = {"email": customer_email}
+        if subject:
+            payload["subject"] = subject
+
+        resp = requests.post(
+            f"{self.base_url}/api/conversations/{conversation_id}/threads",
+            headers=self._headers(),
+            json=payload,
+            timeout=self.timeout,
+        )
+        resp.raise_for_status()
+        return resp.json()
 
 
 # ----- Gmail helpers -----
@@ -413,12 +442,7 @@ def create_ticket(
     timeout: Optional[int] = None,
     retries: int = 3,
 ):
-    """Create a FreeScout conversation using a body-based thread payload.
-
-    FreeScout's API examples (https://api-docs.freescout.net) use the `body`
-    key inside each thread. We stick to that format and avoid the legacy
-    `text` key to prevent duplicate or conflicting thread definitions.
-    """
+    """Create a FreeScout conversation using the `text` thread payload."""
     settings = _load_settings()
     if settings["TICKET_SYSTEM"] != "freescout":
         return None
@@ -439,7 +463,7 @@ def create_ticket(
 
     thread_payload = {
         "type": "customer",
-        "body": body or "(no body)",
+        "text": body or "(no body)",
         "imported": True,
     }
 
@@ -453,7 +477,7 @@ def create_ticket(
     }
 
     if custom_fields:
-        payload["custom_fields"] = custom_fields
+        payload["customFields"] = custom_fields
 
     http_timeout = timeout if timeout is not None else settings["HTTP_TIMEOUT"]
     for attempt in range(1, retries + 1):

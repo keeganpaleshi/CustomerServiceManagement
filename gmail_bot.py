@@ -3,29 +3,24 @@ import json
 import time
 from datetime import datetime, timedelta
 from email.utils import parseaddr
-from typing import Dict, Optional
+from typing import Dict, Optional, Tuple
 
 import requests
 from openai import OpenAI
 
-from Draft_Replies import generate_ai_reply
 from utils import (
     classify_email,
-    create_base64_message,
-    create_draft,
     create_ticket,
-    critic_email,
-    ensure_label,
     fetch_all_unread_messages,
     get_gmail_service,
     get_settings,
     FreeScoutClient,
     is_promotional_or_spam,
-    thread_has_draft,
     extract_plain_text,
     require_openai_api_key,
     require_ticket_settings,
 )
+from storage import TicketStore
 
 
 def parse_args(settings: Optional[Dict] = None):
@@ -70,9 +65,6 @@ PROMO_LABELS = {
     "CATEGORY_FORUMS",
 }
 
-# Label used to mark messages that already have a ticket to avoid duplicates
-TICKET_LABEL_NAME = "Ticketed"
-
 def route_email(
     service,
     subject: str,
@@ -81,17 +73,14 @@ def route_email(
     thread_id: str,
     message_id: str,
     cls: dict,
-    has_existing_draft: bool,
-    ticket_label_id: Optional[str],
     timeout: Optional[int] = None,
-) -> str:
+) -> Tuple[str, Optional[int], Optional[str]]:
     """Route an email based on priority and information level.
 
-    Returns an action string:
+    Returns a tuple of (action, conversation_id, error):
     - "ignored" if the email type is not handled
-    - "ticketed" if a ticket was created (and labeled)
-    - "followup_draft" if a simple follow-up draft was created
-    - "no_action" if the message should proceed to full draft creation
+    - "ticketed" if a ticket was created
+    - "ticket_failed" if ticket creation failed
     """
 
     settings = get_settings()
@@ -100,7 +89,7 @@ def route_email(
     email_type = cls.get("type")
     importance = cls.get("importance", 0)
     if email_type == "other":
-        return "ignored"
+        return "ignored", None, None
 
     high_priority = importance >= 8
     needs_info = False
@@ -127,32 +116,42 @@ def route_email(
     except Exception as e:
         print(f"Priority check failed: {e}")
 
-    if high_priority or needs_info:
-        ticket = create_ticket(
-            subject,
-            sender,
-            body,
-            thread_id=thread_id,
-            message_id=message_id,
-            timeout=http_timeout,
-        )
-        if ticket_label_id and ticket is not None:
-            service.users().threads().modify(
-                userId="me", id=thread_id, body={"addLabelIds": [ticket_label_id]}
-            ).execute()
-        return "ticketed"
+    ticket = create_ticket(
+        subject,
+        sender,
+        body,
+        thread_id=thread_id,
+        message_id=message_id,
+        timeout=http_timeout,
+    )
+    if ticket is None:
+        return "ticket_failed", None, "ticket creation failed"
+    conversation_id = _extract_conversation_id_from_ticket(ticket)
+    return "ticketed", conversation_id, None
 
-    # Otherwise ask for more details if we haven't drafted already
-    if not has_existing_draft:
-        followup = (
-            "Thank you for contacting us. Could you provide more details about "
-            "your request so we can assist you?"
-        )
-        msg = create_base64_message("me", sender, f"Re: {subject}", followup)
-        create_draft(service, "me", msg, thread_id=thread_id)
-        return "followup_draft"
 
-    return "no_action"
+def _extract_conversation_id_from_ticket(ticket: dict) -> Optional[int]:
+    if not isinstance(ticket, dict):
+        return None
+
+    conversation = ticket.get("conversation")
+    data_block = ticket.get("data")
+
+    candidates = [
+        ticket.get("id"),
+        ticket.get("conversation_id"),
+        (conversation or {}).get("id") if isinstance(conversation, dict) else None,
+        (data_block or {}).get("id") if isinstance(data_block, dict) else None,
+    ]
+
+    for candidate in candidates:
+        if candidate is None:
+            continue
+        try:
+            return int(candidate)
+        except (TypeError, ValueError):
+            continue
+    return None
 
 
 def poll_ticket_updates(limit: int = 10, timeout: Optional[int] = None):
@@ -399,12 +398,20 @@ def main():
         return
 
     svc = get_gmail_service(use_console=args.console_auth)
-    ticket_label_id = None
-    if settings["TICKET_SYSTEM"] == "freescout":
-        ticket_label_id = ensure_label(svc, TICKET_LABEL_NAME)
+    store = TicketStore(settings.get("SQLITE_PATH"))
+    freescout_client = _build_freescout_client(timeout=args.timeout)
     for ref in fetch_all_unread_messages(svc, query=args.gmail_query)[
         : settings["MAX_DRAFTS"]
     ]:
+        message_id = ref.get("id", "")
+        processed = store.get_processed_message(message_id)
+        if store.processed_success(message_id):
+            print(f"{message_id[:8]}… skipped (already processed)")
+            continue
+        if processed and processed.get("status") == "failed":
+            previous_error = processed.get("error") or "previous failure"
+            print(f"{message_id[:8]}… retrying after failure: {previous_error}")
+
         msg = (
             svc.users()
             .messages()
@@ -423,11 +430,6 @@ def main():
         raw_sender = get_header_value(payload, "From")
         sender = parseaddr(raw_sender)[1] or raw_sender
         thread = msg.get("threadId", "")
-        message_id = ref.get("id", "")
-
-        if ticket_label_id and ticket_label_id in set(msg.get("labelIds", [])):
-            print(f"{ref['id'][:8]}… skipped (ticket already created)")
-            continue
 
         body = extract_plain_text(payload)
         snippet = msg.get("snippet", "")
@@ -437,12 +439,42 @@ def main():
             continue
 
         # ---- classification ----
+        conv_id = store.get_thread_conversation(thread)
+        if conv_id and freescout_client:
+            try:
+                freescout_client.add_customer_thread(
+                    conv_id,
+                    body or snippet,
+                    customer_email=sender,
+                    subject=subject,
+                )
+                store.upsert_thread_conversation(thread, conv_id)
+                store.mark_success(
+                    gmail_message_id=message_id,
+                    gmail_thread_id=thread,
+                    freescout_conversation_id=conv_id,
+                )
+                continue
+            except requests.RequestException as exc:
+                store.mark_failed(
+                    gmail_message_id=message_id,
+                    gmail_thread_id=thread,
+                    freescout_conversation_id=conv_id,
+                    error=str(exc),
+                )
+                continue
+        elif conv_id and not freescout_client:
+            store.mark_failed(
+                gmail_message_id=message_id,
+                gmail_thread_id=thread,
+                freescout_conversation_id=conv_id,
+                error="freescout disabled",
+            )
+            continue
+
         cls = classify_email(f"Subject:{subject}\n\n{body}")
-        email_type = cls["type"]
 
-        has_draft = thread_has_draft(svc, thread)
-
-        action = route_email(
+        action, conversation_id, error = route_email(
             svc,
             subject,
             sender,
@@ -450,36 +482,30 @@ def main():
             thread,
             message_id,
             cls,
-            has_existing_draft=has_draft,
-            ticket_label_id=ticket_label_id,
             timeout=args.timeout,
         )
 
-        if action in {"ignored", "ticketed", "followup_draft"}:
-            continue
-
-        if has_draft:
-            continue
-
-        # ---- draft creation with critic ----
-        reply_context = body.strip() or snippet
-        draft_text = generate_ai_reply(subject, sender, reply_context, email_type)
-        for _ in range(settings["MAX_RETRIES"]):
-            rating = critic_email(draft_text, body)
-            score = rating.get("score", 0) if isinstance(rating, dict) else 0
-            feedback = rating.get("feedback", "") if isinstance(rating, dict) else ""
-            if score >= settings["CRITIC_THRESHOLD"]:
-                break
-            draft_text = generate_ai_reply(
-                subject,
-                sender,
-                f"{reply_context}\n\nCritic feedback: {feedback}",
-                email_type,
+        if action == "ticket_failed":
+            store.mark_failed(
+                gmail_message_id=message_id,
+                gmail_thread_id=thread,
+                freescout_conversation_id=None,
+                error=error or "ticket creation failed",
             )
-        msg_draft = create_base64_message(
-            "me", sender, f"Re: {subject}", draft_text
-        )
-        create_draft(svc, "me", msg_draft, thread_id=thread)
+            continue
+
+        if action == "ticketed":
+            store.mark_success(
+                gmail_message_id=message_id,
+                gmail_thread_id=thread,
+                freescout_conversation_id=conversation_id,
+            )
+            if conversation_id:
+                store.upsert_thread_conversation(thread, conversation_id)
+            continue
+
+        if action == "ignored":
+            continue
 
     updates = poll_ticket_updates()
     if updates:
