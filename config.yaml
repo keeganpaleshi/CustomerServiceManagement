@@ -43,6 +43,7 @@ ticket:
   freescout_url:  ""                 # fill in your desk URL or set FREESCOUT_URL env var
   freescout_key:  ""                 # fill in your API key or set FREESCOUT_KEY env var
   mailbox_id:     null                # numeric FreeScout mailbox ID used when creating conversations
+  sqlite_path:    "./csm.sqlite"     # path to SQLite store for idempotency and thread mapping
   gmail_thread_field_id: null         # custom field ID to store the Gmail threadId (optional)
   gmail_message_field_id: null        # custom field ID to store the Gmail messageId (optional)
   webhook_secret: ""                 # shared secret for validating webhook requests
