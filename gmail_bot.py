@@ -8,19 +8,14 @@ from typing import Dict, Optional, Tuple
 import requests
 from openai import OpenAI
 
-from Draft_Replies import generate_ai_reply
 from utils import (
     classify_email,
-    create_base64_message,
-    create_draft,
     create_ticket,
-    critic_email,
     fetch_all_unread_messages,
     get_gmail_service,
     get_settings,
     FreeScoutClient,
     is_promotional_or_spam,
-    thread_has_draft,
     extract_plain_text,
     require_openai_api_key,
     require_ticket_settings,
@@ -86,7 +81,6 @@ def route_email(
     - "ignored" if the email type is not handled
     - "ticketed" if a ticket was created
     - "ticket_failed" if ticket creation failed
-    - "no_action" if the message should proceed to full draft creation
     """
 
     settings = get_settings()
@@ -122,21 +116,18 @@ def route_email(
     except Exception as e:
         print(f"Priority check failed: {e}")
 
-    if high_priority or needs_info:
-        ticket = create_ticket(
-            subject,
-            sender,
-            body,
-            thread_id=thread_id,
-            message_id=message_id,
-            timeout=http_timeout,
-        )
-        if ticket is None:
-            return "ticket_failed", None, "ticket creation failed"
-        conversation_id = _extract_conversation_id_from_ticket(ticket)
-        return "ticketed", conversation_id, None
-
-    return "no_action", None, None
+    ticket = create_ticket(
+        subject,
+        sender,
+        body,
+        thread_id=thread_id,
+        message_id=message_id,
+        timeout=http_timeout,
+    )
+    if ticket is None:
+        return "ticket_failed", None, "ticket creation failed"
+    conversation_id = _extract_conversation_id_from_ticket(ticket)
+    return "ticketed", conversation_id, None
 
 
 def _extract_conversation_id_from_ticket(ticket: dict) -> Optional[int]:
@@ -408,6 +399,7 @@ def main():
 
     svc = get_gmail_service(use_console=args.console_auth)
     store = TicketStore(settings.get("SQLITE_PATH"))
+    freescout_client = _build_freescout_client(timeout=args.timeout)
     for ref in fetch_all_unread_messages(svc, query=args.gmail_query)[
         : settings["MAX_DRAFTS"]
     ]:
@@ -447,10 +439,42 @@ def main():
             continue
 
         # ---- classification ----
-        cls = classify_email(f"Subject:{subject}\n\n{body}")
-        email_type = cls["type"]
+        conv_id = store.get_thread_conversation(thread)
+        if conv_id and freescout_client:
+            try:
+                freescout_client.add_customer_thread(
+                    conv_id,
+                    body or snippet,
+                    customer_email=sender,
+                    subject=subject,
+                )
+                store.record_processed_message(
+                    gmail_message_id=message_id,
+                    gmail_thread_id=thread,
+                    freescout_conversation_id=conv_id,
+                    status="success",
+                )
+                continue
+            except requests.RequestException as exc:
+                store.record_processed_message(
+                    gmail_message_id=message_id,
+                    gmail_thread_id=thread,
+                    freescout_conversation_id=conv_id,
+                    status="failed",
+                    error=str(exc),
+                )
+                continue
+        elif conv_id and not freescout_client:
+            store.record_processed_message(
+                gmail_message_id=message_id,
+                gmail_thread_id=thread,
+                freescout_conversation_id=conv_id,
+                status="failed",
+                error="freescout disabled",
+            )
+            continue
 
-        has_draft = thread_has_draft(svc, thread)
+        cls = classify_email(f"Subject:{subject}\n\n{body}")
 
         action, conversation_id, error = route_email(
             svc,
@@ -486,29 +510,6 @@ def main():
 
         if action == "ignored":
             continue
-
-        if has_draft:
-            continue
-
-        # ---- draft creation with critic ----
-        reply_context = body.strip() or snippet
-        draft_text = generate_ai_reply(subject, sender, reply_context, email_type)
-        for _ in range(settings["MAX_RETRIES"]):
-            rating = critic_email(draft_text, body)
-            score = rating.get("score", 0) if isinstance(rating, dict) else 0
-            feedback = rating.get("feedback", "") if isinstance(rating, dict) else ""
-            if score >= settings["CRITIC_THRESHOLD"]:
-                break
-            draft_text = generate_ai_reply(
-                subject,
-                sender,
-                f"{reply_context}\n\nCritic feedback: {feedback}",
-                email_type,
-            )
-        msg_draft = create_base64_message(
-            "me", sender, f"Re: {subject}", draft_text
-        )
-        create_draft(svc, "me", msg_draft, thread_id=thread)
 
     updates = poll_ticket_updates()
     if updates:

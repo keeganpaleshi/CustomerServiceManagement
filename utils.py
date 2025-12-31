@@ -181,6 +181,34 @@ class FreeScoutClient:
             user_id=user_id,
         )
 
+    def add_customer_thread(
+        self,
+        conversation_id: int,
+        body: str,
+        *,
+        customer_email: Optional[str] = None,
+        subject: Optional[str] = None,
+        imported: bool = True,
+    ) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {
+            "type": "customer",
+            "body": body or "(no body)",
+            "imported": imported,
+        }
+        if customer_email:
+            payload["customer"] = {"email": customer_email}
+        if subject:
+            payload["subject"] = subject
+
+        resp = requests.post(
+            f"{self.base_url}/api/conversations/{conversation_id}/threads",
+            headers=self._headers(),
+            json=payload,
+            timeout=self.timeout,
+        )
+        resp.raise_for_status()
+        return resp.json()
+
 
 # ----- Gmail helpers -----
 
