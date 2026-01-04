@@ -218,9 +218,9 @@ def _prepare_custom_fields(cls: dict, settings: dict) -> dict:
     type_field = fields_cfg.get("type_field_id")
     importance_field = fields_cfg.get("importance_field_id")
     if type_field:
-        custom_fields[str(type_field)] = cls.get("type")
+        custom_fields[int(type_field)] = cls.get("type")
     if importance_field:
-        custom_fields[str(importance_field)] = cls.get("importance")
+        custom_fields[int(importance_field)] = cls.get("importance")
     return custom_fields
 
 
