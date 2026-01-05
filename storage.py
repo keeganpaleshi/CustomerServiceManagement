@@ -79,7 +79,13 @@ class TicketStore:
         )
         self._conn.commit()
 
-    def mark_success(self, gmail_message_id: str, gmail_thread_id: str, conv_id: Optional[str]) -> None:
+    def mark_success(
+        self,
+        gmail_message_id: str,
+        gmail_thread_id: str,
+        conv_id: Optional[str],
+        error: Optional[str] = None,
+    ) -> None:
         self._conn.execute(
             """
             INSERT INTO processed_messages (
@@ -90,15 +96,15 @@ class TicketStore:
                 error,
                 processed_at
             )
-            VALUES (?, ?, ?, 'success', NULL, CURRENT_TIMESTAMP)
+            VALUES (?, ?, ?, 'success', ?, CURRENT_TIMESTAMP)
             ON CONFLICT(gmail_message_id) DO UPDATE SET
                 gmail_thread_id = excluded.gmail_thread_id,
                 freescout_conversation_id = excluded.freescout_conversation_id,
                 status = 'success',
-                error = NULL,
+                error = excluded.error,
                 processed_at = CURRENT_TIMESTAMP
             """,
-            (gmail_message_id, gmail_thread_id, conv_id),
+            (gmail_message_id, gmail_thread_id, conv_id, error),
         )
         self._conn.commit()
 

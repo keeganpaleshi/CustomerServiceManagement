@@ -430,10 +430,13 @@ def main():
 
     sqlite_path = settings.get("TICKET_SQLITE_PATH") or "./csm.sqlite"
     ticket_store = TicketStore(sqlite_path)
+    freescout_client = _build_freescout_client(timeout=args.timeout)
     svc = get_gmail_service(use_console=args.console_auth)
+
     ticket_label_id = None
     if settings["TICKET_SYSTEM"] == "freescout":
         ticket_label_id = ensure_label(svc, TICKET_LABEL_NAME)
+
     for ref in fetch_all_unread_messages(svc, query=args.gmail_query)[
         : settings["MAX_DRAFTS"]
     ]:
@@ -441,95 +444,83 @@ def main():
         if message_id and ticket_store.processed_success(message_id):
             print(f"{message_id[:8]}… skipped (already processed)")
             continue
-        msg = (
-            svc.users()
-            .messages()
-            .get(userId="me", id=message_id, format="full")
-            .execute()
-        )
-        def get_header_value(payload: Optional[dict], name: str, default: str = "") -> str:
-            headers = (payload or {}).get("headers") or []
-            for header in headers:
-                if header.get("name") == name:
-                    return header.get("value", default)
-            return default
 
-        payload = msg.get("payload", {})
-        subject = get_header_value(payload, "Subject")
-        raw_sender = get_header_value(payload, "From")
-        sender = parseaddr(raw_sender)[1] or raw_sender
-        thread = msg.get("threadId", "")
         try:
-            if ticket_label_id and ticket_label_id in set(msg.get("labelIds", [])):
-                ticket_store.mark_success(message_id, thread, None)
-                print(f"{ref['id'][:8]}… skipped (ticket already created)")
-                continue
+            msg = (
+                svc.users()
+                .messages()
+                .get(userId="me", id=message_id, format="full")
+                .execute()
+            )
 
-            body = extract_plain_text(payload)
-            snippet = msg.get("snippet", "")
+            def get_header_value(payload: Optional[dict], name: str, default: str = "") -> str:
+                headers = (payload or {}).get("headers") or []
+                for header in headers:
+                    if header.get("name") == name:
+                        return header.get("value", default)
+                return default
+
+            payload = msg.get("payload", {})
+            subject = get_header_value(payload, "Subject")
+            raw_sender = get_header_value(payload, "From")
+            sender = parseaddr(raw_sender)[1] or raw_sender
+            thread = msg.get("threadId", "")
+            body = extract_plain_text(payload) or msg.get("snippet", "")
 
             if is_promotional_or_spam(msg, body):
-                ticket_store.mark_success(message_id, thread, None)
+                ticket_store.mark_success(
+                    message_id, thread, None, error="filtered: promotional/spam"
+                )
                 print(f"{ref['id'][:8]}… skipped promotional/spam")
                 continue
 
-            # ---- classification ----
-            cls = classify_email(f"Subject:{subject}\n\n{body}")
-            email_type = cls["type"]
+            if settings["TICKET_SYSTEM"] != "freescout":
+                raise RuntimeError("FreeScout is not configured as the ticket system")
+            if not freescout_client:
+                raise RuntimeError("FreeScout client is unavailable")
 
-            has_draft = thread_has_draft(svc, thread)
+            conv_id = ticket_store.get_conv_id(thread)
+            body_text = body or "(no body)"
 
-            action, conv_id = route_email(
-                svc,
-                subject,
-                sender,
-                body,
-                thread,
-                message_id,
-                cls,
-                has_existing_draft=has_draft,
-                ticket_label_id=ticket_label_id,
-                ticket_store=ticket_store,
-                timeout=args.timeout,
-            )
+            if conv_id:
+                try:
+                    freescout_client.add_customer_thread(
+                        conversation_id=conv_id, text=body_text, imported=True
+                    )
+                except requests.RequestException as exc:
+                    ticket_store.mark_failed(message_id, thread, str(exc), conv_id)
+                    print(f"{ref['id'][:8]}… append failed: {exc}")
+                    continue
 
-            if action == "ignored":
                 ticket_store.mark_success(message_id, thread, conv_id)
-                continue
-            if action == "ticket_failed":
-                ticket_store.mark_failed(message_id, thread, "ticket creation failed", conv_id)
-                continue
-            if action == "ticketed":
-                ticket_store.mark_success(message_id, thread, conv_id)
-                continue
-            if action == "followup_draft":
-                ticket_store.mark_success(message_id, thread, conv_id)
-                continue
-
-            if has_draft:
-                ticket_store.mark_success(message_id, thread, conv_id)
-                continue
-
-            # ---- draft creation with critic ----
-            reply_context = body.strip() or snippet
-            draft_text = generate_ai_reply(subject, sender, reply_context, email_type)
-            for _ in range(settings["MAX_RETRIES"]):
-                rating = critic_email(draft_text, body)
-                score = rating.get("score", 0) if isinstance(rating, dict) else 0
-                feedback = rating.get("feedback", "") if isinstance(rating, dict) else ""
-                if score >= settings["CRITIC_THRESHOLD"]:
-                    break
-                draft_text = generate_ai_reply(
+            else:
+                ticket = create_ticket(
                     subject,
                     sender,
-                    f"{reply_context}\n\nCritic feedback: {feedback}",
-                    email_type,
+                    body_text,
+                    thread_id=thread,
+                    message_id=message_id,
+                    timeout=args.timeout,
                 )
-            msg_draft = create_base64_message(
-                "me", sender, f"Re: {subject}", draft_text
-            )
-            create_draft(svc, "me", msg_draft, thread_id=thread)
-            ticket_store.mark_success(message_id, thread, conv_id)
+                conv_id = _extract_conversation_id(ticket)
+
+                if not ticket or not conv_id:
+                    ticket_store.mark_failed(
+                        message_id,
+                        thread,
+                        "ticket creation failed",
+                        conv_id,
+                    )
+                    print(f"{ref['id'][:8]}… creation failed")
+                    continue
+
+                ticket_store.upsert_thread_map(thread, conv_id)
+                ticket_store.mark_success(message_id, thread, conv_id)
+
+            if ticket_label_id:
+                svc.users().threads().modify(
+                    userId="me", id=thread, body={"addLabelIds": [ticket_label_id]}
+                ).execute()
         except Exception as exc:
             ticket_store.mark_failed(message_id, thread, str(exc))
             print(f"{ref['id'][:8]}… error: {exc}")
