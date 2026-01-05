@@ -132,7 +132,7 @@ def route_email(
 
     existing_conv = None
     if ticket_store and thread_id:
-        existing_conv = ticket_store.get_thread_conversation(thread_id)
+        existing_conv = ticket_store.get_conv_id(thread_id)
 
     if high_priority or needs_info:
         if existing_conv:
@@ -148,7 +148,7 @@ def route_email(
         )
         conv_id = _extract_conversation_id(ticket)
         if ticket_store and conv_id and thread_id:
-            ticket_store.upsert_thread_conversation(thread_id, conv_id)
+            ticket_store.upsert_thread_map(thread_id, conv_id)
         if ticket_label_id and ticket is not None:
             service.users().threads().modify(
                 userId="me", id=thread_id, body={"addLabelIds": [ticket_label_id]}
@@ -460,7 +460,7 @@ def main():
         thread = msg.get("threadId", "")
         try:
             if ticket_label_id and ticket_label_id in set(msg.get("labelIds", [])):
-                ticket_store.record_success(message_id, None)
+                ticket_store.mark_success(message_id, thread, None)
                 print(f"{ref['id'][:8]}… skipped (ticket already created)")
                 continue
 
@@ -468,7 +468,7 @@ def main():
             snippet = msg.get("snippet", "")
 
             if is_promotional_or_spam(msg, body):
-                ticket_store.record_success(message_id, None)
+                ticket_store.mark_success(message_id, thread, None)
                 print(f"{ref['id'][:8]}… skipped promotional/spam")
                 continue
 
@@ -493,20 +493,25 @@ def main():
             )
 
             if action == "ignored":
-                ticket_store.record_success(message_id, conv_id)
+                ticket_store.mark_success(message_id, thread, conv_id)
                 continue
             if action == "ticket_failed":
-                ticket_store.record_failure(message_id, "ticket creation failed", conv_id)
+                ticket_store.mark_failed(
+                    message_id,
+                    thread,
+                    "ticket creation failed",
+                    conv_id,
+                )
                 continue
             if action == "ticketed":
-                ticket_store.record_success(message_id, conv_id)
+                ticket_store.mark_success(message_id, thread, conv_id)
                 continue
             if action == "followup_draft":
-                ticket_store.record_success(message_id, conv_id)
+                ticket_store.mark_success(message_id, thread, conv_id)
                 continue
 
             if has_draft:
-                ticket_store.record_success(message_id, conv_id)
+                ticket_store.mark_success(message_id, thread, conv_id)
                 continue
 
             # ---- draft creation with critic ----
@@ -528,9 +533,9 @@ def main():
                 "me", sender, f"Re: {subject}", draft_text
             )
             create_draft(svc, "me", msg_draft, thread_id=thread)
-            ticket_store.record_success(message_id, conv_id)
+            ticket_store.mark_success(message_id, thread, conv_id)
         except Exception as exc:
-            ticket_store.record_failure(message_id, str(exc))
+            ticket_store.mark_failed(message_id, thread, str(exc), conv_id)
             print(f"{ref['id'][:8]}… error: {exc}")
             continue
 
