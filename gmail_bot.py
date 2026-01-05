@@ -9,6 +9,7 @@ import requests
 from openai import OpenAI
 
 from Draft_Replies import generate_ai_reply
+from storage import TicketStore
 from utils import (
     classify_email,
     create_base64_message,
@@ -83,6 +84,7 @@ def route_email(
     cls: dict,
     has_existing_draft: bool,
     ticket_label_id: Optional[str],
+    store: Optional[TicketStore],
     timeout: Optional[int] = None,
 ) -> str:
     """Route an email based on priority and information level.
@@ -128,6 +130,16 @@ def route_email(
         print(f"Priority check failed: {e}")
 
     if high_priority or needs_info:
+        if store:
+            existing_conv = store.get_thread_conversation(thread_id)
+            if existing_conv:
+                store.record_success(message_id, existing_conv)
+                if ticket_label_id:
+                    service.users().threads().modify(
+                        userId="me", id=thread_id, body={"addLabelIds": [ticket_label_id]}
+                    ).execute()
+                return "ticketed"
+
         ticket = create_ticket(
             subject,
             sender,
@@ -136,10 +148,18 @@ def route_email(
             message_id=message_id,
             timeout=http_timeout,
         )
+        conv_id = _extract_conv_id(ticket)
         if ticket_label_id and ticket is not None:
             service.users().threads().modify(
                 userId="me", id=thread_id, body={"addLabelIds": [ticket_label_id]}
             ).execute()
+        if store:
+            if ticket is None:
+                store.record_failure(message_id, "ticket creation failed")
+            else:
+                store.record_success(message_id, conv_id)
+                if conv_id:
+                    store.upsert_thread_conversation(thread_id, str(conv_id))
         return "ticketed"
 
     # Otherwise ask for more details if we haven't drafted already
@@ -222,6 +242,23 @@ def _prepare_custom_fields(cls: dict, settings: dict) -> dict:
     if importance_field:
         custom_fields[str(importance_field)] = cls.get("importance")
     return custom_fields
+
+
+def _extract_conv_id(ticket: Optional[dict]) -> Optional[str]:
+    if not isinstance(ticket, dict):
+        return None
+
+    for key in ("id", "conversation_id", "conversationId"):
+        if key in ticket and ticket.get(key) is not None:
+            return str(ticket.get(key))
+
+    data = ticket.get("data") if isinstance(ticket.get("data"), dict) else None
+    if data:
+        for key in ("id", "conversation_id", "conversationId"):
+            if key in data and data.get(key) is not None:
+                return str(data.get(key))
+
+    return None
 
 
 def fetch_recent_conversations(
@@ -390,6 +427,7 @@ def freescout_webhook_handler(payload: dict, headers: dict) -> tuple[str, int]:
 def main():
     settings = get_settings()
     args = parse_args(settings)
+    store = TicketStore()
 
     if args.poll_freescout:
         poll_freescout_updates(
@@ -405,6 +443,10 @@ def main():
     for ref in fetch_all_unread_messages(svc, query=args.gmail_query)[
         : settings["MAX_DRAFTS"]
     ]:
+        message_id = ref.get("id", "")
+        if store.processed_success(message_id):
+            print(f"{message_id[:8]}… skipped (already processed)")
+            continue
         msg = (
             svc.users()
             .messages()
@@ -452,6 +494,7 @@ def main():
             cls,
             has_existing_draft=has_draft,
             ticket_label_id=ticket_label_id,
+            store=store,
             timeout=args.timeout,
         )
 
