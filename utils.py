@@ -63,6 +63,7 @@ def _load_settings() -> Dict[str, Any]:
         "FREESCOUT_GMAIL_MESSAGE_FIELD_ID": cfg["ticket"].get(
             "gmail_message_field_id"
         ),
+        "TICKET_SQLITE_PATH": cfg["ticket"].get("sqlite_path", "./csm.sqlite"),
         "FREESCOUT_WEBHOOK_SECRET": cfg["ticket"].get("webhook_secret", ""),
         "FREESCOUT_POLL_INTERVAL": cfg["ticket"].get("poll_interval", 300),
         "FREESCOUT_ACTIONS": cfg["ticket"].get("actions", {}),
