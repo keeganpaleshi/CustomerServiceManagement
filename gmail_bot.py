@@ -74,6 +74,7 @@ PROMO_LABELS = {
 # Label used to mark messages that already have a ticket to avoid duplicates
 TICKET_LABEL_NAME = "Ticketed"
 
+
 def route_email(
     service,
     subject: str,
@@ -447,6 +448,7 @@ def main():
             .get(userId="me", id=message_id, format="full")
             .execute()
         )
+
         def get_header_value(payload: Optional[dict], name: str, default: str = "") -> str:
             headers = (payload or {}).get("headers") or []
             for header in headers:
