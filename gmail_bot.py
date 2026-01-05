@@ -26,6 +26,7 @@ from utils import (
     require_openai_api_key,
     require_ticket_settings,
 )
+from storage import TicketStore
 
 
 def parse_args(settings: Optional[Dict] = None):
@@ -83,13 +84,15 @@ def route_email(
     cls: dict,
     has_existing_draft: bool,
     ticket_label_id: Optional[str],
+    ticket_store: Optional[TicketStore] = None,
     timeout: Optional[int] = None,
-) -> str:
+) -> tuple[str, Optional[str]]:
     """Route an email based on priority and information level.
 
-    Returns an action string:
+    Returns (action, conversation_id)
     - "ignored" if the email type is not handled
-    - "ticketed" if a ticket was created (and labeled)
+    - "ticketed" if a ticket exists/was created (and labeled)
+    - "ticket_failed" if ticket creation failed
     - "followup_draft" if a simple follow-up draft was created
     - "no_action" if the message should proceed to full draft creation
     """
@@ -127,7 +130,14 @@ def route_email(
     except Exception as e:
         print(f"Priority check failed: {e}")
 
+    existing_conv = None
+    if ticket_store and thread_id:
+        existing_conv = ticket_store.get_thread_conversation(thread_id)
+
     if high_priority or needs_info:
+        if existing_conv:
+            return "ticketed", existing_conv
+
         ticket = create_ticket(
             subject,
             sender,
@@ -136,11 +146,14 @@ def route_email(
             message_id=message_id,
             timeout=http_timeout,
         )
+        conv_id = _extract_conversation_id(ticket)
+        if ticket_store and conv_id and thread_id:
+            ticket_store.upsert_thread_conversation(thread_id, conv_id)
         if ticket_label_id and ticket is not None:
             service.users().threads().modify(
                 userId="me", id=thread_id, body={"addLabelIds": [ticket_label_id]}
             ).execute()
-        return "ticketed"
+        return ("ticketed" if ticket is not None else "ticket_failed"), conv_id
 
     # Otherwise ask for more details if we haven't drafted already
     if not has_existing_draft:
@@ -150,9 +163,9 @@ def route_email(
         )
         msg = create_base64_message("me", sender, f"Re: {subject}", followup)
         create_draft(service, "me", msg, thread_id=thread_id)
-        return "followup_draft"
+        return "followup_draft", None
 
-    return "no_action"
+    return "no_action", None
 
 
 def poll_ticket_updates(limit: int = 10, timeout: Optional[int] = None):
@@ -222,6 +235,23 @@ def _prepare_custom_fields(cls: dict, settings: dict) -> dict:
     if importance_field:
         custom_fields[str(importance_field)] = cls.get("importance")
     return custom_fields
+
+
+def _extract_conversation_id(ticket: Optional[dict]) -> Optional[str]:
+    if not ticket or not isinstance(ticket, dict):
+        return None
+
+    candidates = [
+        ticket.get("id"),
+        ticket.get("conversation_id"),
+        (ticket.get("conversation") or {}).get("id"),
+        (ticket.get("data") or {}).get("id"),
+        ((ticket.get("data") or {}).get("conversation") or {}).get("id"),
+    ]
+    for conv_id in candidates:
+        if conv_id:
+            return str(conv_id)
+    return None
 
 
 def fetch_recent_conversations(
@@ -398,6 +428,7 @@ def main():
         )
         return
 
+    ticket_store = TicketStore(settings.get("TICKET_SQLITE_PATH", "./csm.sqlite"))
     svc = get_gmail_service(use_console=args.console_auth)
     ticket_label_id = None
     if settings["TICKET_SYSTEM"] == "freescout":
@@ -405,10 +436,14 @@ def main():
     for ref in fetch_all_unread_messages(svc, query=args.gmail_query)[
         : settings["MAX_DRAFTS"]
     ]:
+        message_id = ref.get("id", "")
+        if message_id and ticket_store.processed_success(message_id):
+            print(f"{message_id[:8]}… skipped (already processed)")
+            continue
         msg = (
             svc.users()
             .messages()
-            .get(userId="me", id=ref["id"], format="full")
+            .get(userId="me", id=message_id, format="full")
             .execute()
         )
         def get_header_value(payload: Optional[dict], name: str, default: str = "") -> str:
@@ -423,63 +458,81 @@ def main():
         raw_sender = get_header_value(payload, "From")
         sender = parseaddr(raw_sender)[1] or raw_sender
         thread = msg.get("threadId", "")
-        message_id = ref.get("id", "")
+        try:
+            if ticket_label_id and ticket_label_id in set(msg.get("labelIds", [])):
+                ticket_store.record_success(message_id, None)
+                print(f"{ref['id'][:8]}… skipped (ticket already created)")
+                continue
 
-        if ticket_label_id and ticket_label_id in set(msg.get("labelIds", [])):
-            print(f"{ref['id'][:8]}… skipped (ticket already created)")
-            continue
+            body = extract_plain_text(payload)
+            snippet = msg.get("snippet", "")
 
-        body = extract_plain_text(payload)
-        snippet = msg.get("snippet", "")
+            if is_promotional_or_spam(msg, body):
+                ticket_store.record_success(message_id, None)
+                print(f"{ref['id'][:8]}… skipped promotional/spam")
+                continue
 
-        if is_promotional_or_spam(msg, body):
-            print(f"{ref['id'][:8]}… skipped promotional/spam")
-            continue
+            # ---- classification ----
+            cls = classify_email(f"Subject:{subject}\n\n{body}")
+            email_type = cls["type"]
 
-        # ---- classification ----
-        cls = classify_email(f"Subject:{subject}\n\n{body}")
-        email_type = cls["type"]
+            has_draft = thread_has_draft(svc, thread)
 
-        has_draft = thread_has_draft(svc, thread)
-
-        action = route_email(
-            svc,
-            subject,
-            sender,
-            body,
-            thread,
-            message_id,
-            cls,
-            has_existing_draft=has_draft,
-            ticket_label_id=ticket_label_id,
-            timeout=args.timeout,
-        )
-
-        if action in {"ignored", "ticketed", "followup_draft"}:
-            continue
-
-        if has_draft:
-            continue
-
-        # ---- draft creation with critic ----
-        reply_context = body.strip() or snippet
-        draft_text = generate_ai_reply(subject, sender, reply_context, email_type)
-        for _ in range(settings["MAX_RETRIES"]):
-            rating = critic_email(draft_text, body)
-            score = rating.get("score", 0) if isinstance(rating, dict) else 0
-            feedback = rating.get("feedback", "") if isinstance(rating, dict) else ""
-            if score >= settings["CRITIC_THRESHOLD"]:
-                break
-            draft_text = generate_ai_reply(
+            action, conv_id = route_email(
+                svc,
                 subject,
                 sender,
-                f"{reply_context}\n\nCritic feedback: {feedback}",
-                email_type,
+                body,
+                thread,
+                message_id,
+                cls,
+                has_existing_draft=has_draft,
+                ticket_label_id=ticket_label_id,
+                ticket_store=ticket_store,
+                timeout=args.timeout,
             )
-        msg_draft = create_base64_message(
-            "me", sender, f"Re: {subject}", draft_text
-        )
-        create_draft(svc, "me", msg_draft, thread_id=thread)
+
+            if action == "ignored":
+                ticket_store.record_success(message_id, conv_id)
+                continue
+            if action == "ticket_failed":
+                ticket_store.record_failure(message_id, "ticket creation failed", conv_id)
+                continue
+            if action == "ticketed":
+                ticket_store.record_success(message_id, conv_id)
+                continue
+            if action == "followup_draft":
+                ticket_store.record_success(message_id, conv_id)
+                continue
+
+            if has_draft:
+                ticket_store.record_success(message_id, conv_id)
+                continue
+
+            # ---- draft creation with critic ----
+            reply_context = body.strip() or snippet
+            draft_text = generate_ai_reply(subject, sender, reply_context, email_type)
+            for _ in range(settings["MAX_RETRIES"]):
+                rating = critic_email(draft_text, body)
+                score = rating.get("score", 0) if isinstance(rating, dict) else 0
+                feedback = rating.get("feedback", "") if isinstance(rating, dict) else ""
+                if score >= settings["CRITIC_THRESHOLD"]:
+                    break
+                draft_text = generate_ai_reply(
+                    subject,
+                    sender,
+                    f"{reply_context}\n\nCritic feedback: {feedback}",
+                    email_type,
+                )
+            msg_draft = create_base64_message(
+                "me", sender, f"Re: {subject}", draft_text
+            )
+            create_draft(svc, "me", msg_draft, thread_id=thread)
+            ticket_store.record_success(message_id, conv_id)
+        except Exception as exc:
+            ticket_store.record_failure(message_id, str(exc))
+            print(f"{ref['id'][:8]}… error: {exc}")
+            continue
 
     updates = poll_ticket_updates()
     if updates:
