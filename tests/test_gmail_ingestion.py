@@ -205,6 +205,7 @@ class GmailIngestionTests(unittest.TestCase):
             result = gmail_bot.process_gmail_message(message, store, freescout, Mock())
 
         self.assertEqual(result.status, "filtered")
+        self.assertEqual(result.reason, "already filtered")
         freescout.add_customer_thread.assert_not_called()
         freescout.create_conversation.assert_not_called()
 
