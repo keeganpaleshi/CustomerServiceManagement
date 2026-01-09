@@ -1,5 +1,5 @@
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, call, patch
 
 import requests
 
@@ -127,6 +127,24 @@ class GmailIngestionTests(unittest.TestCase):
         store.upsert_thread_map.assert_called_once_with("thread-4", "conv-456")
         store.mark_success.assert_called_once_with("msg-4", "thread-4", "conv-456")
 
+    def test_non_filtered_message_makes_single_freescout_call(self):
+        store = Mock()
+        store.processed_terminal.return_value = False
+        store.get_conversation_id_for_thread.return_value = "conv-321"
+        freescout = Mock()
+        message = _make_message("msg-7", "thread-7")
+
+        with patch.object(gmail_bot, "_TICKET_LABEL_ID", None), \
+            patch.object(gmail_bot, "extract_plain_text", return_value="hello"), \
+            patch.object(gmail_bot, "is_promotional_or_spam", return_value=False):
+            result = gmail_bot.process_gmail_message(message, store, freescout, Mock())
+
+        self.assertEqual(result.status, "freescout_appended")
+        self.assertEqual(
+            freescout.method_calls,
+            [call.add_customer_thread("conv-321", "hello", imported=True)],
+        )
+
     def test_append_failure_marks_failed(self):
         store = Mock()
         store.processed_terminal.return_value = False
@@ -147,6 +165,34 @@ class GmailIngestionTests(unittest.TestCase):
         freescout.create_conversation.assert_not_called()
         store.mark_success.assert_not_called()
         store.mark_failed.assert_called_once_with("msg-5", "thread-5", "boom", "conv-789")
+
+    def test_processed_success_skips_before_processed_filtered(self):
+        store = Mock()
+        store.processed_success.return_value = True
+        freescout = Mock()
+        message = _make_message("msg-8", "thread-8")
+
+        with patch.object(gmail_bot, "_TICKET_LABEL_ID", None):
+            result = gmail_bot.process_gmail_message(message, store, freescout, Mock())
+
+        self.assertEqual(result.status, "skipped_already_success")
+        store.processed_filtered.assert_not_called()
+        freescout.create_conversation.assert_not_called()
+        freescout.add_customer_thread.assert_not_called()
+
+    def test_processed_filtered_returns_filtered_without_freescout_calls(self):
+        store = Mock()
+        store.processed_success.return_value = False
+        store.processed_filtered.return_value = True
+        freescout = Mock()
+        message = _make_message("msg-9", "thread-9")
+
+        with patch.object(gmail_bot, "_TICKET_LABEL_ID", None):
+            result = gmail_bot.process_gmail_message(message, store, freescout, Mock())
+
+        self.assertEqual(result.status, "filtered")
+        freescout.add_customer_thread.assert_not_called()
+        freescout.create_conversation.assert_not_called()
 
     def test_create_failure_marks_failed(self):
         store = Mock()
@@ -171,6 +217,24 @@ class GmailIngestionTests(unittest.TestCase):
         store.mark_success.assert_not_called()
         store.mark_failed.assert_called_once_with("msg-6", "thread-6", "boom")
 
+    def test_create_failure_without_conversation_id_skips_thread_map_write(self):
+        store = Mock()
+        store.processed_terminal.return_value = False
+        store.get_conversation_id_for_thread.return_value = None
+        freescout = Mock()
+        freescout.create_conversation.return_value = {}
+        message = _make_message("msg-10", "thread-10")
+
+        with patch.object(gmail_bot, "_TICKET_LABEL_ID", None), \
+            patch.object(gmail_bot, "extract_plain_text", return_value="hello"), \
+            patch.object(gmail_bot, "is_promotional_or_spam", return_value=False), \
+            patch.object(gmail_bot, "get_settings", return_value=_base_settings()):
+            result = gmail_bot.process_gmail_message(message, store, freescout, Mock())
+
+        self.assertEqual(result.status, "failed_retryable")
+        self.assertEqual(result.reason, "ticket creation failed")
+        store.upsert_thread_map.assert_not_called()
+        store.mark_success.assert_not_called()
 
 if __name__ == "__main__":
     unittest.main()
