@@ -96,13 +96,11 @@ def process_gmail_message(
         print("Skipping message without id")
         return ProcessResult(status="failed_retryable", reason=reason)
 
-    if store.processed_terminal(message_id):
-        reason = "already processed"
+    if store.processed_success(message_id) is True:
         print(f"{message_id[:8]}… skipped (already processed)")
-        return ProcessResult(status="skipped_already_success", reason=reason)
-
-    if store.processed_filtered(message_id):
-        print(f"{message_id[:8]}… filtered (already filtered)")
+        return ProcessResult.SKIPPED_ALREADY_SUCCESS
+    if store.processed_filtered(message_id) is True:
+        print(f"{message_id[:8]}… skipped (already filtered)")
         return ProcessResult.FILTERED
 
     try:
@@ -238,7 +236,6 @@ def process_gmail_message(
         store.mark_failed(message_id, thread_id, str(exc))
         print(f"{message_id[:8]}… error: {exc}")
         return ProcessResult(status="failed_retryable", reason=reason)
-
 
 def route_email(
     service,
