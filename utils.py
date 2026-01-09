@@ -359,10 +359,6 @@ def apply_label_to_thread(service, thread_id: str, label_id: str) -> bool:
 
 
 def is_promotional_or_spam(message, body_text):
-    settings = _load_settings()
-    labels = set(message.get("labelIds", []))
-    if labels & settings["PROMO_LABELS"]:
-        return True
     headers = {
         h.get("name", "").lower(): h.get("value", "")
         for h in message.get("payload", {}).get("headers", [])

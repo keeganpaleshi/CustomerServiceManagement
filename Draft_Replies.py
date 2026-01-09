@@ -146,14 +146,6 @@ def main():
         sender = get_header_value(msg_detail, "From")
         thread_id = msg_detail.get("threadId")
         snippet = msg_detail.get("snippet", "")
-        label_ids = set(msg_detail.get("labelIds", []))
-
-        if ticket_label_id and ticket_label_id in label_ids:
-            print(
-                f"Skipping message {msg_id} (thread {thread_id}) because it already has the ticket label."
-            )
-            continue
-
         payload = msg_detail.get("payload", {})
         body_txt = extract_plain_text(payload)
 
