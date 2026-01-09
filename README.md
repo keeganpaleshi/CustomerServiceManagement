@@ -15,6 +15,22 @@
 
 ---
 
+## Processing gates and terminal states
+
+The database is the **only** skip gate for Gmail message processing. If a
+message is not recorded in the DB, it will be evaluated regardless of Gmail
+labels or other metadata.
+
+Gmail labels are **cosmetic only** and are never used for control flow. Label
+changes do not prevent reprocessing or bypass any step.
+
+Filtered messages are recorded in the DB as a **terminal state** and are not
+reprocessed. If FreeScout is unavailable, the run does **not** mark success;
+once FreeScout is back, reruns are safe and will continue processing the same
+message until it is stored in the DB.
+
+---
+
 ## Quick start
 
 ```bash
