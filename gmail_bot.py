@@ -446,7 +446,7 @@ def main():
         : settings["MAX_DRAFTS"]
     ]:
         message_id = ref.get("id", "")
-        thread = ref.get("threadId", "") or ""
+        thread = ref.get("threadId")
 
         if not message_id:
             print("Skipping message without id")
@@ -465,7 +465,7 @@ def main():
                 .execute()
             )
 
-            thread = msg.get("threadId", thread) or ""
+            thread = msg.get("threadId") or thread
             if not thread:
                 ticket_store.mark_failed(message_id, thread, "missing thread id")
                 failed_freescout += 1
@@ -483,8 +483,6 @@ def main():
             subject = get_header_value(payload, "Subject")
             raw_sender = get_header_value(payload, "From")
             sender = parseaddr(raw_sender)[1] or raw_sender
-            thread = msg.get("threadId", "")
-
             body = extract_plain_text(payload)
             snippet = msg.get("snippet", "")
             body_text = body.strip() or snippet or "(no body)"
