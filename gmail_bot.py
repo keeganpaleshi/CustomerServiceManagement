@@ -435,16 +435,28 @@ def main():
     if settings["TICKET_SYSTEM"] == "freescout":
         ticket_label_id = ensure_label(svc, TICKET_LABEL_NAME)
     client = _build_freescout_client(timeout=args.timeout)
+
+    skipped_already_processed = 0
+    created_conversations = 0
+    appended_threads = 0
+    filtered_terminal = 0
+    failed_freescout = 0
+
     for ref in fetch_all_unread_messages(svc, query=args.gmail_query)[
         : settings["MAX_DRAFTS"]
     ]:
         message_id = ref.get("id", "")
+        thread = ref.get("threadId")
+
         if not message_id:
+            print("Skipping message without id")
             continue
+
         if ticket_store.processed_success(message_id):
+            skipped_already_processed += 1
             print(f"{message_id[:8]}… skipped (already processed)")
             continue
-        thread = ""
+
         try:
             msg = (
                 svc.users()
@@ -452,6 +464,13 @@ def main():
                 .get(userId="me", id=message_id, format="full")
                 .execute()
             )
+
+            thread = msg.get("threadId") or thread
+            if not thread:
+                ticket_store.mark_failed(message_id, thread, "missing thread id")
+                failed_freescout += 1
+                print(f"{message_id[:8]}… error: missing thread id")
+                continue
 
             def get_header_value(payload: Optional[dict], name: str, default: str = "") -> str:
                 headers = (payload or {}).get("headers") or []
@@ -464,14 +483,17 @@ def main():
             subject = get_header_value(payload, "Subject")
             raw_sender = get_header_value(payload, "From")
             sender = parseaddr(raw_sender)[1] or raw_sender
-            thread = msg.get("threadId", "")
-
             body = extract_plain_text(payload)
             snippet = msg.get("snippet", "")
             body_text = body.strip() or snippet or "(no body)"
 
             if is_promotional_or_spam(msg, body_text):
-                ticket_store.mark_success(message_id, thread, None, error="filtered: promotional/spam")
+                ticket_store.mark_filtered(
+                    message_id,
+                    thread,
+                    reason="filtered: promotional/spam",
+                )
+                filtered_terminal += 1
                 print(f"{ref['id'][:8]}… filtered promotional/spam")
                 continue
 
@@ -485,6 +507,7 @@ def main():
                 try:
                     client.add_customer_thread(conv_id, body_text, imported=True)
                     ticket_store.mark_success(message_id, thread, conv_id)
+                    appended_threads += 1
                     if ticket_label_id:
                         svc.users()
                         .threads()
@@ -492,6 +515,7 @@ def main():
                         .execute()
                 except requests.RequestException as exc:
                     ticket_store.mark_failed(message_id, thread, str(exc), conv_id)
+                    failed_freescout += 1
                     print(f"{ref['id'][:8]}… error appending to {conv_id}: {exc}")
                 continue
 
@@ -506,11 +530,13 @@ def main():
             conv_id = _extract_conversation_id(ticket)
             if not ticket or not conv_id:
                 ticket_store.mark_failed(message_id, thread, "ticket creation failed", conv_id)
+                failed_freescout += 1
                 print(f"{ref['id'][:8]}… error: ticket creation failed")
                 continue
 
             ticket_store.upsert_thread_map(thread, conv_id)
             ticket_store.mark_success(message_id, thread, conv_id)
+            created_conversations += 1
             if ticket_label_id:
                 svc.users()
                 .threads()
@@ -518,12 +544,20 @@ def main():
                 .execute()
         except Exception as exc:
             ticket_store.mark_failed(message_id, thread, str(exc))
+            failed_freescout += 1
             print(f"{ref['id'][:8]}… error: {exc}")
             continue
 
     updates = poll_ticket_updates()
     if updates:
         print(f"Fetched {len(updates)} ticket updates from FreeScout")
+
+    print("Ingestion summary:")
+    print(f"  skipped_already_processed: {skipped_already_processed}")
+    print(f"  created_conversations: {created_conversations}")
+    print(f"  appended_threads: {appended_threads}")
+    print(f"  filtered_terminal: {filtered_terminal}")
+    print(f"  failed_freescout: {failed_freescout}")
 
 
 if __name__ == "__main__":
