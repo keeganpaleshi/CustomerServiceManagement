@@ -101,6 +101,10 @@ def process_gmail_message(
         print(f"{message_id[:8]}… skipped (already processed)")
         return ProcessResult(status="skipped_already_success", reason=reason)
 
+    if store.processed_filtered(message_id):
+        print(f"{message_id[:8]}… filtered (already filtered)")
+        return ProcessResult.FILTERED
+
     try:
         full_message = message
         if "payload" not in message:
@@ -353,6 +357,139 @@ def poll_ticket_updates(limit: int = 10, timeout: Optional[int] = None):
         print(f"Error polling FreeScout: {e}")
         return []
 
+
+def process_gmail_message(
+    ref: dict,
+    ticket_store: TicketStore,
+    client: Optional[FreeScoutClient],
+    svc,
+    ticket_label_id: Optional[str],
+    timeout: int,
+) -> Optional[ProcessResult]:
+    message_id = ref.get("id", "")
+    thread = ref.get("threadId")
+
+    if not message_id:
+        print("Skipping message without id")
+        return None
+
+    if ticket_store.processed_success(message_id):
+        print(f"{message_id[:8]}… skipped (already processed)")
+        return ProcessResult.SKIPPED_ALREADY_SUCCESS
+
+    if ticket_store.processed_filtered(message_id):
+        print(f"{message_id[:8]}… filtered (already filtered)")
+        return ProcessResult.FILTERED
+
+    try:
+        msg = (
+            svc.users()
+            .messages()
+            .get(userId="me", id=message_id, format="full")
+            .execute()
+        )
+
+        thread = msg.get("threadId") or thread
+        if not thread:
+            ticket_store.mark_failed(message_id, thread, "missing thread id")
+            print(f"{message_id[:8]}… error: missing thread id")
+            return ProcessResult.FREESCOUT_FAILED
+
+        def get_header_value(payload: Optional[dict], name: str, default: str = "") -> str:
+            headers = (payload or {}).get("headers") or []
+            for header in headers:
+                if header.get("name") == name:
+                    return header.get("value", default)
+            return default
+
+        payload = msg.get("payload", {})
+        subject = get_header_value(payload, "Subject")
+        raw_sender = get_header_value(payload, "From")
+        sender = parseaddr(raw_sender)[1] or raw_sender
+        body = extract_plain_text(payload)
+        snippet = msg.get("snippet", "")
+        body_text = body.strip() or snippet or "(no body)"
+
+        message_with_body = dict(msg)
+        message_with_body["body_text"] = body_text
+        filtered, reason = should_filter_message(message_with_body)
+        if filtered:
+            ticket_store.mark_filtered(
+                message_id,
+                thread,
+                reason=reason,
+            )
+            print(f"{ref['id'][:8]}… {reason}")
+            return ProcessResult.FILTERED
+
+        conv_id = ticket_store.get_conv_id(thread) if thread else None
+
+        if conv_id:
+            if not client:
+                ticket_store.mark_failed(message_id, thread, "freescout disabled", conv_id)
+                print(f"{message_id[:8]}… failed: freescout disabled")
+                return ProcessResult.FREESCOUT_FAILED
+            try:
+                client.add_customer_thread(conv_id, body_text, imported=True)
+                ticket_store.mark_success(message_id, thread, conv_id)
+                if ticket_label_id:
+                    svc.users().threads().modify(
+                        userId="me", id=thread, body={"addLabelIds": [ticket_label_id]}
+                    ).execute()
+                return ProcessResult.FREESCOUT_APPENDED
+            except requests.RequestException as exc:
+                ticket_store.mark_failed(message_id, thread, str(exc), conv_id)
+                print(f"{message_id[:8]}… error appending to {conv_id}: {exc}")
+                return ProcessResult.FREESCOUT_FAILED
+
+        if not client:
+            ticket_store.mark_failed(message_id, thread, "freescout disabled")
+            print(f"{message_id[:8]}… failed: freescout disabled")
+            return ProcessResult.FREESCOUT_FAILED
+
+        settings = get_settings()
+        mailbox_id = settings.get("FREESCOUT_MAILBOX_ID")
+        if not mailbox_id:
+            ticket_store.mark_failed(message_id, thread, "freescout mailbox missing")
+            print(f"{message_id[:8]}… error: freescout mailbox missing")
+            return ProcessResult.FREESCOUT_FAILED
+
+        gmail_thread_field = settings.get("FREESCOUT_GMAIL_THREAD_FIELD_ID")
+        gmail_message_field = settings.get("FREESCOUT_GMAIL_MESSAGE_FIELD_ID")
+
+        try:
+            ticket = client.create_conversation(
+                subject,
+                sender,
+                body_text,
+                mailbox_id,
+                thread_id=thread,
+                message_id=message_id,
+                gmail_thread_field=gmail_thread_field,
+                gmail_message_field=gmail_message_field,
+            )
+        except requests.RequestException as exc:
+            ticket_store.mark_failed(message_id, thread, str(exc))
+            print(f"{message_id[:8]}… error: ticket creation failed: {exc}")
+            return ProcessResult.FREESCOUT_FAILED
+
+        conv_id = _extract_conversation_id(ticket)
+        if not ticket or not conv_id:
+            ticket_store.mark_failed(message_id, thread, "ticket creation failed", conv_id)
+            print(f"{message_id[:8]}… error: ticket creation failed")
+            return ProcessResult.FREESCOUT_FAILED
+
+        ticket_store.upsert_thread_map(thread, conv_id)
+        ticket_store.mark_success(message_id, thread, conv_id)
+        if ticket_label_id:
+            svc.users().threads().modify(
+                userId="me", id=thread, body={"addLabelIds": [ticket_label_id]}
+            ).execute()
+        return ProcessResult.FREESCOUT_CREATED
+    except Exception as exc:
+        ticket_store.mark_failed(message_id, thread, str(exc))
+        print(f"{message_id[:8]}… error: {exc}")
+        return ProcessResult.FREESCOUT_FAILED
 
 
 def _build_freescout_client(timeout: Optional[int] = None) -> Optional[FreeScoutClient]:
