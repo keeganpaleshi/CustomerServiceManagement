@@ -63,16 +63,6 @@ def parse_args(settings: Optional[Dict] = None):
     return parser.parse_args()
 
 
-# Gmail label IDs that indicate promotional or spammy content. Messages with
-# any of these labels will be skipped entirely.
-PROMO_LABELS = {
-    "SPAM",
-    "CATEGORY_PROMOTIONS",
-    "CATEGORY_SOCIAL",
-    "CATEGORY_UPDATES",
-    "CATEGORY_FORUMS",
-}
-
 # Label used to mark messages that already have a ticket to avoid duplicates
 TICKET_LABEL_NAME = "Ticketed"
 _TICKET_LABEL_ID: Optional[str] = None
@@ -106,7 +96,7 @@ def process_gmail_message(
         print("Skipping message without id")
         return ProcessResult.FAILED_RETRYABLE
 
-    if store.processed_success(message_id):
+    if store.processed_terminal(message_id):
         print(f"{message_id[:8]}… skipped (already processed)")
         return ProcessResult.SKIPPED_ALREADY_SUCCESS
 
@@ -216,13 +206,6 @@ def process_gmail_message(
         print(f"{message_id[:8]}… error: {exc}")
         return ProcessResult.FAILED_RETRYABLE
 
-
-class ProcessResult(Enum):
-    SKIPPED_ALREADY_SUCCESS = "skipped_already_success"
-    FILTERED = "filtered"
-    FREESCOUT_APPENDED = "freescout_appended"
-    FREESCOUT_CREATED = "freescout_created"
-    FREESCOUT_FAILED = "freescout_failed"
 
 def route_email(
     service,
@@ -340,110 +323,6 @@ def poll_ticket_updates(limit: int = 10, timeout: Optional[int] = None):
     except requests.RequestException as e:
         print(f"Error polling FreeScout: {e}")
         return []
-
-
-def process_gmail_message(
-    ref: dict,
-    ticket_store: TicketStore,
-    client: Optional[FreeScoutClient],
-    svc,
-    ticket_label_id: Optional[str],
-    timeout: int,
-) -> Optional[ProcessResult]:
-    message_id = ref.get("id", "")
-    thread = ref.get("threadId")
-
-    if not message_id:
-        print("Skipping message without id")
-        return None
-
-    if ticket_store.processed_terminal(message_id):
-        print(f"{message_id[:8]}… skipped (already processed)")
-        return ProcessResult.SKIPPED_ALREADY_SUCCESS
-
-    try:
-        msg = (
-            svc.users()
-            .messages()
-            .get(userId="me", id=message_id, format="full")
-            .execute()
-        )
-
-        thread = msg.get("threadId") or thread
-        if not thread:
-            ticket_store.mark_failed(message_id, thread, "missing thread id")
-            print(f"{message_id[:8]}… error: missing thread id")
-            return ProcessResult.FREESCOUT_FAILED
-
-        def get_header_value(payload: Optional[dict], name: str, default: str = "") -> str:
-            headers = (payload or {}).get("headers") or []
-            for header in headers:
-                if header.get("name") == name:
-                    return header.get("value", default)
-            return default
-
-        payload = msg.get("payload", {})
-        subject = get_header_value(payload, "Subject")
-        raw_sender = get_header_value(payload, "From")
-        sender = parseaddr(raw_sender)[1] or raw_sender
-        body = extract_plain_text(payload)
-        snippet = msg.get("snippet", "")
-        body_text = body.strip() or snippet or "(no body)"
-
-        if is_promotional_or_spam(msg, body_text):
-            ticket_store.mark_filtered(
-                message_id,
-                thread,
-                reason="filtered: promotional/spam",
-            )
-            print(f"{ref['id'][:8]}… filtered promotional/spam")
-            return ProcessResult.FILTERED
-
-        conv_id = ticket_store.get_conv_id(thread) if thread else None
-
-        if conv_id:
-            if not client:
-                ticket_store.mark_failed(message_id, thread, "freescout disabled", conv_id)
-                print(f"{message_id[:8]}… failed: freescout disabled")
-                return ProcessResult.FREESCOUT_FAILED
-            try:
-                client.add_customer_thread(conv_id, body_text, imported=True)
-                ticket_store.mark_success(message_id, thread, conv_id)
-                if ticket_label_id:
-                    svc.users().threads().modify(
-                        userId="me", id=thread, body={"addLabelIds": [ticket_label_id]}
-                    ).execute()
-                return ProcessResult.FREESCOUT_APPENDED
-            except requests.RequestException as exc:
-                ticket_store.mark_failed(message_id, thread, str(exc), conv_id)
-                print(f"{message_id[:8]}… error appending to {conv_id}: {exc}")
-                return ProcessResult.FREESCOUT_FAILED
-
-        ticket = create_ticket(
-            subject,
-            sender,
-            body_text,
-            thread_id=thread,
-            message_id=message_id,
-            timeout=timeout,
-        )
-        conv_id = _extract_conversation_id(ticket)
-        if not ticket or not conv_id:
-            ticket_store.mark_failed(message_id, thread, "ticket creation failed", conv_id)
-            print(f"{message_id[:8]}… error: ticket creation failed")
-            return ProcessResult.FREESCOUT_FAILED
-
-        ticket_store.upsert_thread_map(thread, conv_id)
-        ticket_store.mark_success(message_id, thread, conv_id)
-        if ticket_label_id:
-            svc.users().threads().modify(
-                userId="me", id=thread, body={"addLabelIds": [ticket_label_id]}
-            ).execute()
-        return ProcessResult.FREESCOUT_CREATED
-    except Exception as exc:
-        ticket_store.mark_failed(message_id, thread, str(exc))
-        print(f"{message_id[:8]}… error: {exc}")
-        return ProcessResult.FREESCOUT_FAILED
 
 
 def _build_freescout_client(timeout: Optional[int] = None) -> Optional[FreeScoutClient]:
@@ -696,19 +575,12 @@ def main():
     created_conversations = 0
     appended_threads = 0
     filtered_terminal = 0
-    failed_freescout = 0
+    failed_retryable = 0
 
     for ref in fetch_all_unread_messages(svc, query=args.gmail_query)[
         : settings["MAX_DRAFTS"]
     ]:
-        result = process_gmail_message(
-            ref,
-            ticket_store,
-            client,
-            svc,
-            ticket_label_id,
-            args.timeout,
-        )
+        result = process_gmail_message(ref, ticket_store, client, svc)
         if result == ProcessResult.SKIPPED_ALREADY_SUCCESS:
             skipped_already_processed += 1
         elif result == ProcessResult.FILTERED:
@@ -717,8 +589,8 @@ def main():
             appended_threads += 1
         elif result == ProcessResult.FREESCOUT_CREATED:
             created_conversations += 1
-        elif result == ProcessResult.FREESCOUT_FAILED:
-            failed_freescout += 1
+        elif result == ProcessResult.FAILED_RETRYABLE:
+            failed_retryable += 1
 
     updates = poll_ticket_updates()
     if updates:
@@ -729,7 +601,7 @@ def main():
     print(f"  created_conversations: {created_conversations}")
     print(f"  appended_threads: {appended_threads}")
     print(f"  filtered_terminal: {filtered_terminal}")
-    print(f"  failed_freescout: {failed_freescout}")
+    print(f"  failed_retryable: {failed_retryable}")
 
 
 if __name__ == "__main__":
