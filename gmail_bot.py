@@ -98,10 +98,16 @@ def process_gmail_message(
 
     if store.processed_success(message_id) is True:
         print(f"{message_id[:8]}… skipped (already processed)")
-        return ProcessResult.SKIPPED_ALREADY_SUCCESS
+        return ProcessResult(
+            status="skipped_already_success",
+            reason="already processed",
+        )
     if store.processed_filtered(message_id) is True:
         print(f"{message_id[:8]}… skipped (already filtered)")
-        return ProcessResult.FILTERED
+        return ProcessResult(
+            status="filtered",
+            reason="already filtered",
+        )
 
     try:
         full_message = message
@@ -355,7 +361,7 @@ def poll_ticket_updates(limit: int = 10, timeout: Optional[int] = None):
         return []
 
 
-def process_gmail_message(
+def process_gmail_message_freescout(
     ref: dict,
     ticket_store: TicketStore,
     client: Optional[FreeScoutClient],
@@ -372,11 +378,17 @@ def process_gmail_message(
 
     if ticket_store.processed_success(message_id):
         print(f"{message_id[:8]}… skipped (already processed)")
-        return ProcessResult.SKIPPED_ALREADY_SUCCESS
+        return ProcessResult(
+            status="skipped_already_success",
+            reason="already processed",
+        )
 
     if ticket_store.processed_filtered(message_id):
         print(f"{message_id[:8]}… filtered (already filtered)")
-        return ProcessResult.FILTERED
+        return ProcessResult(
+            status="filtered",
+            reason="already filtered",
+        )
 
     try:
         msg = (
@@ -390,7 +402,10 @@ def process_gmail_message(
         if not thread:
             ticket_store.mark_failed(message_id, thread, "missing thread id")
             print(f"{message_id[:8]}… error: missing thread id")
-            return ProcessResult.FREESCOUT_FAILED
+            return ProcessResult(
+                status="failed_retryable",
+                reason="missing thread id",
+            )
 
         def get_header_value(payload: Optional[dict], name: str, default: str = "") -> str:
             headers = (payload or {}).get("headers") or []
@@ -417,7 +432,10 @@ def process_gmail_message(
                 reason=reason,
             )
             print(f"{ref['id'][:8]}… {reason}")
-            return ProcessResult.FILTERED
+            return ProcessResult(
+                status="filtered",
+                reason=reason,
+            )
 
         conv_id = ticket_store.get_conv_id(thread) if thread else None
 
@@ -425,7 +443,11 @@ def process_gmail_message(
             if not client:
                 ticket_store.mark_failed(message_id, thread, "freescout disabled", conv_id)
                 print(f"{message_id[:8]}… failed: freescout disabled")
-                return ProcessResult.FREESCOUT_FAILED
+                return ProcessResult(
+                    status="failed_retryable",
+                    reason="freescout disabled",
+                    freescout_conversation_id=conv_id,
+                )
             try:
                 client.add_customer_thread(conv_id, body_text, imported=True)
                 ticket_store.mark_success(message_id, thread, conv_id)
@@ -433,23 +455,37 @@ def process_gmail_message(
                     svc.users().threads().modify(
                         userId="me", id=thread, body={"addLabelIds": [ticket_label_id]}
                     ).execute()
-                return ProcessResult.FREESCOUT_APPENDED
+                return ProcessResult(
+                    status="freescout_appended",
+                    reason="append success",
+                    freescout_conversation_id=conv_id,
+                )
             except requests.RequestException as exc:
                 ticket_store.mark_failed(message_id, thread, str(exc), conv_id)
                 print(f"{message_id[:8]}… error appending to {conv_id}: {exc}")
-                return ProcessResult.FREESCOUT_FAILED
+                return ProcessResult(
+                    status="failed_retryable",
+                    reason=f"append failed: {exc}",
+                    freescout_conversation_id=conv_id,
+                )
 
         if not client:
             ticket_store.mark_failed(message_id, thread, "freescout disabled")
             print(f"{message_id[:8]}… failed: freescout disabled")
-            return ProcessResult.FREESCOUT_FAILED
+            return ProcessResult(
+                status="failed_retryable",
+                reason="freescout disabled",
+            )
 
         settings = get_settings()
         mailbox_id = settings.get("FREESCOUT_MAILBOX_ID")
         if not mailbox_id:
             ticket_store.mark_failed(message_id, thread, "freescout mailbox missing")
             print(f"{message_id[:8]}… error: freescout mailbox missing")
-            return ProcessResult.FREESCOUT_FAILED
+            return ProcessResult(
+                status="failed_retryable",
+                reason="freescout mailbox missing",
+            )
 
         gmail_thread_field = settings.get("FREESCOUT_GMAIL_THREAD_FIELD_ID")
         gmail_message_field = settings.get("FREESCOUT_GMAIL_MESSAGE_FIELD_ID")
@@ -468,13 +504,20 @@ def process_gmail_message(
         except requests.RequestException as exc:
             ticket_store.mark_failed(message_id, thread, str(exc))
             print(f"{message_id[:8]}… error: ticket creation failed: {exc}")
-            return ProcessResult.FREESCOUT_FAILED
+            return ProcessResult(
+                status="failed_retryable",
+                reason=f"ticket creation failed: {exc}",
+            )
 
         conv_id = _extract_conversation_id(ticket)
         if not ticket or not conv_id:
             ticket_store.mark_failed(message_id, thread, "ticket creation failed", conv_id)
             print(f"{message_id[:8]}… error: ticket creation failed")
-            return ProcessResult.FREESCOUT_FAILED
+            return ProcessResult(
+                status="failed_retryable",
+                reason="ticket creation failed",
+                freescout_conversation_id=conv_id,
+            )
 
         ticket_store.upsert_thread_map(thread, conv_id)
         ticket_store.mark_success(message_id, thread, conv_id)
@@ -482,11 +525,18 @@ def process_gmail_message(
             svc.users().threads().modify(
                 userId="me", id=thread, body={"addLabelIds": [ticket_label_id]}
             ).execute()
-        return ProcessResult.FREESCOUT_CREATED
+        return ProcessResult(
+            status="freescout_created",
+            reason="create success",
+            freescout_conversation_id=conv_id,
+        )
     except Exception as exc:
         ticket_store.mark_failed(message_id, thread, str(exc))
         print(f"{message_id[:8]}… error: {exc}")
-        return ProcessResult.FREESCOUT_FAILED
+        return ProcessResult(
+            status="failed_retryable",
+            reason=f"unexpected error: {exc}",
+        )
 
 
 def _build_freescout_client(timeout: Optional[int] = None) -> Optional[FreeScoutClient]:
