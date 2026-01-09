@@ -22,12 +22,13 @@ class TicketStore:
                 gmail_message_id TEXT PRIMARY KEY,
                 gmail_thread_id TEXT,
                 freescout_conversation_id TEXT,
-                status TEXT NOT NULL CHECK(status IN ('success', 'failed')),
+                status TEXT NOT NULL CHECK(status IN ('success', 'filtered', 'failed')),
                 error TEXT,
                 processed_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
             )
             """
         )
+        self._migrate_processed_messages()
         self._conn.execute(
             """
             CREATE TABLE IF NOT EXISTS thread_map (
@@ -40,12 +41,69 @@ class TicketStore:
         )
         self._conn.commit()
 
+    def _migrate_processed_messages(self) -> None:
+        cur = self._conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'processed_messages'"
+        )
+        row = cur.fetchone()
+        if not row or not row[0]:
+            return
+        schema_sql = row[0]
+        if "filtered" in schema_sql:
+            return
+        self._conn.execute("ALTER TABLE processed_messages RENAME TO processed_messages_old")
+        self._conn.execute(
+            """
+            CREATE TABLE processed_messages (
+                gmail_message_id TEXT PRIMARY KEY,
+                gmail_thread_id TEXT,
+                freescout_conversation_id TEXT,
+                status TEXT NOT NULL CHECK(status IN ('success', 'filtered', 'failed')),
+                error TEXT,
+                processed_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        self._conn.execute(
+            """
+            INSERT INTO processed_messages (
+                gmail_message_id,
+                gmail_thread_id,
+                freescout_conversation_id,
+                status,
+                error,
+                processed_at
+            )
+            SELECT
+                gmail_message_id,
+                gmail_thread_id,
+                freescout_conversation_id,
+                status,
+                error,
+                processed_at
+            FROM processed_messages_old
+            """
+        )
+        self._conn.execute("DROP TABLE processed_messages_old")
+        self._conn.commit()
+
     def processed_success(self, gmail_message_id: str) -> bool:
         cur = self._conn.execute(
             """
             SELECT 1
             FROM processed_messages
             WHERE gmail_message_id = ? AND status = 'success'
+            """,
+            (gmail_message_id,),
+        )
+        return cur.fetchone() is not None
+
+    def processed_filtered(self, gmail_message_id: str) -> bool:
+        cur = self._conn.execute(
+            """
+            SELECT 1
+            FROM processed_messages
+            WHERE gmail_message_id = ? AND status = 'filtered'
             """,
             (gmail_message_id,),
         )
@@ -150,11 +208,11 @@ class TicketStore:
                 error,
                 processed_at
             )
-            VALUES (?, ?, NULL, 'success', ?, CURRENT_TIMESTAMP)
+            VALUES (?, ?, NULL, 'filtered', ?, CURRENT_TIMESTAMP)
             ON CONFLICT(gmail_message_id) DO UPDATE SET
                 gmail_thread_id = excluded.gmail_thread_id,
                 freescout_conversation_id = NULL,
-                status = 'success',
+                status = 'filtered',
                 error = excluded.error,
                 processed_at = CURRENT_TIMESTAMP
             """,

@@ -22,6 +22,11 @@ class TicketStoreTests(unittest.TestCase):
         self.store.mark_success("msg-success", "thread-success", "conv-123")
         self.assertTrue(self.store.processed_success("msg-success"))
 
+    def test_filtered_message(self):
+        self.store.mark_filtered("msg-filter", "thread-filter", "filtered: promotional/spam")
+        self.assertFalse(self.store.processed_success("msg-filter"))
+        self.assertTrue(self.store.processed_filtered("msg-filter"))
+
     def test_thread_map_round_trip(self):
         self.store.upsert_thread_map("thread-1", "conv-a")
         self.assertEqual(self.store.get_conv_id("thread-1"), "conv-a")
