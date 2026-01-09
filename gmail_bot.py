@@ -207,6 +207,14 @@ def process_gmail_message(
         return ProcessResult.FAILED_RETRYABLE
 
 
+class ProcessResult(Enum):
+    SKIPPED_ALREADY_SUCCESS = "skipped_already_success"
+    FILTERED = "filtered"
+    FREESCOUT_APPENDED = "freescout_appended"
+    FREESCOUT_CREATED = "freescout_created"
+    FREESCOUT_FAILED = "freescout_failed"
+    FAILED_RETRYABLE = "failed_retryable"
+
 def route_email(
     service,
     subject: str,

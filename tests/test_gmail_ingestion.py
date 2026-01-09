@@ -1,4 +1,3 @@
-import argparse
 import unittest
 from unittest.mock import Mock, patch
 
@@ -16,6 +15,9 @@ def _base_settings():
         "MAX_DRAFTS": 10,
         "TICKET_SYSTEM": "none",
         "TICKET_SQLITE_PATH": ":memory:",
+        "FREESCOUT_MAILBOX_ID": "mailbox-1",
+        "FREESCOUT_GMAIL_THREAD_FIELD_ID": "field-thread",
+        "FREESCOUT_GMAIL_MESSAGE_FIELD_ID": "field-message",
     }
 
 
@@ -33,184 +35,129 @@ def _make_message(message_id: str, thread_id: str) -> dict:
     }
 
 
-def _args():
-    return argparse.Namespace(
-        poll_freescout=False,
-        poll_interval=300,
-        timeout=5,
-        gmail_query="is:unread",
-        console_auth=False,
-    )
-
-
 class GmailIngestionTests(unittest.TestCase):
-    def _service_with_message(self, message: dict) -> Mock:
-        service = Mock()
-        service.users.return_value.messages.return_value.get.return_value.execute.return_value = (
-            message
-        )
-        service.users.return_value.threads.return_value.modify.return_value.execute.return_value = {}
-        return service
-
     def test_skip_already_processed_skips_freescout(self):
         store = Mock()
         store.processed_success.return_value = True
-        client = Mock()
+        freescout = Mock()
+        message = _make_message("msg-1", "thread-1")
 
-        with patch.object(gmail_bot, "get_settings", return_value=_base_settings()), \
-            patch.object(gmail_bot, "parse_args", return_value=_args()), \
-            patch.object(gmail_bot, "TicketStore", return_value=store), \
-            patch.object(gmail_bot, "fetch_all_unread_messages", return_value=[{"id": "msg-1"}]), \
-            patch.object(gmail_bot, "get_gmail_service", return_value=Mock()), \
-            patch.object(gmail_bot, "_build_freescout_client", return_value=client), \
-            patch.object(gmail_bot, "poll_ticket_updates", return_value=[]), \
-            patch.object(gmail_bot, "create_ticket") as create_ticket:
-            gmail_bot.main()
+        with patch.object(gmail_bot, "_TICKET_LABEL_ID", None):
+            result = gmail_bot.process_gmail_message(message, store, freescout, Mock())
 
-        create_ticket.assert_not_called()
-        client.add_customer_thread.assert_not_called()
+        self.assertEqual(result, gmail_bot.ProcessResult.SKIPPED_ALREADY_SUCCESS)
+        store.get_conversation_id_for_thread.assert_not_called()
+        freescout.add_customer_thread.assert_not_called()
+        freescout.create_conversation.assert_not_called()
 
     def test_filtered_terminal_marks_filtered(self):
         store = Mock()
         store.processed_success.return_value = False
-        store.get_conv_id.return_value = None
-        client = Mock()
+        freescout = Mock()
         message = _make_message("msg-2", "thread-2")
 
-        with patch.object(gmail_bot, "get_settings", return_value=_base_settings()), \
-            patch.object(gmail_bot, "parse_args", return_value=_args()), \
-            patch.object(gmail_bot, "TicketStore", return_value=store), \
-            patch.object(gmail_bot, "fetch_all_unread_messages", return_value=[{"id": "msg-2"}]), \
-            patch.object(gmail_bot, "get_gmail_service", return_value=self._service_with_message(message)), \
-            patch.object(gmail_bot, "_build_freescout_client", return_value=client), \
+        with patch.object(gmail_bot, "_TICKET_LABEL_ID", None), \
             patch.object(gmail_bot, "extract_plain_text", return_value="hello"), \
-            patch.object(gmail_bot, "is_promotional_or_spam", return_value=True), \
-            patch.object(gmail_bot, "poll_ticket_updates", return_value=[]), \
-            patch.object(gmail_bot, "create_ticket") as create_ticket:
-            gmail_bot.main()
+            patch.object(gmail_bot, "is_promotional_or_spam", return_value=True):
+            result = gmail_bot.process_gmail_message(message, store, freescout, Mock())
 
+        self.assertEqual(result, gmail_bot.ProcessResult.FILTERED)
         store.mark_filtered.assert_called_once_with(
             "msg-2",
             "thread-2",
             reason="filtered: promotional/spam",
         )
         store.mark_success.assert_not_called()
-        create_ticket.assert_not_called()
-        client.add_customer_thread.assert_not_called()
+        store.mark_failed.assert_not_called()
+        freescout.add_customer_thread.assert_not_called()
+        freescout.create_conversation.assert_not_called()
 
     def test_append_existing_thread_marks_success_after_append(self):
         store = Mock()
         store.processed_success.return_value = False
-        store.get_conv_id.return_value = "conv-123"
-        client = Mock()
+        store.get_conversation_id_for_thread.return_value = "conv-123"
+        freescout = Mock()
         message = _make_message("msg-3", "thread-3")
 
-        controller = Mock()
-        controller.attach_mock(client, "client")
-        controller.attach_mock(store, "store")
-
-        with patch.object(gmail_bot, "get_settings", return_value=_base_settings()), \
-            patch.object(gmail_bot, "parse_args", return_value=_args()), \
-            patch.object(gmail_bot, "TicketStore", return_value=store), \
-            patch.object(gmail_bot, "fetch_all_unread_messages", return_value=[{"id": "msg-3"}]), \
-            patch.object(gmail_bot, "get_gmail_service", return_value=self._service_with_message(message)), \
-            patch.object(gmail_bot, "_build_freescout_client", return_value=client), \
+        with patch.object(gmail_bot, "_TICKET_LABEL_ID", None), \
             patch.object(gmail_bot, "extract_plain_text", return_value="hello"), \
-            patch.object(gmail_bot, "is_promotional_or_spam", return_value=False), \
-            patch.object(gmail_bot, "poll_ticket_updates", return_value=[]):
-            gmail_bot.main()
+            patch.object(gmail_bot, "is_promotional_or_spam", return_value=False):
+            result = gmail_bot.process_gmail_message(message, store, freescout, Mock())
 
-        client.add_customer_thread.assert_called_once_with("conv-123", "hello", imported=True)
+        self.assertEqual(result, gmail_bot.ProcessResult.FREESCOUT_APPENDED)
+        freescout.add_customer_thread.assert_called_once_with("conv-123", "hello", imported=True)
+        freescout.create_conversation.assert_not_called()
+        store.upsert_thread_map.assert_not_called()
         store.mark_success.assert_called_once_with("msg-3", "thread-3", "conv-123")
-        self.assertLess(
-            controller.mock_calls.index(
-                unittest.mock.call.client.add_customer_thread("conv-123", "hello", imported=True)
-            ),
-            controller.mock_calls.index(
-                unittest.mock.call.store.mark_success("msg-3", "thread-3", "conv-123")
-            ),
-        )
 
     def test_create_new_thread_marks_success_after_upsert(self):
         store = Mock()
         store.processed_success.return_value = False
-        store.get_conv_id.return_value = None
-        client = Mock()
+        store.get_conversation_id_for_thread.return_value = None
+        freescout = Mock()
+        freescout.create_conversation.return_value = {"id": "conv-456"}
         message = _make_message("msg-4", "thread-4")
 
-        controller = Mock()
-        controller.attach_mock(store, "store")
-
-        with patch.object(gmail_bot, "get_settings", return_value=_base_settings()), \
-            patch.object(gmail_bot, "parse_args", return_value=_args()), \
-            patch.object(gmail_bot, "TicketStore", return_value=store), \
-            patch.object(gmail_bot, "fetch_all_unread_messages", return_value=[{"id": "msg-4"}]), \
-            patch.object(gmail_bot, "get_gmail_service", return_value=self._service_with_message(message)), \
-            patch.object(gmail_bot, "_build_freescout_client", return_value=client), \
+        with patch.object(gmail_bot, "_TICKET_LABEL_ID", None), \
             patch.object(gmail_bot, "extract_plain_text", return_value="hello"), \
             patch.object(gmail_bot, "is_promotional_or_spam", return_value=False), \
-            patch.object(gmail_bot, "poll_ticket_updates", return_value=[]), \
-            patch.object(gmail_bot, "create_ticket", return_value={"id": "conv-456"}) as create_ticket:
-            gmail_bot.main()
+            patch.object(gmail_bot, "get_settings", return_value=_base_settings()):
+            result = gmail_bot.process_gmail_message(message, store, freescout, Mock())
 
-        create_ticket.assert_called_once()
+        self.assertEqual(result, gmail_bot.ProcessResult.FREESCOUT_CREATED)
+        freescout.create_conversation.assert_called_once_with(
+            "Need help",
+            "customer@example.com",
+            "hello",
+            "mailbox-1",
+            thread_id="thread-4",
+            message_id="msg-4",
+            gmail_thread_field="field-thread",
+            gmail_message_field="field-message",
+        )
+        freescout.add_customer_thread.assert_not_called()
         store.upsert_thread_map.assert_called_once_with("thread-4", "conv-456")
         store.mark_success.assert_called_once_with("msg-4", "thread-4", "conv-456")
-        self.assertLess(
-            controller.mock_calls.index(
-                unittest.mock.call.store.upsert_thread_map("thread-4", "conv-456")
-            ),
-            controller.mock_calls.index(
-                unittest.mock.call.store.mark_success("msg-4", "thread-4", "conv-456")
-            ),
-        )
 
-    def test_append_failure_skips_mark_success(self):
+    def test_append_failure_marks_failed(self):
         store = Mock()
         store.processed_success.return_value = False
-        store.get_conv_id.return_value = "conv-789"
-        client = Mock()
-        client.add_customer_thread.side_effect = requests.RequestException("boom")
+        store.get_conversation_id_for_thread.return_value = "conv-789"
+        freescout = Mock()
+        freescout.add_customer_thread.side_effect = requests.RequestException("boom")
         message = _make_message("msg-5", "thread-5")
 
-        with patch.object(gmail_bot, "get_settings", return_value=_base_settings()), \
-            patch.object(gmail_bot, "parse_args", return_value=_args()), \
-            patch.object(gmail_bot, "TicketStore", return_value=store), \
-            patch.object(gmail_bot, "fetch_all_unread_messages", return_value=[{"id": "msg-5"}]), \
-            patch.object(gmail_bot, "get_gmail_service", return_value=self._service_with_message(message)), \
-            patch.object(gmail_bot, "_build_freescout_client", return_value=client), \
+        with patch.object(gmail_bot, "_TICKET_LABEL_ID", None), \
             patch.object(gmail_bot, "extract_plain_text", return_value="hello"), \
-            patch.object(gmail_bot, "is_promotional_or_spam", return_value=False), \
-            patch.object(gmail_bot, "poll_ticket_updates", return_value=[]):
-            gmail_bot.main()
+            patch.object(gmail_bot, "is_promotional_or_spam", return_value=False):
+            result = gmail_bot.process_gmail_message(message, store, freescout, Mock())
 
-        client.add_customer_thread.assert_called_once_with("conv-789", "hello", imported=True)
+        self.assertEqual(result, gmail_bot.ProcessResult.FAILED_RETRYABLE)
+        freescout.add_customer_thread.assert_called_once_with("conv-789", "hello", imported=True)
+        freescout.create_conversation.assert_not_called()
         store.mark_success.assert_not_called()
-        store.mark_failed.assert_called_once()
+        store.mark_failed.assert_called_once_with("msg-5", "thread-5", "boom", "conv-789")
 
-    def test_create_failure_skips_thread_map_write(self):
+    def test_create_failure_marks_failed(self):
         store = Mock()
         store.processed_success.return_value = False
-        store.get_conv_id.return_value = None
-        client = Mock()
+        store.get_conversation_id_for_thread.return_value = None
+        freescout = Mock()
+        freescout.create_conversation.side_effect = requests.RequestException("boom")
         message = _make_message("msg-6", "thread-6")
 
-        with patch.object(gmail_bot, "get_settings", return_value=_base_settings()), \
-            patch.object(gmail_bot, "parse_args", return_value=_args()), \
-            patch.object(gmail_bot, "TicketStore", return_value=store), \
-            patch.object(gmail_bot, "fetch_all_unread_messages", return_value=[{"id": "msg-6"}]), \
-            patch.object(gmail_bot, "get_gmail_service", return_value=self._service_with_message(message)), \
-            patch.object(gmail_bot, "_build_freescout_client", return_value=client), \
+        with patch.object(gmail_bot, "_TICKET_LABEL_ID", None), \
             patch.object(gmail_bot, "extract_plain_text", return_value="hello"), \
             patch.object(gmail_bot, "is_promotional_or_spam", return_value=False), \
-            patch.object(gmail_bot, "poll_ticket_updates", return_value=[]), \
-            patch.object(gmail_bot, "create_ticket", return_value=None) as create_ticket:
-            gmail_bot.main()
+            patch.object(gmail_bot, "get_settings", return_value=_base_settings()):
+            result = gmail_bot.process_gmail_message(message, store, freescout, Mock())
 
-        create_ticket.assert_called_once()
+        self.assertEqual(result, gmail_bot.ProcessResult.FAILED_RETRYABLE)
+        freescout.create_conversation.assert_called_once()
+        freescout.add_customer_thread.assert_not_called()
         store.upsert_thread_map.assert_not_called()
         store.mark_success.assert_not_called()
-        store.mark_failed.assert_called_once()
+        store.mark_failed.assert_called_once_with("msg-6", "thread-6", "boom")
 
 
 if __name__ == "__main__":
