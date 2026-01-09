@@ -75,6 +75,16 @@ class ProcessResult:
     freescout_conversation_id: Optional[str] = None
 
 
+ProcessResult.SKIPPED_ALREADY_SUCCESS = ProcessResult(
+    status="skipped_already_success",
+    reason="already processed",
+)
+ProcessResult.FILTERED = ProcessResult(
+    status="filtered",
+    reason="already filtered",
+)
+
+
 def should_filter_message(message: dict) -> Tuple[bool, str]:
     body_text = message.get("body_text", "")
     if is_promotional_or_spam(message, body_text):
@@ -242,6 +252,7 @@ def process_gmail_message(
         store.mark_failed(message_id, thread_id, str(exc))
         print(f"{message_id[:8]}… error: {exc}")
         return ProcessResult(status="failed_retryable", reason=reason)
+
 
 def route_email(
     service,
