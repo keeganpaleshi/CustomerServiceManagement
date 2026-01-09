@@ -96,9 +96,13 @@ def process_gmail_message(
         print("Skipping message without id")
         return ProcessResult.FAILED_RETRYABLE
 
-    if store.processed_terminal(message_id):
+    if store.processed_success(message_id):
         print(f"{message_id[:8]}… skipped (already processed)")
         return ProcessResult.SKIPPED_ALREADY_SUCCESS
+
+    if store.processed_filtered(message_id):
+        print(f"{message_id[:8]}… filtered (already filtered)")
+        return ProcessResult.FILTERED
 
     try:
         full_message = message
@@ -353,7 +357,7 @@ def process_gmail_message(
         return ProcessResult.SKIPPED_ALREADY_SUCCESS
 
     if ticket_store.processed_filtered(message_id):
-        print(f"{message_id[:8]}… skipped (already filtered)")
+        print(f"{message_id[:8]}… filtered (already filtered)")
         return ProcessResult.FILTERED
 
     try:
