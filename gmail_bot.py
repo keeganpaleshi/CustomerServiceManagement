@@ -390,13 +390,16 @@ def process_gmail_message(
         snippet = msg.get("snippet", "")
         body_text = body.strip() or snippet or "(no body)"
 
-        if is_promotional_or_spam(msg, body_text):
+        message_with_body = dict(msg)
+        message_with_body["body_text"] = body_text
+        filtered, reason = should_filter_message(message_with_body)
+        if filtered:
             ticket_store.mark_filtered(
                 message_id,
                 thread,
-                reason="filtered: promotional/spam",
+                reason=reason,
             )
-            print(f"{ref['id'][:8]}… filtered promotional/spam")
+            print(f"{ref['id'][:8]}… {reason}")
             return ProcessResult.FILTERED
 
         conv_id = ticket_store.get_conv_id(thread) if thread else None
