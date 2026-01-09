@@ -1,5 +1,4 @@
 import argparse
-import json
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -7,15 +6,11 @@ from email.utils import parseaddr
 from typing import Dict, Optional, Tuple
 
 import requests
-from openai import OpenAI
 
 from Draft_Replies import generate_ai_reply
 from utils import (
     classify_email,
     create_base64_message,
-    create_draft,
-    create_ticket,
-    critic_email,
     apply_label_to_thread,
     ensure_label,
     fetch_all_unread_messages,
@@ -25,7 +20,6 @@ from utils import (
     is_promotional_or_spam,
     thread_has_draft,
     extract_plain_text,
-    require_openai_api_key,
     require_ticket_settings,
 )
 from storage import TicketStore
@@ -254,100 +248,6 @@ def process_gmail_message(
         return ProcessResult(status="failed_retryable", reason=reason)
 
 
-def route_email(
-    service,
-    subject: str,
-    sender: str,
-    body: str,
-    thread_id: str,
-    message_id: str,
-    cls: dict,
-    has_existing_draft: bool,
-    ticket_label_id: Optional[str],
-    ticket_store: Optional[TicketStore] = None,
-    timeout: Optional[int] = None,
-) -> tuple[str, Optional[str]]:
-    """Route an email based on priority and information level.
-
-    Returns (action, conversation_id)
-    - "ignored" if the email type is not handled
-    - "ticketed" if a ticket exists/was created (and labeled)
-    - "ticket_failed" if ticket creation failed
-    - "followup_draft" if a simple follow-up draft was created
-    - "no_action" if the message should proceed to full draft creation
-    """
-
-    settings = get_settings()
-    http_timeout = timeout if timeout is not None else settings["HTTP_TIMEOUT"]
-
-    email_type = cls.get("type")
-    importance = cls.get("importance", 0)
-    if email_type == "other":
-        return "ignored"
-
-    high_priority = importance >= 8
-    needs_info = False
-    try:
-        client = OpenAI(api_key=require_openai_api_key())
-        resp = client.chat.completions.create(
-            model=settings["CLASSIFY_MODEL"],
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "Assess priority and information sufficiency. Return ONLY "
-                        "JSON {\"priority\":\"high|normal\",\"needs_more_info\":true|false}."
-                    ),
-                },
-                {"role": "user", "content": f"Subject:{subject}\n\n{body}"},
-            ],
-            temperature=0,
-            max_tokens=20,
-        )
-        result = json.loads(resp.choices[0].message.content)
-        high_priority = result.get("priority") == "high" or high_priority
-        needs_info = result.get("needs_more_info", False)
-    except Exception as e:
-        print(f"Priority check failed: {e}")
-
-    existing_conv = None
-    if ticket_store and thread_id:
-        existing_conv = ticket_store.get_conv_id(thread_id)
-
-    if high_priority or needs_info:
-        if existing_conv:
-            return "ticketed", existing_conv
-
-        ticket = create_ticket(
-            subject,
-            sender,
-            body,
-            thread_id=thread_id,
-            message_id=message_id,
-            timeout=http_timeout,
-        )
-        conv_id = _extract_conversation_id(ticket)
-        if ticket_store and conv_id and thread_id:
-            ticket_store.upsert_thread_map(thread_id, conv_id)
-        if ticket_label_id and ticket is not None:
-            service.users().threads().modify(
-                userId="me", id=thread_id, body={"addLabelIds": [ticket_label_id]}
-            ).execute()
-        return ("ticketed" if ticket is not None else "ticket_failed"), conv_id
-
-    # Otherwise ask for more details if we haven't drafted already
-    if not has_existing_draft:
-        followup = (
-            "Thank you for contacting us. Could you provide more details about "
-            "your request so we can assist you?"
-        )
-        msg = create_base64_message("me", sender, f"Re: {subject}", followup)
-        create_draft(service, "me", msg, thread_id=thread_id)
-        return "followup_draft", None
-
-    return "no_action", None
-
-
 def poll_ticket_updates(limit: int = 10, timeout: Optional[int] = None):
     """Fetch recent ticket updates from FreeScout."""
     settings = get_settings()
@@ -380,174 +280,12 @@ def process_gmail_message_freescout(
     ticket_label_id: Optional[str],
     timeout: int,
 ) -> Optional[ProcessResult]:
-    message_id = ref.get("id", "")
-    thread = ref.get("threadId")
-
-    if not message_id:
-        print("Skipping message without id")
-        return None
-
-    if ticket_store.processed_success(message_id):
-        print(f"{message_id[:8]}… skipped (already processed)")
-        return ProcessResult(
-            status="skipped_already_success",
-            reason="already processed",
-        )
-
-    if ticket_store.processed_filtered(message_id):
-        print(f"{message_id[:8]}… filtered (already filtered)")
-        return ProcessResult(
-            status="filtered",
-            reason="already filtered",
-        )
-
-    try:
-        msg = (
-            svc.users()
-            .messages()
-            .get(userId="me", id=message_id, format="full")
-            .execute()
-        )
-
-        thread = msg.get("threadId") or thread
-        if not thread:
-            ticket_store.mark_failed(message_id, thread, "missing thread id")
-            print(f"{message_id[:8]}… error: missing thread id")
-            return ProcessResult(
-                status="failed_retryable",
-                reason="missing thread id",
-            )
-
-        def get_header_value(payload: Optional[dict], name: str, default: str = "") -> str:
-            headers = (payload or {}).get("headers") or []
-            for header in headers:
-                if header.get("name") == name:
-                    return header.get("value", default)
-            return default
-
-        payload = msg.get("payload", {})
-        subject = get_header_value(payload, "Subject")
-        raw_sender = get_header_value(payload, "From")
-        sender = parseaddr(raw_sender)[1] or raw_sender
-        body = extract_plain_text(payload)
-        snippet = msg.get("snippet", "")
-        body_text = body.strip() or snippet or "(no body)"
-
-        message_with_body = dict(msg)
-        message_with_body["body_text"] = body_text
-        filtered, reason = should_filter_message(message_with_body)
-        if filtered:
-            ticket_store.mark_filtered(
-                message_id,
-                thread,
-                reason=reason,
-            )
-            print(f"{ref['id'][:8]}… {reason}")
-            return ProcessResult(
-                status="filtered",
-                reason=reason,
-            )
-
-        conv_id = ticket_store.get_conv_id(thread) if thread else None
-
-        if conv_id:
-            if not client:
-                ticket_store.mark_failed(message_id, thread, "freescout disabled", conv_id)
-                print(f"{message_id[:8]}… failed: freescout disabled")
-                return ProcessResult(
-                    status="failed_retryable",
-                    reason="freescout disabled",
-                    freescout_conversation_id=conv_id,
-                )
-            try:
-                client.add_customer_thread(conv_id, body_text, imported=True)
-                ticket_store.mark_success(message_id, thread, conv_id)
-                if ticket_label_id:
-                    svc.users().threads().modify(
-                        userId="me", id=thread, body={"addLabelIds": [ticket_label_id]}
-                    ).execute()
-                return ProcessResult(
-                    status="freescout_appended",
-                    reason="append success",
-                    freescout_conversation_id=conv_id,
-                )
-            except requests.RequestException as exc:
-                ticket_store.mark_failed(message_id, thread, str(exc), conv_id)
-                print(f"{message_id[:8]}… error appending to {conv_id}: {exc}")
-                return ProcessResult(
-                    status="failed_retryable",
-                    reason=f"append failed: {exc}",
-                    freescout_conversation_id=conv_id,
-                )
-
-        if not client:
-            ticket_store.mark_failed(message_id, thread, "freescout disabled")
-            print(f"{message_id[:8]}… failed: freescout disabled")
-            return ProcessResult(
-                status="failed_retryable",
-                reason="freescout disabled",
-            )
-
-        settings = get_settings()
-        mailbox_id = settings.get("FREESCOUT_MAILBOX_ID")
-        if not mailbox_id:
-            ticket_store.mark_failed(message_id, thread, "freescout mailbox missing")
-            print(f"{message_id[:8]}… error: freescout mailbox missing")
-            return ProcessResult(
-                status="failed_retryable",
-                reason="freescout mailbox missing",
-            )
-
-        gmail_thread_field = settings.get("FREESCOUT_GMAIL_THREAD_FIELD_ID")
-        gmail_message_field = settings.get("FREESCOUT_GMAIL_MESSAGE_FIELD_ID")
-
-        try:
-            ticket = client.create_conversation(
-                subject,
-                sender,
-                body_text,
-                mailbox_id,
-                thread_id=thread,
-                message_id=message_id,
-                gmail_thread_field=gmail_thread_field,
-                gmail_message_field=gmail_message_field,
-            )
-        except requests.RequestException as exc:
-            ticket_store.mark_failed(message_id, thread, str(exc))
-            print(f"{message_id[:8]}… error: ticket creation failed: {exc}")
-            return ProcessResult(
-                status="failed_retryable",
-                reason=f"ticket creation failed: {exc}",
-            )
-
-        conv_id = _extract_conversation_id(ticket)
-        if not ticket or not conv_id:
-            ticket_store.mark_failed(message_id, thread, "ticket creation failed", conv_id)
-            print(f"{message_id[:8]}… error: ticket creation failed")
-            return ProcessResult(
-                status="failed_retryable",
-                reason="ticket creation failed",
-                freescout_conversation_id=conv_id,
-            )
-
-        ticket_store.upsert_thread_map(thread, conv_id)
-        ticket_store.mark_success(message_id, thread, conv_id)
-        if ticket_label_id:
-            svc.users().threads().modify(
-                userId="me", id=thread, body={"addLabelIds": [ticket_label_id]}
-            ).execute()
-        return ProcessResult(
-            status="freescout_created",
-            reason="create success",
-            freescout_conversation_id=conv_id,
-        )
-    except Exception as exc:
-        ticket_store.mark_failed(message_id, thread, str(exc))
-        print(f"{message_id[:8]}… error: {exc}")
-        return ProcessResult(
-            status="failed_retryable",
-            reason=f"unexpected error: {exc}",
-        )
+    """Deprecated: use process_gmail_message for single-message ingestion."""
+    global _TICKET_LABEL_ID
+    if ticket_label_id is not None:
+        _TICKET_LABEL_ID = ticket_label_id
+    _ = timeout
+    return process_gmail_message(ref, ticket_store, client, svc)
 
 
 def _build_freescout_client(timeout: Optional[int] = None) -> Optional[FreeScoutClient]:
