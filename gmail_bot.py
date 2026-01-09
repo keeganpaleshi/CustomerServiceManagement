@@ -4,7 +4,7 @@ import time
 from datetime import datetime, timedelta
 from email.utils import parseaddr
 from enum import Enum
-from typing import Dict, Optional
+from typing import Dict, Optional, Tuple
 
 import requests
 from openai import OpenAI
@@ -16,6 +16,7 @@ from utils import (
     create_draft,
     create_ticket,
     critic_email,
+    apply_label_to_thread,
     ensure_label,
     fetch_all_unread_messages,
     get_gmail_service,
@@ -74,6 +75,146 @@ PROMO_LABELS = {
 
 # Label used to mark messages that already have a ticket to avoid duplicates
 TICKET_LABEL_NAME = "Ticketed"
+_TICKET_LABEL_ID: Optional[str] = None
+
+
+class ProcessResult(str, Enum):
+    SKIPPED_ALREADY_SUCCESS = "skipped_already_success"
+    FILTERED = "filtered"
+    FREESCOUT_APPENDED = "freescout_appended"
+    FREESCOUT_CREATED = "freescout_created"
+    FAILED_RETRYABLE = "failed_retryable"
+
+
+def should_filter_message(message: dict) -> Tuple[bool, str]:
+    body_text = message.get("body_text", "")
+    if is_promotional_or_spam(message, body_text):
+        return True, "filtered: promotional/spam"
+    return False, ""
+
+
+def process_gmail_message(
+    message: dict,
+    store: TicketStore,
+    freescout: Optional[FreeScoutClient],
+    gmail,
+) -> ProcessResult:
+    message_id = message.get("id", "")
+    thread_id = message.get("threadId")
+
+    if not message_id:
+        print("Skipping message without id")
+        return ProcessResult.FAILED_RETRYABLE
+
+    if store.processed_success(message_id):
+        print(f"{message_id[:8]}… skipped (already processed)")
+        return ProcessResult.SKIPPED_ALREADY_SUCCESS
+
+    try:
+        full_message = message
+        if "payload" not in message:
+            full_message = (
+                gmail.users()
+                .messages()
+                .get(userId="me", id=message_id, format="full")
+                .execute()
+            )
+
+        thread_id = full_message.get("threadId") or thread_id
+        if not thread_id:
+            store.mark_failed(message_id, thread_id, "missing thread id")
+            print(f"{message_id[:8]}… error: missing thread id")
+            return ProcessResult.FAILED_RETRYABLE
+
+        def get_header_value(
+            payload: Optional[dict], name: str, default: str = ""
+        ) -> str:
+            headers = (payload or {}).get("headers") or []
+            for header in headers:
+                if header.get("name") == name:
+                    return header.get("value", default)
+            return default
+
+        payload = full_message.get("payload", {})
+        subject = get_header_value(payload, "Subject")
+        raw_sender = get_header_value(payload, "From")
+        sender = parseaddr(raw_sender)[1] or raw_sender
+        body = extract_plain_text(payload)
+        snippet = full_message.get("snippet", "")
+        body_text = body.strip() or snippet or "(no body)"
+
+        message_with_body = dict(full_message)
+        message_with_body["body_text"] = body_text
+        filtered, reason = should_filter_message(message_with_body)
+        if filtered:
+            store.mark_filtered(message_id, thread_id, reason=reason)
+            print(f"{message_id[:8]}… {reason}")
+            return ProcessResult.FILTERED
+
+        conv_id = store.get_conversation_id_for_thread(thread_id)
+        if conv_id:
+            if not freescout:
+                store.mark_failed(message_id, thread_id, "freescout disabled", conv_id)
+                print(f"{message_id[:8]}… failed: freescout disabled")
+                return ProcessResult.FAILED_RETRYABLE
+            try:
+                freescout.add_customer_thread(conv_id, body_text, imported=True)
+            except requests.RequestException as exc:
+                store.mark_failed(message_id, thread_id, str(exc), conv_id)
+                print(f"{message_id[:8]}… error appending to {conv_id}: {exc}")
+                return ProcessResult.FAILED_RETRYABLE
+
+            store.mark_success(message_id, thread_id, conv_id)
+            if _TICKET_LABEL_ID:
+                apply_label_to_thread(gmail, thread_id, _TICKET_LABEL_ID)
+            return ProcessResult.FREESCOUT_APPENDED
+
+        if not freescout:
+            store.mark_failed(message_id, thread_id, "freescout disabled")
+            print(f"{message_id[:8]}… failed: freescout disabled")
+            return ProcessResult.FAILED_RETRYABLE
+
+        settings = get_settings()
+        mailbox_id = settings.get("FREESCOUT_MAILBOX_ID")
+        if not mailbox_id:
+            store.mark_failed(message_id, thread_id, "freescout mailbox missing")
+            print(f"{message_id[:8]}… error: freescout mailbox missing")
+            return ProcessResult.FAILED_RETRYABLE
+
+        gmail_thread_field = settings.get("FREESCOUT_GMAIL_THREAD_FIELD_ID")
+        gmail_message_field = settings.get("FREESCOUT_GMAIL_MESSAGE_FIELD_ID")
+
+        try:
+            ticket = freescout.create_conversation(
+                subject,
+                sender,
+                body_text,
+                mailbox_id,
+                thread_id=thread_id,
+                message_id=message_id,
+                gmail_thread_field=gmail_thread_field,
+                gmail_message_field=gmail_message_field,
+            )
+        except requests.RequestException as exc:
+            store.mark_failed(message_id, thread_id, str(exc))
+            print(f"{message_id[:8]}… error: ticket creation failed: {exc}")
+            return ProcessResult.FAILED_RETRYABLE
+
+        conv_id = _extract_conversation_id(ticket)
+        if not ticket or not conv_id:
+            store.mark_failed(message_id, thread_id, "ticket creation failed", conv_id)
+            print(f"{message_id[:8]}… error: ticket creation failed")
+            return ProcessResult.FAILED_RETRYABLE
+
+        store.upsert_thread_map(thread_id, conv_id)
+        store.mark_success(message_id, thread_id, conv_id)
+        if _TICKET_LABEL_ID:
+            apply_label_to_thread(gmail, thread_id, _TICKET_LABEL_ID)
+        return ProcessResult.FREESCOUT_CREATED
+    except Exception as exc:
+        store.mark_failed(message_id, thread_id, str(exc))
+        print(f"{message_id[:8]}… error: {exc}")
+        return ProcessResult.FAILED_RETRYABLE
 
 
 class ProcessResult(Enum):
@@ -547,6 +688,8 @@ def main():
     ticket_label_id = None
     if settings["TICKET_SYSTEM"] == "freescout":
         ticket_label_id = ensure_label(svc, TICKET_LABEL_NAME)
+    global _TICKET_LABEL_ID
+    _TICKET_LABEL_ID = ticket_label_id
     client = _build_freescout_client(timeout=args.timeout)
 
     skipped_already_processed = 0

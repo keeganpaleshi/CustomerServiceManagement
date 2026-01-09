@@ -130,6 +130,9 @@ class TicketStore:
             return row[0]
         return None
 
+    def get_conversation_id_for_thread(self, gmail_thread_id: str) -> Optional[str]:
+        return self.get_conv_id(gmail_thread_id)
+
     def upsert_thread_map(self, gmail_thread_id: str, conv_id: str) -> None:
         self._conn.execute(
             """

@@ -187,6 +187,65 @@ class FreeScoutClient:
         resp.raise_for_status()
         return resp.json()
 
+    def create_conversation(
+        self,
+        subject: str,
+        sender: str,
+        body: str,
+        mailbox_id: int,
+        *,
+        thread_id: Optional[str] = None,
+        message_id: Optional[str] = None,
+        gmail_thread_field: Optional[int] = None,
+        gmail_message_field: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        custom_fields: Dict[str, Any] = {}
+        tags: list[str] = []
+
+        if thread_id:
+            if gmail_thread_field:
+                custom_fields[str(gmail_thread_field)] = thread_id
+            else:
+                tags.append(f"gmail_thread:{thread_id}")
+
+        if message_id:
+            if gmail_message_field:
+                custom_fields[str(gmail_message_field)] = message_id
+            else:
+                tags.append(f"gmail_message:{message_id}")
+
+        thread_payload = {
+            "type": "customer",
+            "text": body or "(no body)",
+            "imported": True,
+        }
+
+        payload = {
+            "type": "email",
+            "mailboxId": mailbox_id,
+            "subject": subject or "(no subject)",
+            "customerEmail": sender,
+            "customerName": sender,
+            "imported": True,
+            "threads": [thread_payload],
+        }
+
+        if tags:
+            payload["tags"] = tags
+
+        serialized = serialize_custom_fields(custom_fields)
+        if serialized:
+            payload["customFields"] = serialized
+
+        resp = requests.post(
+            f"{self.base_url}/api/conversations",
+            headers=self._headers(),
+            json=payload,
+            timeout=self.timeout,
+        )
+        resp.raise_for_status()
+        return resp.json()
+
     def add_internal_note(
         self, conversation_id: int, text: str, user_id: Optional[int] = None
     ) -> Dict[str, Any]:
@@ -359,10 +418,6 @@ def apply_label_to_thread(service, thread_id: str, label_id: str) -> bool:
 
 
 def is_promotional_or_spam(message, body_text):
-    settings = _load_settings()
-    labels = set(message.get("labelIds", []))
-    if labels & settings["PROMO_LABELS"]:
-        return True
     headers = {
         h.get("name", "").lower(): h.get("value", "")
         for h in message.get("payload", {}).get("headers", [])
