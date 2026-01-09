@@ -133,6 +133,21 @@ class TicketStore:
         )
         self._conn.commit()
 
+    def mark_filtered(
+        self,
+        gmail_message_id: str,
+        gmail_thread_id: str,
+        reason: str,
+    ) -> None:
+        """Record a terminal filtered state without requiring a conversation ID."""
+
+        self.mark_success(
+            gmail_message_id,
+            gmail_thread_id,
+            conv_id=None,
+            error=reason,
+        )
+
     def close(self) -> None:
         try:
             self._conn.close()
