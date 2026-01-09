@@ -74,6 +74,13 @@ latest customer message, classifies it with OpenAI, and then updates the ticket
 in place: priority, assignment, tags, custom fields, and internal notes with an
 optional suggested reply.
 
+### Draft-only mode (separate from Phase 2C ingestion)
+
+`Draft_Replies.py` is a standalone, draft-only script. It does not gate or
+replace Phase 2C FreeScout ingestion, and draft creation should not block
+FreeScout create/append flows. Use `--skip-existing-drafts` only when you want
+to avoid new drafts in threads that already have one (default: off).
+
 ### Configure actions
 
 Set the following keys in `config.yaml` under `ticket:`:
