@@ -419,14 +419,37 @@ def process_gmail_message(
                 print(f"{message_id[:8]}… error appending to {conv_id}: {exc}")
                 return ProcessResult.FREESCOUT_FAILED
 
-        ticket = create_ticket(
-            subject,
-            sender,
-            body_text,
-            thread_id=thread,
-            message_id=message_id,
-            timeout=timeout,
-        )
+        if not client:
+            ticket_store.mark_failed(message_id, thread, "freescout disabled")
+            print(f"{message_id[:8]}… failed: freescout disabled")
+            return ProcessResult.FREESCOUT_FAILED
+
+        settings = get_settings()
+        mailbox_id = settings.get("FREESCOUT_MAILBOX_ID")
+        if not mailbox_id:
+            ticket_store.mark_failed(message_id, thread, "freescout mailbox missing")
+            print(f"{message_id[:8]}… error: freescout mailbox missing")
+            return ProcessResult.FREESCOUT_FAILED
+
+        gmail_thread_field = settings.get("FREESCOUT_GMAIL_THREAD_FIELD_ID")
+        gmail_message_field = settings.get("FREESCOUT_GMAIL_MESSAGE_FIELD_ID")
+
+        try:
+            ticket = client.create_conversation(
+                subject,
+                sender,
+                body_text,
+                mailbox_id,
+                thread_id=thread,
+                message_id=message_id,
+                gmail_thread_field=gmail_thread_field,
+                gmail_message_field=gmail_message_field,
+            )
+        except requests.RequestException as exc:
+            ticket_store.mark_failed(message_id, thread, str(exc))
+            print(f"{message_id[:8]}… error: ticket creation failed: {exc}")
+            return ProcessResult.FREESCOUT_FAILED
+
         conv_id = _extract_conversation_id(ticket)
         if not ticket or not conv_id:
             ticket_store.mark_failed(message_id, thread, "ticket creation failed", conv_id)
