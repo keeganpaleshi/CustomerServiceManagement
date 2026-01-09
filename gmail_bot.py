@@ -223,6 +223,7 @@ class ProcessResult(Enum):
     FREESCOUT_APPENDED = "freescout_appended"
     FREESCOUT_CREATED = "freescout_created"
     FREESCOUT_FAILED = "freescout_failed"
+    FAILED_RETRYABLE = "failed_retryable"
 
 def route_email(
     service,
