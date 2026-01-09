@@ -348,9 +348,13 @@ def process_gmail_message(
         print("Skipping message without id")
         return None
 
-    if ticket_store.processed_terminal(message_id):
+    if ticket_store.processed_success(message_id):
         print(f"{message_id[:8]}… skipped (already processed)")
         return ProcessResult.SKIPPED_ALREADY_SUCCESS
+
+    if ticket_store.processed_filtered(message_id):
+        print(f"{message_id[:8]}… skipped (already filtered)")
+        return ProcessResult.FILTERED
 
     try:
         msg = (
