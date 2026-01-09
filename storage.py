@@ -140,13 +140,27 @@ class TicketStore:
         reason: str,
     ) -> None:
         """Record a terminal filtered state without requiring a conversation ID."""
-
-        self.mark_success(
-            gmail_message_id,
-            gmail_thread_id,
-            conv_id=None,
-            error=reason,
+        self._conn.execute(
+            """
+            INSERT INTO processed_messages (
+                gmail_message_id,
+                gmail_thread_id,
+                freescout_conversation_id,
+                status,
+                error,
+                processed_at
+            )
+            VALUES (?, ?, NULL, 'success', ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(gmail_message_id) DO UPDATE SET
+                gmail_thread_id = excluded.gmail_thread_id,
+                freescout_conversation_id = NULL,
+                status = 'success',
+                error = excluded.error,
+                processed_at = CURRENT_TIMESTAMP
+            """,
+            (gmail_message_id, gmail_thread_id, reason),
         )
+        self._conn.commit()
 
     def close(self) -> None:
         try:
