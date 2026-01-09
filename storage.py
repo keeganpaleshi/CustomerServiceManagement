@@ -109,6 +109,17 @@ class TicketStore:
         )
         return cur.fetchone() is not None
 
+    def processed_terminal(self, gmail_message_id: str) -> bool:
+        cur = self._conn.execute(
+            """
+            SELECT 1
+            FROM processed_messages
+            WHERE gmail_message_id = ? AND status IN ('success', 'filtered')
+            """,
+            (gmail_message_id,),
+        )
+        return cur.fetchone() is not None
+
     def get_conv_id(self, gmail_thread_id: str) -> Optional[str]:
         cur = self._conn.execute(
             "SELECT freescout_conversation_id FROM thread_map WHERE gmail_thread_id = ?",

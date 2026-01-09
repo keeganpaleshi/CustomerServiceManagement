@@ -452,7 +452,7 @@ def main():
             print("Skipping message without id")
             continue
 
-        if ticket_store.processed_success(message_id) or ticket_store.processed_filtered(message_id):
+        if ticket_store.processed_terminal(message_id):
             skipped_already_processed += 1
             print(f"{message_id[:8]}… skipped (already processed)")
             continue
