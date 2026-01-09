@@ -5,7 +5,8 @@
 1. Reads all **unread** Gmail messages.
 2. Uses **GPT-4.1** to classify each as `lead`, `customer`, or `other` and assign an `importance` score (1-10).
 3. Ignores `other` and automatically skips promotional or newsletter emails
-   based on Gmail labels or unsubscribe headers.
+   based on message headers/body content (e.g., List-Unsubscribe/List-ID or
+   unsubscribe text).
 4. Routes each message:
    * High-importance emails open a ticket in **FreeScout** with retry logic.
    * Lower-importance emails get a draft asking for more details.
@@ -17,17 +18,18 @@
 
 ## Processing gates and terminal states
 
-The database is the **only** skip gate for Gmail message processing. If a
-message is not recorded in the DB, it will be evaluated regardless of Gmail
-labels or other metadata.
+The database is the **only** skip gate for Gmail message processing and is the
+source of truth. If a message is not recorded in the DB, it will be evaluated
+regardless of Gmail labels or other metadata.
 
 Gmail labels are **cosmetic only** and are never used for control flow. Label
 changes do not prevent reprocessing or bypass any step.
 
-Filtered messages are recorded in the DB as a **terminal state** and are not
-reprocessed. If FreeScout is unavailable, the run does **not** mark success;
-once FreeScout is back, reruns are safe and will continue processing the same
-message until it is stored in the DB.
+Filtered messages are recorded in the DB as a **terminal state** (`filtered`)
+and are not reprocessed. Successfully ticketed/appended messages are stored as
+`success`. If FreeScout is unavailable or ticket creation fails, the run is
+marked `failed` (retryable) and reruns will continue processing the same
+message until it reaches a terminal DB state.
 
 ---
 
