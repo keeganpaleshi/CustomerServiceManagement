@@ -34,6 +34,12 @@ def parse_args(settings: Optional[Dict] = None):
         default=settings["GMAIL_USE_CONSOLE"],
         help="Use console-based OAuth (paste auth code) instead of opening a browser",
     )
+    parser.add_argument(
+        "--skip-existing-drafts",
+        action="store_true",
+        default=False,
+        help="Skip threads that already have a draft (off by default for Phase 2C)",
+    )
     return parser.parse_args()
 
 
@@ -106,7 +112,7 @@ def main():
     1) Authenticate & build Gmail service.
     2) Fetch unread messages & limit to the configured amount.
     3) For each message:
-       - Skip if there's already a draft in the same thread.
+       - Optionally skip if there's already a draft in the same thread.
        - Generate AI-based draft.
        - Create the draft (email remains unread).
     """
@@ -162,7 +168,7 @@ def main():
         print(f"{msg_id[:8]}… type={email_type}, imp={importance}")
 
         # 1) Check if there's already a draft in this thread
-        if thread_has_draft(service, thread_id):
+        if args.skip_existing_drafts and thread_has_draft(service, thread_id):
             print(
                 f"Skipping message {msg_id} (thread {thread_id}) because a draft already exists."
             )
