@@ -63,16 +63,6 @@ def parse_args(settings: Optional[Dict] = None):
     return parser.parse_args()
 
 
-# Gmail label IDs that indicate promotional or spammy content. Messages with
-# any of these labels will be skipped entirely.
-PROMO_LABELS = {
-    "SPAM",
-    "CATEGORY_PROMOTIONS",
-    "CATEGORY_SOCIAL",
-    "CATEGORY_UPDATES",
-    "CATEGORY_FORUMS",
-}
-
 # Label used to mark messages that already have a ticket to avoid duplicates
 TICKET_LABEL_NAME = "Ticketed"
 _TICKET_LABEL_ID: Optional[str] = None
@@ -106,7 +96,7 @@ def process_gmail_message(
         print("Skipping message without id")
         return ProcessResult.FAILED_RETRYABLE
 
-    if store.processed_success(message_id):
+    if store.processed_terminal(message_id):
         print(f"{message_id[:8]}… skipped (already processed)")
         return ProcessResult.SKIPPED_ALREADY_SUCCESS
 
@@ -420,14 +410,37 @@ def process_gmail_message(
                 print(f"{message_id[:8]}… error appending to {conv_id}: {exc}")
                 return ProcessResult.FREESCOUT_FAILED
 
-        ticket = create_ticket(
-            subject,
-            sender,
-            body_text,
-            thread_id=thread,
-            message_id=message_id,
-            timeout=timeout,
-        )
+        if not client:
+            ticket_store.mark_failed(message_id, thread, "freescout disabled")
+            print(f"{message_id[:8]}… failed: freescout disabled")
+            return ProcessResult.FREESCOUT_FAILED
+
+        settings = get_settings()
+        mailbox_id = settings.get("FREESCOUT_MAILBOX_ID")
+        if not mailbox_id:
+            ticket_store.mark_failed(message_id, thread, "freescout mailbox missing")
+            print(f"{message_id[:8]}… error: freescout mailbox missing")
+            return ProcessResult.FREESCOUT_FAILED
+
+        gmail_thread_field = settings.get("FREESCOUT_GMAIL_THREAD_FIELD_ID")
+        gmail_message_field = settings.get("FREESCOUT_GMAIL_MESSAGE_FIELD_ID")
+
+        try:
+            ticket = client.create_conversation(
+                subject,
+                sender,
+                body_text,
+                mailbox_id,
+                thread_id=thread,
+                message_id=message_id,
+                gmail_thread_field=gmail_thread_field,
+                gmail_message_field=gmail_message_field,
+            )
+        except requests.RequestException as exc:
+            ticket_store.mark_failed(message_id, thread, str(exc))
+            print(f"{message_id[:8]}… error: ticket creation failed: {exc}")
+            return ProcessResult.FREESCOUT_FAILED
+
         conv_id = _extract_conversation_id(ticket)
         if not ticket or not conv_id:
             ticket_store.mark_failed(message_id, thread, "ticket creation failed", conv_id)
@@ -697,19 +710,12 @@ def main():
     created_conversations = 0
     appended_threads = 0
     filtered_terminal = 0
-    failed_freescout = 0
+    failed_retryable = 0
 
     for ref in fetch_all_unread_messages(svc, query=args.gmail_query)[
         : settings["MAX_DRAFTS"]
     ]:
-        result = process_gmail_message(
-            ref,
-            ticket_store,
-            client,
-            svc,
-            ticket_label_id,
-            args.timeout,
-        )
+        result = process_gmail_message(ref, ticket_store, client, svc)
         if result == ProcessResult.SKIPPED_ALREADY_SUCCESS:
             skipped_already_processed += 1
         elif result == ProcessResult.FILTERED:
@@ -718,8 +724,8 @@ def main():
             appended_threads += 1
         elif result == ProcessResult.FREESCOUT_CREATED:
             created_conversations += 1
-        elif result == ProcessResult.FREESCOUT_FAILED:
-            failed_freescout += 1
+        elif result == ProcessResult.FAILED_RETRYABLE:
+            failed_retryable += 1
 
     updates = poll_ticket_updates()
     if updates:
@@ -730,7 +736,7 @@ def main():
     print(f"  created_conversations: {created_conversations}")
     print(f"  appended_threads: {appended_threads}")
     print(f"  filtered_terminal: {filtered_terminal}")
-    print(f"  failed_freescout: {failed_freescout}")
+    print(f"  failed_retryable: {failed_retryable}")
 
 
 if __name__ == "__main__":
