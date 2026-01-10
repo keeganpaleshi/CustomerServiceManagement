@@ -1122,11 +1122,11 @@ def main():
         failed = 0
 
         for ref in fetch_all_unread_messages(svc, query=args.gmail_query)[
-            : settings["MAX_DRAFTS"]
+            : settings["MAX_MESSAGES_PER_RUN"]
         ]:
             processed += 1
             result = process_gmail_message(ref, ticket_store, client, svc)
-            if result.status == "skipped_already_success":
+            if result.status in {"skipped_already_success", "skipped_already_claimed"}:
                 skipped += 1
             elif result.status == "filtered":
                 filtered_terminal += 1
@@ -1149,40 +1149,6 @@ def main():
                 outcome="success",
                 count=len(updates),
             )
-    global _TICKET_LABEL_ID
-    _TICKET_LABEL_ID = ticket_label_id
-    client = _build_freescout_client(timeout=args.timeout)
-
-    processed = 0
-    created_conversations = 0
-    appended_threads = 0
-    drafted = 0
-    skipped = 0
-    filtered_terminal = 0
-    failed = 0
-
-    for ref in fetch_all_unread_messages(svc, query=args.gmail_query)[
-        : settings["MAX_MESSAGES_PER_RUN"]
-    ]:
-        processed += 1
-        result = process_gmail_message(ref, ticket_store, client, svc)
-        if result.status in {"skipped_already_success", "skipped_already_claimed"}:
-            skipped += 1
-        elif result.status == "filtered":
-            filtered_terminal += 1
-        elif result.status == "freescout_appended":
-            appended_threads += 1
-        elif result.status == "freescout_created":
-            created_conversations += 1
-        elif result.status == "failed_retryable":
-            failed += 1
-        elif result.status == "failed_permanent":
-            failed += 1
-        if result.drafted:
-            drafted += 1
-
-    updates = poll_ticket_updates()
-    if updates:
         log_event(
             "gmail_ingest_summary",
             processed=processed,
