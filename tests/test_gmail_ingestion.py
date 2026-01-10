@@ -190,7 +190,7 @@ class GmailIngestionTests(unittest.TestCase):
         freescout.create_conversation.assert_not_called()
         freescout.add_customer_thread.assert_not_called()
 
-    def test_processed_filtered_store_value_skips_processing(self):
+    def test_processed_filtered_store_value_still_filters_message(self):
         store = Mock()
         store.processed_success.return_value = False
         store.processed_filtered.return_value = True
@@ -200,14 +200,18 @@ class GmailIngestionTests(unittest.TestCase):
 
         with patch.object(gmail_bot, "_TICKET_LABEL_ID", None), \
             patch.object(gmail_bot, "extract_plain_text", return_value="hello"), \
-            patch.object(gmail_bot, "is_promotional_or_spam", return_value=False):
+            patch.object(gmail_bot, "is_promotional_or_spam", return_value=True):
             result = gmail_bot.process_gmail_message(message, store, freescout, Mock())
 
         self.assertEqual(result.status, "filtered")
-        self.assertEqual(result.reason, "already filtered")
+        self.assertEqual(result.reason, "filtered: promotional/spam")
         freescout.add_customer_thread.assert_not_called()
         freescout.create_conversation.assert_not_called()
-        store.mark_filtered.assert_not_called()
+        store.mark_filtered.assert_called_once_with(
+            "msg-9",
+            "thread-9",
+            reason="filtered: promotional/spam",
+        )
 
     def test_append_without_freescout_does_not_mark_success(self):
         store = Mock()
