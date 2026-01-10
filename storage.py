@@ -142,6 +142,36 @@ class TicketStore:
         )
         return cur.fetchone() is not None
 
+    def get_processed_status_counts(self) -> dict:
+        cur = self._conn.execute(
+            """
+            SELECT status, COUNT(*)
+            FROM processed_messages
+            GROUP BY status
+            """
+        )
+        return {row[0]: row[1] for row in cur.fetchall()}
+
+    def get_recent_failures(self, limit: int = 10) -> list[dict]:
+        cur = self._conn.execute(
+            """
+            SELECT gmail_message_id, error, processed_at
+            FROM processed_messages
+            WHERE status = 'failed'
+            ORDER BY processed_at DESC
+            LIMIT ?
+            """,
+            (limit,),
+        )
+        return [
+            {
+                "gmail_message_id": row[0],
+                "error": row[1],
+                "processed_at": row[2],
+            }
+            for row in cur.fetchall()
+        ]
+
     def get_conv_id(self, gmail_thread_id: str) -> Optional[str]:
         cur = self._conn.execute(
             "SELECT freescout_conversation_id FROM thread_map WHERE gmail_thread_id = ?",
@@ -310,6 +340,11 @@ class TicketStore:
             ),
         )
         self._conn.commit()
+
+    def get_bot_draft_count(self) -> int:
+        cur = self._conn.execute("SELECT COUNT(*) FROM bot_drafts")
+        row = cur.fetchone()
+        return int(row[0]) if row else 0
 
     def close(self) -> None:
         try:
