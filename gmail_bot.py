@@ -71,6 +71,10 @@ def parse_args(settings: Optional[Dict] = None):
 # Label used to mark messages that already have a ticket to avoid duplicates
 TICKET_LABEL_NAME = "Ticketed"
 
+# Default thresholds and timeouts
+DEFAULT_PRIORITY_HIGH_THRESHOLD = 8  # Default importance score that marks a message as high priority
+DEFAULT_PROCESSING_TIMEOUT_MINUTES = 30  # How long before a stale 'processing' state can be reclaimed
+
 
 @dataclass(frozen=True)
 class ProcessResult:
@@ -268,15 +272,26 @@ def process_gmail_message(
                 thread_id=thread_id,
                 conversation_id=conv_id,
             )
-            process_conversation(
-                conv_id,
-                {
-                    "subject": subject,
-                    "latest_text": body_text,
-                },
-                settings,
-                freescout,
-            )
+            try:
+                process_conversation(
+                    conv_id,
+                    {
+                        "subject": subject,
+                        "latest_text": body_text,
+                    },
+                    settings,
+                    freescout,
+                )
+            except Exception as exc:
+                log_event(
+                    "gmail_ingest",
+                    action="process_conversation",
+                    outcome="failed",
+                    reason=str(exc),
+                    message_id=message_id,
+                    thread_id=thread_id,
+                    conversation_id=conv_id,
+                )
             if ticket_label_id:
                 try:
                     retry_request(
@@ -398,15 +413,26 @@ def process_gmail_message(
             thread_id=thread_id,
             conversation_id=conv_id,
         )
-        process_conversation(
-            conv_id,
-            {
-                "subject": subject,
-                "latest_text": body_text,
-            },
-            settings,
-            freescout,
-        )
+        try:
+            process_conversation(
+                conv_id,
+                {
+                    "subject": subject,
+                    "latest_text": body_text,
+                },
+                settings,
+                freescout,
+            )
+        except Exception as exc:
+            log_event(
+                "gmail_ingest",
+                action="process_conversation",
+                outcome="failed",
+                reason=str(exc),
+                message_id=message_id,
+                thread_id=thread_id,
+                conversation_id=conv_id,
+            )
         if ticket_label_id:
             try:
                 retry_request(
@@ -585,7 +611,7 @@ def process_conversation(
 
     cls = classify_email(f"Subject:{subject}\n\n{latest_text}")
     importance = cls.get("importance", 0)
-    high_priority = importance >= actions_cfg.get("priority_high_threshold", 8)
+    high_priority = importance >= actions_cfg.get("priority_high_threshold", DEFAULT_PRIORITY_HIGH_THRESHOLD)
     bucket = importance_to_bucket(importance)
 
     tags = None
@@ -676,22 +702,39 @@ def process_conversation(
     }
 
 
-def _extract_conversation_id(ticket: Optional[dict]) -> Optional[str]:
-    if not ticket or not isinstance(ticket, dict):
+def _extract_id(response: Optional[dict], id_type: str = "conversation") -> Optional[str]:
+    """
+    Extract an ID from a FreeScout API response.
+
+    Args:
+        response: API response dict
+        id_type: Type of ID to extract ('conversation', 'thread', etc.)
+
+    Returns:
+        Normalized ID string or None
+    """
+    if not response or not isinstance(response, dict):
         return None
 
+    # Try direct ID keys
     candidates = [
-        ticket.get("id"),
-        ticket.get("conversation_id"),
-        (ticket.get("conversation") or {}).get("id"),
-        (ticket.get("data") or {}).get("id"),
-        ((ticket.get("data") or {}).get("conversation") or {}).get("id"),
+        response.get("id"),
+        response.get(f"{id_type}_id"),
+        (response.get(id_type) or {}).get("id"),
+        (response.get("data") or {}).get("id"),
+        ((response.get("data") or {}).get(id_type) or {}).get("id"),
     ]
-    for conv_id in candidates:
-        normalized = _normalize_id(conv_id)
+
+    for candidate in candidates:
+        normalized = _normalize_id(candidate)
         if normalized:
             return normalized
     return None
+
+
+def _extract_conversation_id(ticket: Optional[dict]) -> Optional[str]:
+    """Extract conversation ID from a FreeScout ticket response."""
+    return _extract_id(ticket, "conversation")
 
 
 def _post_write_draft_reply(
@@ -880,19 +923,8 @@ def _thread_text(thread: dict) -> str:
 
 
 def _extract_thread_id(response: Optional[dict]) -> Optional[str]:
-    if not response:
-        return None
-    candidates = [
-        response.get("id"),
-        response.get("thread_id"),
-        (response.get("thread") or {}).get("id"),
-        (response.get("data") or {}).get("id"),
-        ((response.get("data") or {}).get("thread") or {}).get("id"),
-    ]
-    for candidate in candidates:
-        if candidate:
-            return str(candidate)
-    return None
+    """Extract thread ID from a FreeScout thread response."""
+    return _extract_id(response, "thread")
 
 
 def _post_draft_skip_note(

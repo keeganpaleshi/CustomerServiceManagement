@@ -35,6 +35,11 @@ openai:
   rate_limit:
     max_requests: 60
     window_seconds: 60
+  # Fallback email signature when OpenAI API fails or is rate limited
+  fallback_signature: |
+    Best,
+    David
+    Cruising Solutions Customer Support
 
 thresholds:
   critic_threshold: 8.0

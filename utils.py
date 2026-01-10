@@ -64,6 +64,7 @@ def _load_settings() -> Dict[str, Any]:
         "CLASSIFY_MAX_TOKENS": cfg["openai"].get("classify_max_tokens", 50),
         "OPENAI_TIMEOUT": cfg["openai"].get("timeout", 30),
         "OPENAI_RATE_LIMIT": cfg["openai"].get("rate_limit", {}),
+        "FALLBACK_SIGNATURE": cfg["openai"].get("fallback_signature", "Best,\nSupport Team"),
         "PROMO_LABELS": {
             "SPAM",
             "CATEGORY_PROMOTIONS",
@@ -738,7 +739,7 @@ def is_promotional_or_spam(message, body_text):
     if footer_match and header_signals >= 1:
         return True
 
-    noreply_sender = "no-reply" in from_header or "noreply" in from_header
+    noreply_sender = "no-reply" in from_header or "noreply@" in from_header
     if list_unsubscribe_present and promo_subject and noreply_sender:
         return True
 
@@ -766,16 +767,9 @@ def generate_ai_reply(subject, sender, snippet_or_body, email_type):
             action="generate_ai_reply",
             reason="rate_limited",
         )
-        fallback_lines = [
-            "Hello,",
-            "",
-            "I'm sorry, but I couldn't generate a response at this time. Please review this email manually.",
-            "",
-            "Best,",
-            "David",
-            "Cruising Solutions Customer Support",
-        ]
-        return "\n".join(fallback_lines)
+        fallback_body = "Hello,\n\nI'm sorry, but I couldn't generate a response at this time. Please review this email manually.\n\n"
+        fallback_signature = settings.get("FALLBACK_SIGNATURE", "Best,\nSupport Team")
+        return fallback_body + fallback_signature
     client = OpenAI(
         api_key=require_openai_api_key(), timeout=settings["OPENAI_TIMEOUT"]
     )
@@ -808,16 +802,9 @@ def generate_ai_reply(subject, sender, snippet_or_body, email_type):
             action="generate_ai_reply",
             reason=str(exc),
         )
-        fallback_lines = [
-            "Hello,",
-            "",
-            "I'm sorry, but I couldn't generate a response at this time. Please review this email manually.",
-            "",
-            "Best,",
-            "David",
-            "Cruising Solutions Customer Support",
-        ]
-        return "\n".join(fallback_lines)
+        fallback_body = "Hello,\n\nI'm sorry, but I couldn't generate a response at this time. Please review this email manually.\n\n"
+        fallback_signature = settings.get("FALLBACK_SIGNATURE", "Best,\nSupport Team")
+        return fallback_body + fallback_signature
 
 
 def sanitize_draft_reply(text: str) -> str:
