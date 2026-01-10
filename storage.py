@@ -92,29 +92,53 @@ class TicketStore:
                 )
                 """
             )
-            action_column = "action" if has_action else "NULL"
-            self._conn.execute(
-                f"""
-                INSERT INTO processed_messages (
-                    gmail_message_id,
-                    gmail_thread_id,
-                    freescout_conversation_id,
-                    status,
-                    action,
-                    error,
-                    processed_at
+            # Use conditional SQL instead of f-string for safer query construction
+            if has_action:
+                self._conn.execute(
+                    """
+                    INSERT INTO processed_messages (
+                        gmail_message_id,
+                        gmail_thread_id,
+                        freescout_conversation_id,
+                        status,
+                        action,
+                        error,
+                        processed_at
+                    )
+                    SELECT
+                        gmail_message_id,
+                        gmail_thread_id,
+                        freescout_conversation_id,
+                        status,
+                        action,
+                        error,
+                        processed_at
+                    FROM processed_messages_old
+                    """
                 )
-                SELECT
-                    gmail_message_id,
-                    gmail_thread_id,
-                    freescout_conversation_id,
-                    status,
-                    {action_column},
-                    error,
-                    processed_at
-                FROM processed_messages_old
-                """
-            )
+            else:
+                self._conn.execute(
+                    """
+                    INSERT INTO processed_messages (
+                        gmail_message_id,
+                        gmail_thread_id,
+                        freescout_conversation_id,
+                        status,
+                        action,
+                        error,
+                        processed_at
+                    )
+                    SELECT
+                        gmail_message_id,
+                        gmail_thread_id,
+                        freescout_conversation_id,
+                        status,
+                        NULL,
+                        error,
+                        processed_at
+                    FROM processed_messages_old
+                    """
+                )
             self._conn.execute("DROP TABLE processed_messages_old")
         elif needs_action:
             self._conn.execute(
@@ -230,15 +254,17 @@ class TicketStore:
             # If status is processing, check if it's stale
             if status == 'processing':
                 # Check if the processing timestamp is too old
+                # Use CAST to ensure processing_timeout_minutes is treated as an integer
+                # This prevents SQL injection while still using the parameter
                 cur = self._conn.execute(
-                    f"""
+                    """
                     SELECT CASE
-                        WHEN datetime(processed_at, '+{processing_timeout_minutes} minutes') < datetime('now')
+                        WHEN datetime(processed_at, '+' || CAST(? AS INTEGER) || ' minutes') < datetime('now')
                         THEN 1 ELSE 0 END as is_stale
                     FROM processed_messages
                     WHERE gmail_message_id = ?
                     """,
-                    (gmail_message_id,),
+                    (processing_timeout_minutes, gmail_message_id),
                 )
                 stale_row = cur.fetchone()
                 if stale_row and stale_row[0] == 1:
