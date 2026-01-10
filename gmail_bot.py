@@ -1060,18 +1060,18 @@ def main():
 
     if args.status:
         sqlite_path = settings.get("TICKET_SQLITE_PATH") or "./csm.sqlite"
-        ticket_store = TicketStore(sqlite_path)
-        status_counts = ticket_store.get_processed_status_counts()
-        draft_count = ticket_store.get_bot_draft_count()
-        recent_failures = ticket_store.get_recent_failures(limit=10)
-        log_event(
-            "status_summary",
-            success=status_counts.get("success", 0),
-            filtered=status_counts.get("filtered", 0),
-            failed=status_counts.get("failed", 0),
-            bot_drafts=draft_count,
-            recent_failures=recent_failures or [],
-        )
+        with TicketStore(sqlite_path) as ticket_store:
+            status_counts = ticket_store.get_processed_status_counts()
+            draft_count = ticket_store.get_bot_draft_count()
+            recent_failures = ticket_store.get_recent_failures(limit=10)
+            log_event(
+                "status_summary",
+                success=status_counts.get("success", 0),
+                filtered=status_counts.get("filtered", 0),
+                failed=status_counts.get("failed", 0),
+                bot_drafts=draft_count,
+                recent_failures=recent_failures or [],
+            )
         return
 
     if args.poll_freescout:
@@ -1090,24 +1090,64 @@ def main():
         return
 
     sqlite_path = settings.get("TICKET_SQLITE_PATH") or "./csm.sqlite"
-    ticket_store = TicketStore(sqlite_path)
-    svc = get_gmail_service(use_console=args.console_auth)
-    ticket_label_id = None
-    if settings["TICKET_SYSTEM"] == "freescout":
-        try:
-            ticket_label_id = retry_request(
-                lambda: ensure_label(svc, TICKET_LABEL_NAME),
-                action_name="gmail.ensure_label",
-                exceptions=(HttpError,),
-                log_context={"label_name": TICKET_LABEL_NAME},
-            )
-        except HttpError as exc:
+    with TicketStore(sqlite_path) as ticket_store:
+        svc = get_gmail_service(use_console=args.console_auth)
+        ticket_label_id = None
+        if settings["TICKET_SYSTEM"] == "freescout":
+            try:
+                ticket_label_id = retry_request(
+                    lambda: ensure_label(svc, TICKET_LABEL_NAME),
+                    action_name="gmail.ensure_label",
+                    exceptions=(HttpError,),
+                    log_context={"label_name": TICKET_LABEL_NAME},
+                )
+            except HttpError as exc:
+                log_event(
+                    "gmail_label",
+                    action="ensure_label",
+                    outcome="failed",
+                    reason=str(exc),
+                    label_name=TICKET_LABEL_NAME,
+                )
+        global _TICKET_LABEL_ID
+        _TICKET_LABEL_ID = ticket_label_id
+        client = _build_freescout_client(timeout=args.timeout)
+
+        processed = 0
+        created_conversations = 0
+        appended_threads = 0
+        drafted = 0
+        skipped = 0
+        filtered_terminal = 0
+        failed = 0
+
+        for ref in fetch_all_unread_messages(svc, query=args.gmail_query)[
+            : settings["MAX_DRAFTS"]
+        ]:
+            processed += 1
+            result = process_gmail_message(ref, ticket_store, client, svc)
+            if result.status == "skipped_already_success":
+                skipped += 1
+            elif result.status == "filtered":
+                filtered_terminal += 1
+            elif result.status == "freescout_appended":
+                appended_threads += 1
+            elif result.status == "freescout_created":
+                created_conversations += 1
+            elif result.status == "failed_retryable":
+                failed += 1
+            elif result.status == "failed_permanent":
+                failed += 1
+            if result.drafted:
+                drafted += 1
+
+        updates = poll_ticket_updates()
+        if updates:
             log_event(
-                "gmail_label",
-                action="ensure_label",
-                outcome="failed",
-                reason=str(exc),
-                label_name=TICKET_LABEL_NAME,
+                "freescout_poll",
+                action="fetch_updates",
+                outcome="success",
+                count=len(updates),
             )
     global _TICKET_LABEL_ID
     _TICKET_LABEL_ID = ticket_label_id
@@ -1144,22 +1184,15 @@ def main():
     updates = poll_ticket_updates()
     if updates:
         log_event(
-            "freescout_poll",
-            action="fetch_updates",
-            outcome="success",
-            count=len(updates),
+            "gmail_ingest_summary",
+            processed=processed,
+            created=created_conversations,
+            appended=appended_threads,
+            drafted=drafted,
+            skipped=skipped,
+            filtered=filtered_terminal,
+            failed=failed,
         )
-
-    log_event(
-        "gmail_ingest_summary",
-        processed=processed,
-        created=created_conversations,
-        appended=appended_threads,
-        drafted=drafted,
-        skipped=skipped,
-        filtered=filtered_terminal,
-        failed=failed,
-    )
 
 
 if __name__ == "__main__":

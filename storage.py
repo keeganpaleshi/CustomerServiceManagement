@@ -407,6 +407,13 @@ class TicketStore:
         except Exception:
             pass
 
+    def __enter__(self) -> "TicketStore":
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> bool:
+        self.close()
+        return False
+
     def __del__(self) -> None:  # pragma: no cover - best-effort cleanup
         try:
             self.close()
