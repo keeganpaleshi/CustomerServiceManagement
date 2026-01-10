@@ -21,6 +21,7 @@ from utils import (
     thread_has_draft,
     extract_plain_text,
     require_ticket_settings,
+    importance_to_bucket,
 )
 from storage import TicketStore
 
@@ -328,8 +329,8 @@ def _extract_latest_thread_text(conversation: dict) -> str:
     return latest.get("text", "") or latest.get("body", "")
 
 
-def _build_tags(cls: dict, high_priority: bool) -> list[str]:
-    tags = [cls.get("type", "other")]
+def _build_tags(cls: dict, bucket: str, high_priority: bool) -> list[str]:
+    tags = [cls.get("type", "other"), bucket]
     if high_priority:
         tags.append("high-priority")
     return tags
@@ -484,9 +485,44 @@ def process_freescout_conversation(
         return
 
     subject = details.get("subject") or conversation.get("subject") or "(no subject)"
-    latest_text = _extract_latest_thread_text(details) or conversation.get(
-        "last_text", ""
-    )
+    latest_text = _extract_latest_thread_text(details) or conversation.get("last_text", "")
+
+    cls = classify_email(f"Subject:{subject}\n\n{latest_text}")
+    importance = cls.get("importance", 0)
+    high_priority = importance >= actions_cfg.get("priority_high_threshold", 8)
+    bucket = importance_to_bucket(importance)
+
+    tags = None
+    if actions_cfg.get("apply_tags", True):
+        tags = _build_tags(cls, bucket, high_priority)
+
+    custom_fields = _prepare_custom_fields(cls, settings)
+    if not custom_fields:
+        custom_fields = None
+
+    priority_value = None
+    if actions_cfg.get("update_priority", True):
+        priority_value = bucket
+
+    assignee = actions_cfg.get("assign_to_user_id")
+
+    try:
+        client.update_conversation(
+            conv_id,
+            priority=priority_value,
+            assignee=assignee,
+            tags=tags,
+            custom_fields=custom_fields,
+        )
+    except requests.RequestException as exc:
+        print(f"Failed to update conversation {conv_id}: {exc}")
+
+    note_lines = [
+        f"AI classification: {cls.get('type', 'unknown')}",
+        f"Importance: {importance}",
+    ]
+    if high_priority:
+        note_lines.append("Marked as high priority")
 
     result = process_conversation(
         conv_id,
