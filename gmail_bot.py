@@ -55,6 +55,11 @@ def parse_args(settings: Optional[Dict] = None):
         default=settings["GMAIL_USE_CONSOLE"],
         help="Use console-based OAuth (paste auth code) instead of opening a browser",
     )
+    parser.add_argument(
+        "--status",
+        action="store_true",
+        help="Print processing status summary and recent failures without ingesting",
+    )
     return parser.parse_args()
 
 
@@ -729,6 +734,27 @@ def freescout_webhook_handler(payload: dict, headers: dict) -> tuple[str, int]:
 def main():
     settings = get_settings()
     args = parse_args(settings)
+
+    if args.status:
+        sqlite_path = settings.get("TICKET_SQLITE_PATH") or "./csm.sqlite"
+        ticket_store = TicketStore(sqlite_path)
+        status_counts = ticket_store.get_processed_status_counts()
+        draft_count = ticket_store.get_bot_draft_count()
+        recent_failures = ticket_store.get_recent_failures(limit=10)
+
+        print("Status summary:")
+        for status in ("success", "filtered", "failed"):
+            print(f"  {status}: {status_counts.get(status, 0)}")
+        print(f"  bot_drafts: {draft_count}")
+
+        if recent_failures:
+            print("Recent failures:")
+            for failure in recent_failures:
+                message_id = failure.get("gmail_message_id", "")
+                error = failure.get("error", "")
+                timestamp = failure.get("processed_at", "")
+                print(f"  - {message_id} | {error} | {timestamp}")
+        return
 
     if args.poll_freescout:
         if settings.get("FREESCOUT_WEBHOOK_ENABLED"):
