@@ -248,12 +248,13 @@ def _send_email_notification(email_cfg: dict, subject: str, body: str) -> None:
     use_tls = email_cfg.get("use_tls", True)
     use_ssl = email_cfg.get("use_ssl", False)
 
-    if use_ssl:
-        server = smtplib.SMTP_SSL(host, port)
-    else:
-        server = smtplib.SMTP(host, port)
-
+    server = None
     try:
+        if use_ssl:
+            server = smtplib.SMTP_SSL(host, port)
+        else:
+            server = smtplib.SMTP(host, port)
+
         if use_tls and not use_ssl:
             server.starttls()
         username = email_cfg.get("smtp_username")
@@ -262,10 +263,11 @@ def _send_email_notification(email_cfg: dict, subject: str, body: str) -> None:
             server.login(username, password)
         server.send_message(message)
     finally:
-        try:
-            server.quit()
-        except Exception:
-            pass
+        if server is not None:
+            try:
+                server.quit()
+            except Exception:
+                pass
 
 
 def _notify_if_configured(

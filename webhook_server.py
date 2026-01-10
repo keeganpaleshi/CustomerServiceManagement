@@ -93,16 +93,29 @@ def _get_counter_store() -> TicketStore:
 async def freescout(payload: Request, x_webhook_secret: str | None = Header(None)):
     # Check content-length header first to reject oversized payloads quickly
     content_length = payload.headers.get("content-length")
-    if content_length and int(content_length) > MAX_PAYLOAD_SIZE:
-        log_event(
-            "webhook_ingest",
-            action="reject_payload",
-            outcome="failed",
-            reason="payload_too_large",
-            size=content_length,
-            max_size=MAX_PAYLOAD_SIZE,
-        )
-        raise HTTPException(status_code=413, detail="Payload too large")
+    if content_length:
+        try:
+            content_length_int = int(content_length)
+        except (ValueError, TypeError):
+            log_event(
+                "webhook_ingest",
+                action="reject_payload",
+                outcome="failed",
+                reason="invalid_content_length",
+                content_length=content_length,
+            )
+            raise HTTPException(status_code=400, detail="Invalid Content-Length header")
+
+        if content_length_int > MAX_PAYLOAD_SIZE:
+            log_event(
+                "webhook_ingest",
+                action="reject_payload",
+                outcome="failed",
+                reason="payload_too_large",
+                size=content_length_int,
+                max_size=MAX_PAYLOAD_SIZE,
+            )
+            raise HTTPException(status_code=413, detail="Payload too large")
 
     raw_body = await payload.body()
 

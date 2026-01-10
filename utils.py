@@ -208,7 +208,9 @@ class SimpleRateLimiter:
             return True
         now = time.monotonic()
         window_start = now - self.window_seconds
-        while self.timestamps and self.timestamps[0] <= window_start:
+        # Remove timestamps that are strictly before the window (< not <=)
+        # This makes "N requests per X seconds" inclusive of the boundary
+        while self.timestamps and self.timestamps[0] < window_start:
             self.timestamps.popleft()
         if len(self.timestamps) >= self.max_requests:
             return False
@@ -611,10 +613,17 @@ def decode_base64url(data: str) -> str:
         return ""
 
 
-def extract_plain_text(payload: Optional[dict]) -> str:
-    """Recursively search a payload tree for the first text/plain body."""
+def extract_plain_text(payload: Optional[dict], max_depth: int = 50) -> str:
+    """Recursively search a payload tree for the first text/plain body.
 
-    if not payload:
+    Args:
+        payload: The email payload dictionary
+        max_depth: Maximum recursion depth to prevent stack overflow (default: 50)
+
+    Returns:
+        The extracted plain text or empty string
+    """
+    if not payload or max_depth <= 0:
         return ""
 
     mime_type = payload.get("mimeType", "")
@@ -624,7 +633,7 @@ def extract_plain_text(payload: Optional[dict]) -> str:
         return decode_base64url(body_data)
 
     for part in payload.get("parts", []) or []:
-        text = extract_plain_text(part)
+        text = extract_plain_text(part, max_depth - 1)
         if text:
             return text
 
@@ -793,6 +802,9 @@ def generate_ai_reply(subject, sender, snippet_or_body, email_type):
             max_tokens=settings["DRAFT_MAX_TOKENS"],
             temperature=0.7,
         )
+        # Check if response has choices before accessing
+        if not response.choices or len(response.choices) == 0:
+            raise ValueError("OpenAI response contains no choices")
         raw_reply = response.choices[0].message.content.strip()
         return sanitize_draft_reply(raw_reply)
     except Exception as exc:
@@ -895,6 +907,9 @@ def classify_email(text):
             temperature=0,
             max_tokens=settings["CLASSIFY_MAX_TOKENS"],
         )
+        # Check if response has choices before accessing
+        if not resp.choices or len(resp.choices) == 0:
+            raise ValueError("OpenAI response contains no choices")
         parsed = json.loads(resp.choices[0].message.content)
         if not is_valid_response(parsed):
             return default_response
@@ -938,8 +953,18 @@ def create_ticket(
 ):
     """Create a FreeScout conversation using a text-only thread payload.
 
+    .. deprecated::
+        This function is deprecated and no longer used in the codebase.
+        Use FreeScoutClient.create_conversation() instead.
+
     Threads are sent using text-only payloads (text), not body.
     """
+    import warnings
+    warnings.warn(
+        "create_ticket() is deprecated. Use FreeScoutClient.create_conversation() instead.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     settings = _load_settings()
     if settings["TICKET_SYSTEM"] != "freescout":
         return None
