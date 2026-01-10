@@ -621,7 +621,8 @@ def generate_ai_reply(subject, sender, snippet_or_body, email_type):
             "I'm sorry, but I couldn't generate a response at this time. Please review this email manually.",
             "",
             "Best,",
-            "Automated Script",
+            "David",
+            "Cruising Solutions Customer Support",
         ]
         return "\n".join(fallback_lines)
     client = OpenAI(
@@ -662,7 +663,8 @@ def generate_ai_reply(subject, sender, snippet_or_body, email_type):
             "I'm sorry, but I couldn't generate a response at this time. Please review this email manually.",
             "",
             "Best,",
-            "Automated Script",
+            "David",
+            "Cruising Solutions Customer Support",
         ]
         return "\n".join(fallback_lines)
 
