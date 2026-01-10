@@ -9,8 +9,8 @@
    unsubscribe text).
 4. Routes each message:
    * High-importance emails open a ticket in **FreeScout** with retry logic.
-   * Lower-importance emails get a draft asking for more details.
-   * Drafts are self-critiqued until scoring ≥ 8 and then saved to Gmail.
+   * Lower-importance emails can receive a draft reply suggestion as an internal
+     note in FreeScout (no Gmail drafts).
 5. Prints a one-line log per processed email.
 6. Polls FreeScout for recent ticket updates after processing.
 
@@ -74,12 +74,12 @@ latest customer message, classifies it with OpenAI, and then updates the ticket
 in place: priority, assignment, tags, custom fields, and internal notes with an
 optional suggested reply.
 
-### Draft-only mode (separate from Phase 2C ingestion)
+### Draft reply guidance and deprecation notice
 
-`Draft_Replies.py` is a standalone, draft-only script. It does not gate or
-replace Phase 2C FreeScout ingestion, and draft creation should not block
-FreeScout create/append flows. Gmail-label-based draft skipping is disabled,
-so Phase 2C idempotency must remain database-only.
+Draft replies now live inside FreeScout as internal notes. The legacy
+`Draft_Replies.py` script is deprecated and retained only for historical
+reference; new reply suggestions should be generated through the FreeScout
+ticket flow in `gmail_bot.py` or the follow-up tooling.
 
 ### Configure actions
 
