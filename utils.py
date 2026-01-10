@@ -21,6 +21,17 @@ from openai import OpenAI
 CONFIG_PATH = Path(__file__).with_name("config.yaml")
 
 
+def log_event(event: str, **fields: Any) -> None:
+    """Emit a structured log line."""
+
+    payload = {
+        "event": event,
+        "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    }
+    payload.update(fields)
+    print(json.dumps(payload, ensure_ascii=False, default=str))
+
+
 @lru_cache(maxsize=1)
 def _load_settings() -> Dict[str, Any]:
     """Load configuration and environment overrides lazily."""
