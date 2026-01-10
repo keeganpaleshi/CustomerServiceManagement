@@ -265,12 +265,30 @@ class FreeScoutClient:
         custom_fields: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         payload: Dict[str, Any] = {}
-        if priority:
+        if priority is not None:
             bucket_priority = {"P0": 4, "P1": 3, "P2": 2, "P3": 1}
-            if isinstance(priority, str) and priority in bucket_priority:
-                payload["priority"] = bucket_priority[priority]
+            normalized = (
+                priority.strip().upper() if isinstance(priority, str) else priority
+            )
+            priority_value: Optional[int] = None
+            if isinstance(normalized, str) and normalized in bucket_priority:
+                priority_value = bucket_priority[normalized]
             else:
-                payload["priority"] = priority
+                try:
+                    numeric_priority = int(normalized)
+                except (TypeError, ValueError):
+                    numeric_priority = None
+                if numeric_priority in {1, 2, 3, 4}:
+                    priority_value = numeric_priority
+            if priority_value is not None:
+                payload["priority"] = priority_value
+            else:
+                log_event(
+                    "freescout.invalid_priority",
+                    level=logging.WARNING,
+                    conversation_id=conversation_id,
+                    priority=priority,
+                )
         if assignee is not None:
             payload["user_id"] = assignee
         if tags is not None:
