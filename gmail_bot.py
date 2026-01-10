@@ -1088,7 +1088,7 @@ def main():
     failed = 0
 
     for ref in fetch_all_unread_messages(svc, query=args.gmail_query)[
-        : settings["MAX_DRAFTS"]
+        : settings["MAX_MESSAGES_PER_RUN"]
     ]:
         processed += 1
         result = process_gmail_message(ref, ticket_store, client, svc)

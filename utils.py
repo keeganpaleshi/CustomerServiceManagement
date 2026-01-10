@@ -48,6 +48,9 @@ def _load_settings() -> Dict[str, Any]:
         "GMAIL_CLIENT_SECRET": cfg["gmail"]["client_secret_file"],
         "GMAIL_QUERY": cfg["gmail"].get("query", "is:unread"),
         "MAX_DRAFTS": cfg.get("limits", {}).get("max_drafts", 100),
+        "MAX_MESSAGES_PER_RUN": cfg.get("limits", {}).get(
+            "max_messages_per_run", 100
+        ),
         "CRITIC_THRESHOLD": cfg["thresholds"]["critic_threshold"],
         "MAX_RETRIES": cfg["thresholds"]["max_retries"],
         "GMAIL_TOKEN_FILE": cfg["gmail"]["token_file"],
