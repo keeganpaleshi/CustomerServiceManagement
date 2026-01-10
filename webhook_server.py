@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -13,10 +14,26 @@ from gmail_bot import freescout_webhook_handler
 from storage import TicketStore
 from utils import get_settings, log_event
 
-app = FastAPI()
 LOG_DIR = Path(__file__).resolve().parent / "logs" / "webhooks"
 SAFE_FILENAME_RE = re.compile(r"[^A-Za-z0-9_.-]+")
 COUNTER_KEYS = ("processed", "created", "appended", "drafted", "filtered", "failed")
+
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    yield
+    log_event(
+        "webhook_ingest_summary",
+        processed=COUNTERS["processed"],
+        created=COUNTERS["created"],
+        appended=COUNTERS["appended"],
+        drafted=COUNTERS["drafted"],
+        filtered=COUNTERS["filtered"],
+        failed=COUNTERS["failed"],
+    )
+
+
+app = FastAPI(lifespan=lifespan)
 
 
 def _safe_filename(value: str) -> str:

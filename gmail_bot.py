@@ -87,12 +87,23 @@ ProcessResult.FILTERED = ProcessResult(
     status="filtered",
     reason="already filtered",
 )
+ProcessResult.SKIPPED_ALREADY_CLAIMED = ProcessResult(
+    status="skipped_already_claimed",
+    reason="already claimed by another worker",
+)
 
 
 @dataclass(frozen=True)
 class WebhookOutcome:
     action: str
     drafted: bool = False
+
+
+def _normalize_id(value: object) -> Optional[str]:
+    if value is None:
+        return None
+    value_str = str(value).strip()
+    return value_str or None
 
 
 def should_filter_message(message: dict) -> Tuple[bool, str]:
@@ -109,7 +120,7 @@ def process_gmail_message(
     gmail,
 ) -> ProcessResult:
     message_id = message.get("id", "")
-    thread_id = message.get("threadId")
+    thread_id: Optional[str] = message.get("threadId")
 
     if not message_id:
         reason = "missing message id"
@@ -121,27 +132,36 @@ def process_gmail_message(
         )
         return ProcessResult(status="failed_retryable", reason=reason)
 
-    if store.processed_success(message_id) is True:
+    if not store.mark_processing_if_new(message_id, thread_id):
+        if store.processed_success(message_id) is True:
+            log_event(
+                "gmail_ingest",
+                action="skip_message",
+                outcome="already_processed",
+                message_id=message_id,
+                thread_id=thread_id,
+            )
+            return ProcessResult(
+                status="skipped_already_success",
+                reason="already processed",
+            )
+        if store.processed_filtered(message_id) is True:
+            log_event(
+                "gmail_ingest",
+                action="skip_message",
+                outcome="already_filtered",
+                message_id=message_id,
+                thread_id=thread_id,
+            )
+            return ProcessResult.FILTERED
         log_event(
             "gmail_ingest",
             action="skip_message",
-            outcome="already_processed",
+            outcome="already_claimed",
             message_id=message_id,
             thread_id=thread_id,
         )
-        return ProcessResult(
-            status="skipped_already_success",
-            reason="already processed",
-        )
-    if store.processed_filtered(message_id) is True:
-        log_event(
-            "gmail_ingest",
-            action="skip_message",
-            outcome="already_filtered",
-            message_id=message_id,
-            thread_id=thread_id,
-        )
-        return ProcessResult.FILTERED
+        return ProcessResult.SKIPPED_ALREADY_CLAIMED
     try:
         full_message = message
         if "payload" not in message:
@@ -198,7 +218,7 @@ def process_gmail_message(
             return ProcessResult(status="filtered", reason=reason)
 
         settings = get_settings()
-        conv_id = store.get_conversation_id_for_thread(thread_id)
+        conv_id = _normalize_id(store.get_conversation_id_for_thread(thread_id))
         if conv_id:
             if not freescout:
                 reason = "freescout disabled"
@@ -302,7 +322,7 @@ def process_gmail_message(
             )
             return ProcessResult(status="failed_retryable", reason=reason)
 
-        mailbox_id = settings.get("FREESCOUT_MAILBOX_ID")
+        mailbox_id = _normalize_id(settings.get("FREESCOUT_MAILBOX_ID"))
         if not mailbox_id:
             reason = "freescout mailbox missing"
             store.mark_failed(message_id, thread_id, reason)
@@ -316,8 +336,12 @@ def process_gmail_message(
             )
             return ProcessResult(status="failed_permanent", reason=reason)
 
-        gmail_thread_field = settings.get("FREESCOUT_GMAIL_THREAD_FIELD_ID")
-        gmail_message_field = settings.get("FREESCOUT_GMAIL_MESSAGE_FIELD_ID")
+        gmail_thread_field = _normalize_id(
+            settings.get("FREESCOUT_GMAIL_THREAD_FIELD_ID")
+        )
+        gmail_message_field = _normalize_id(
+            settings.get("FREESCOUT_GMAIL_MESSAGE_FIELD_ID")
+        )
 
         try:
             ticket = freescout.create_conversation(
@@ -914,7 +938,7 @@ def process_freescout_conversation(
     conversation: dict,
     settings: dict,
 ):
-    conv_id = conversation.get("id")
+    conv_id = _normalize_id(conversation.get("id"))
     if not conv_id:
         return
 
@@ -971,11 +995,21 @@ def poll_freescout_updates(
 
     since = datetime.utcnow() - timedelta(minutes=5)
     while True:
-        convs = fetch_recent_conversations(since.isoformat(), timeout=http_timeout)
-        for conv in convs:
-            process_freescout_conversation(client, conv, settings)
-        since = datetime.utcnow()
-        time.sleep(interval)
+        try:
+            convs = fetch_recent_conversations(
+                since.isoformat(), timeout=http_timeout
+            )
+            for conv in convs:
+                process_freescout_conversation(client, conv, settings)
+            since = datetime.utcnow()
+            time.sleep(interval)
+        except Exception as exc:
+            log_event(
+                "freescout_poll",
+                action="poll_updates",
+                outcome="failed",
+                error=str(exc),
+            )
 
 
 def _infer_webhook_outcome(payload: dict) -> WebhookOutcome:
@@ -1008,7 +1042,7 @@ def freescout_webhook_handler(
     if not payload:
         return "missing payload", 400, None
 
-    conv_id = payload.get("conversation_id") or payload.get("id")
+    conv_id = _normalize_id(payload.get("conversation_id") or payload.get("id"))
     if not conv_id:
         return "missing conversation id", 400, None
 
@@ -1088,11 +1122,11 @@ def main():
     failed = 0
 
     for ref in fetch_all_unread_messages(svc, query=args.gmail_query)[
-        : settings["MAX_DRAFTS"]
+        : settings["MAX_MESSAGES_PER_RUN"]
     ]:
         processed += 1
         result = process_gmail_message(ref, ticket_store, client, svc)
-        if result.status == "skipped_already_success":
+        if result.status in {"skipped_already_success", "skipped_already_claimed"}:
             skipped += 1
         elif result.status == "filtered":
             filtered_terminal += 1

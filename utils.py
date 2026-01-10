@@ -48,6 +48,9 @@ def _load_settings() -> Dict[str, Any]:
         "GMAIL_CLIENT_SECRET": cfg["gmail"]["client_secret_file"],
         "GMAIL_QUERY": cfg["gmail"].get("query", "is:unread"),
         "MAX_DRAFTS": cfg.get("limits", {}).get("max_drafts", 100),
+        "MAX_MESSAGES_PER_RUN": cfg.get("limits", {}).get(
+            "max_messages_per_run", 100
+        ),
         "CRITIC_THRESHOLD": cfg["thresholds"]["critic_threshold"],
         "MAX_RETRIES": cfg["thresholds"]["max_retries"],
         "GMAIL_TOKEN_FILE": cfg["gmail"]["token_file"],
@@ -94,6 +97,16 @@ def get_settings() -> Dict[str, Any]:
     """Public accessor for cached settings."""
 
     return _load_settings().copy()
+
+
+def reload_settings() -> None:
+    """Clear cached settings after config or environment changes.
+
+    Call this in long-running processes (or tests) when config.yaml or
+    environment variables are updated and fresh settings are required.
+    """
+
+    _load_settings.cache_clear()
 
 
 def require_openai_api_key() -> str:
@@ -221,6 +234,22 @@ class FreeScoutClient:
         self.api_key = api_key
         self.timeout = timeout
 
+    @staticmethod
+    def _normalize_id(value: object) -> str:
+        if value is None:
+            return ""
+        return str(value)
+
+    @staticmethod
+    def _maybe_int(value: Optional[str]) -> Optional[int]:
+        if value is None or value == "":
+            return None
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+
+
     def _headers(self) -> Dict[str, str]:
         return {
             "Accept": "application/json",
@@ -228,7 +257,8 @@ class FreeScoutClient:
             "X-FreeScout-API-Key": self.api_key,
         }
 
-    def get_conversation(self, conversation_id: int) -> Dict[str, Any]:
+    def get_conversation(self, conversation_id: str) -> Dict[str, Any]:
+        conversation_id = self._normalize_id(conversation_id)
         resp = requests.get(
             f"{self.base_url}/api/conversations/{conversation_id}",
             headers=self._headers(),
@@ -258,21 +288,40 @@ class FreeScoutClient:
 
     def update_conversation(
         self,
-        conversation_id: int,
+        conversation_id: str,
         priority: Optional[object] = None,
-        assignee: Optional[int] = None,
+        assignee: Optional[str] = None,
         tags: Optional[list[str]] = None,
         custom_fields: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
+        conversation_id = self._normalize_id(conversation_id)
         payload: Dict[str, Any] = {}
-        if priority:
+        if priority is not None:
             bucket_priority = {"P0": 4, "P1": 3, "P2": 2, "P3": 1}
-            if isinstance(priority, str) and priority in bucket_priority:
-                payload["priority"] = bucket_priority[priority]
+            normalized = (
+                priority.strip().upper() if isinstance(priority, str) else priority
+            )
+            priority_value: Optional[int] = None
+            if isinstance(normalized, str) and normalized in bucket_priority:
+                priority_value = bucket_priority[normalized]
             else:
-                payload["priority"] = priority
+                try:
+                    numeric_priority = int(normalized)
+                except (TypeError, ValueError):
+                    numeric_priority = None
+                if numeric_priority in {1, 2, 3, 4}:
+                    priority_value = numeric_priority
+            if priority_value is not None:
+                payload["priority"] = priority_value
+            else:
+                log_event(
+                    "freescout.invalid_priority",
+                    level=logging.WARNING,
+                    conversation_id=conversation_id,
+                    priority=priority,
+                )
         if assignee is not None:
-            payload["user_id"] = assignee
+            payload["user_id"] = self._maybe_int(assignee) or assignee
         if tags is not None:
             payload["tags"] = tags
         serialized = serialize_custom_fields(custom_fields or {})
@@ -292,8 +341,9 @@ class FreeScoutClient:
         return resp.json()
 
     def add_customer_thread(
-        self, conversation_id: int, text: str, imported: bool = True
+        self, conversation_id: str, text: str, imported: bool = True
     ) -> Dict[str, Any]:
+        conversation_id = self._normalize_id(conversation_id)
         payload: Dict[str, Any] = {"type": "customer", "text": text, "imported": imported}
 
         def _request() -> Dict[str, Any]:
@@ -318,13 +368,14 @@ class FreeScoutClient:
         subject: str,
         sender: str,
         body: str,
-        mailbox_id: int,
+        mailbox_id: str,
         *,
         thread_id: Optional[str] = None,
         message_id: Optional[str] = None,
-        gmail_thread_field: Optional[int] = None,
-        gmail_message_field: Optional[int] = None,
+        gmail_thread_field: Optional[str] = None,
+        gmail_message_field: Optional[str] = None,
     ) -> Dict[str, Any]:
+        mailbox_id = self._normalize_id(mailbox_id)
         custom_fields: Dict[str, Any] = {}
         tags: list[str] = []
 
@@ -348,7 +399,7 @@ class FreeScoutClient:
 
         payload = {
             "type": "email",
-            "mailboxId": mailbox_id,
+            "mailboxId": self._maybe_int(mailbox_id) or mailbox_id,
             "subject": subject or "(no subject)",
             "customerEmail": sender,
             "customerName": sender,
@@ -381,11 +432,12 @@ class FreeScoutClient:
         )
 
     def add_internal_note(
-        self, conversation_id: int, text: str, user_id: Optional[int] = None
+        self, conversation_id: str, text: str, user_id: Optional[str] = None
     ) -> Dict[str, Any]:
+        conversation_id = self._normalize_id(conversation_id)
         payload: Dict[str, Any] = {"type": "note", "text": text}
         if user_id:
-            payload["user_id"] = user_id
+            payload["user_id"] = self._maybe_int(user_id) or user_id
         resp = requests.post(
             f"{self.base_url}/api/conversations/{conversation_id}/threads",
             headers=self._headers(),
@@ -396,26 +448,27 @@ class FreeScoutClient:
         return resp.json()
 
     def add_draft_reply(
-        self, conversation_id: int, text: str, user_id: Optional[int] = None
+        self, conversation_id: str, text: str, user_id: Optional[str] = None
     ) -> Dict[str, Any]:
         draft_text = f"Follow-up draft (not sent):\n\n{text}"
         return self.add_internal_note(conversation_id, draft_text, user_id=user_id)
 
     def add_suggested_reply(
-        self, conversation_id: int, text: str, user_id: Optional[int] = None
+        self, conversation_id: str, text: str, user_id: Optional[str] = None
     ) -> Dict[str, Any]:
         return self.add_internal_note(conversation_id, text, user_id=user_id)
 
     def create_agent_draft_reply(
         self,
-        conversation_id: int,
+        conversation_id: str,
         text: str,
-        user_id: Optional[int] = None,
+        user_id: Optional[str] = None,
         draft: bool = True,
     ) -> Dict[str, Any]:
+        conversation_id = self._normalize_id(conversation_id)
         payload: Dict[str, Any] = {"type": "reply", "text": text}
         if user_id:
-            payload["user_id"] = user_id
+            payload["user_id"] = self._maybe_int(user_id) or user_id
         if draft:
             payload["draft"] = True
         def _request() -> Dict[str, Any]:
@@ -437,11 +490,13 @@ class FreeScoutClient:
 
     def update_thread(
         self,
-        conversation_id: int,
-        thread_id: int,
+        conversation_id: str,
+        thread_id: str,
         text: str,
         draft: bool = True,
     ) -> Dict[str, Any]:
+        conversation_id = self._normalize_id(conversation_id)
+        thread_id = self._normalize_id(thread_id)
         payload: Dict[str, Any] = {"text": text, "draft": draft}
         def _request() -> Dict[str, Any]:
             resp = requests.put(
@@ -595,11 +650,62 @@ def is_promotional_or_spam(message, body_text):
         h.get("name", "").lower(): h.get("value", "")
         for h in message.get("payload", {}).get("headers", [])
     }
-    if "list-unsubscribe" in headers or "list-id" in headers:
+    body_text = body_text or ""
+    body_lower = body_text.lower()
+    subject = headers.get("subject", "").lower()
+    from_header = headers.get("from", "").lower()
+
+    list_headers = {
+        "list-unsubscribe",
+        "list-id",
+        "list-help",
+        "list-subscribe",
+        "list-post",
+        "list-archive",
+        "list-owner",
+    }
+    if list_headers.intersection(headers):
         return True
-    if "unsubscribe" in body_text.lower():
+
+    spam_flag = headers.get("x-spam-flag", "").strip().lower() == "yes"
+    spam_status = headers.get("x-spam-status", "").lower().startswith("yes")
+    if spam_flag or spam_status:
         return True
-    return False
+
+    scl_header = headers.get("x-ms-exchange-organization-scl", "").strip()
+    if scl_header.isdigit() and int(scl_header) >= 5:
+        return True
+
+    precedence = headers.get("precedence", "").strip().lower()
+    bulk_header = precedence in {"bulk", "list", "junk"}
+
+    footer_patterns = [
+        r"(?im)^\s*unsubscribe\b",
+        r"(?im)\bclick here to unsubscribe\b",
+        r"(?im)\bto unsubscribe\b",
+        r"(?im)\bmanage (your )?(email )?preferences\b",
+        r"(?im)\bupdate (your )?(email )?preferences\b",
+        r"(?im)\bmanage subscriptions?\b",
+        r"(?im)\bopt[- ]?out\b",
+    ]
+    footer_match = any(re.search(pattern, body_text) for pattern in footer_patterns)
+
+    promo_subject = re.search(
+        r"\b(newsletter|promo|promotion|sale|deal|discount|offer|coupon|limited time|free trial)\b",
+        subject,
+    )
+
+    score = 0
+    if bulk_header:
+        score += 2
+    if footer_match:
+        score += 2
+    if promo_subject:
+        score += 1
+    if "no-reply" in from_header or "noreply" in from_header:
+        score += 1
+
+    return score >= 3
 
 
 def generate_ai_reply(subject, sender, snippet_or_body, email_type):
@@ -621,7 +727,8 @@ def generate_ai_reply(subject, sender, snippet_or_body, email_type):
             "I'm sorry, but I couldn't generate a response at this time. Please review this email manually.",
             "",
             "Best,",
-            "Automated Script",
+            "David",
+            "Cruising Solutions Customer Support",
         ]
         return "\n".join(fallback_lines)
     client = OpenAI(
@@ -662,7 +769,8 @@ def generate_ai_reply(subject, sender, snippet_or_body, email_type):
             "I'm sorry, but I couldn't generate a response at this time. Please review this email manually.",
             "",
             "Best,",
-            "Automated Script",
+            "David",
+            "Cruising Solutions Customer Support",
         ]
         return "\n".join(fallback_lines)
 
@@ -703,6 +811,27 @@ def sanitize_draft_reply(text: str) -> str:
 def classify_email(text):
     """Classify an email and return a dict with type, importance, and reasoning."""
     settings = _load_settings()
+    default_response = {
+        "type": "other",
+        "importance": 0,
+        "reasoning": "",
+        "facts": [],
+        "uncertainty": [],
+    }
+    def is_valid_response(payload: Any) -> bool:
+        if not isinstance(payload, dict):
+            return False
+        if not isinstance(payload.get("type"), str):
+            return False
+        if not isinstance(payload.get("importance"), (int, float)):
+            return False
+        if not isinstance(payload.get("reasoning"), str):
+            return False
+        if not isinstance(payload.get("facts"), list):
+            return False
+        if not isinstance(payload.get("uncertainty"), list):
+            return False
+        return True
     limiter = _get_openai_rate_limiter()
     if limiter and not limiter.allow():
         log_event(
@@ -711,7 +840,7 @@ def classify_email(text):
             action="classify_email",
             reason="rate_limited",
         )
-        return {"type": "other", "importance": 0}
+        return default_response
     client = OpenAI(
         api_key=require_openai_api_key(), timeout=settings["OPENAI_TIMEOUT"]
     )
@@ -734,7 +863,10 @@ def classify_email(text):
             temperature=0,
             max_tokens=settings["CLASSIFY_MAX_TOKENS"],
         )
-        return json.loads(resp.choices[0].message.content)
+        parsed = json.loads(resp.choices[0].message.content)
+        if not is_valid_response(parsed):
+            return default_response
+        return parsed
     except Exception as e:
         log_event(
             "openai_error",
@@ -742,7 +874,7 @@ def classify_email(text):
             action="classify_email",
             reason=str(e),
         )
-        return {"type": "other", "importance": 0}
+        return default_response
 
 
 def importance_to_bucket(importance_score: Optional[float]) -> str:
