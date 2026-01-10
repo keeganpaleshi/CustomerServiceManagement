@@ -474,15 +474,19 @@ def _build_freescout_client(timeout: Optional[int] = None) -> Optional[FreeScout
     return FreeScoutClient(url, key, timeout=http_timeout)
 
 
+def _is_customer_thread(thread: dict) -> bool:
+    if thread.get("type") == "customer":
+        return True
+    return bool(thread.get("customer_id") and not thread.get("user_id"))
+
+
 def _extract_latest_thread_text(conversation: dict) -> str:
     threads = conversation.get("threads") or conversation.get("data") or []
     if isinstance(threads, dict):
         threads = threads.get("threads", [])
 
     customer_threads = [
-        t
-        for t in threads
-        if isinstance(t, dict) and t.get("type") in {"customer", "message", "reply"}
+        t for t in threads if isinstance(t, dict) and _is_customer_thread(t)
     ]
     if not customer_threads:
         return conversation.get("last_text", "") or conversation.get("text", "")
