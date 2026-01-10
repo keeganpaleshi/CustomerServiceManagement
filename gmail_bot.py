@@ -152,6 +152,7 @@ def process_gmail_message(
             print(f"{message_id[:8]}… {reason}")
             return ProcessResult(status="filtered", reason=reason)
 
+        settings = get_settings()
         conv_id = store.get_conversation_id_for_thread(thread_id)
         if conv_id:
             if not freescout:
@@ -176,6 +177,15 @@ def process_gmail_message(
                 )
 
             store.mark_success(message_id, thread_id, conv_id, action="append")
+            process_conversation(
+                conv_id,
+                {
+                    "subject": subject,
+                    "latest_text": body_text,
+                },
+                settings,
+                freescout,
+            )
             if _TICKET_LABEL_ID:
                 apply_label_to_thread(gmail, thread_id, _TICKET_LABEL_ID)
             return ProcessResult(
@@ -190,7 +200,6 @@ def process_gmail_message(
             print(f"{message_id[:8]}… failed: freescout disabled")
             return ProcessResult(status="failed_retryable", reason=reason)
 
-        settings = get_settings()
         mailbox_id = settings.get("FREESCOUT_MAILBOX_ID")
         if not mailbox_id:
             reason = "freescout mailbox missing"
@@ -231,6 +240,15 @@ def process_gmail_message(
 
         store.upsert_thread_map(thread_id, conv_id)
         store.mark_success(message_id, thread_id, conv_id, action="create")
+        process_conversation(
+            conv_id,
+            {
+                "subject": subject,
+                "latest_text": body_text,
+            },
+            settings,
+            freescout,
+        )
         if _TICKET_LABEL_ID:
             apply_label_to_thread(gmail, thread_id, _TICKET_LABEL_ID)
         return ProcessResult(
@@ -330,6 +348,67 @@ def _prepare_custom_fields(cls: dict, settings: dict) -> dict:
     return custom_fields
 
 
+def process_conversation(
+    conversation_id: str,
+    message_context: dict,
+    settings: dict,
+    freescout_client: FreeScoutClient,
+) -> dict:
+    actions_cfg = settings.get("FREESCOUT_ACTIONS", {})
+    subject = message_context.get("subject") or "(no subject)"
+    latest_text = message_context.get("latest_text") or ""
+
+    cls = classify_email(f"Subject:{subject}\n\n{latest_text}")
+    importance = cls.get("importance", 0)
+    high_priority = importance >= actions_cfg.get("priority_high_threshold", 8)
+
+    tags = None
+    if actions_cfg.get("apply_tags", True):
+        tags = _build_tags(cls, high_priority)
+
+    custom_fields = _prepare_custom_fields(cls, settings)
+    if not custom_fields:
+        custom_fields = None
+
+    priority_value = None
+    if actions_cfg.get("update_priority", True):
+        priority_value = "urgent" if high_priority else "normal"
+
+    assignee = actions_cfg.get("assign_to_user_id")
+
+    try:
+        freescout_client.update_conversation(
+            conversation_id,
+            priority=priority_value,
+            assignee=assignee,
+            tags=tags,
+            custom_fields=custom_fields,
+        )
+    except requests.RequestException as exc:
+        print(f"Failed to update conversation {conversation_id}: {exc}")
+
+    note_lines = [
+        f"AI classification: {cls.get('type', 'unknown')}",
+        f"Importance: {importance}",
+    ]
+    if high_priority:
+        note_lines.append("Marked as high priority")
+
+    if actions_cfg.get("post_internal_notes", True):
+        try:
+            freescout_client.add_internal_note(conversation_id, "\n".join(note_lines))
+        except requests.RequestException as exc:
+            print(f"Failed to add internal note to {conversation_id}: {exc}")
+
+    return {
+        "classification": cls,
+        "importance": importance,
+        "high_priority": high_priority,
+        "subject": subject,
+        "latest_text": latest_text,
+    }
+
+
 def _extract_conversation_id(ticket: Optional[dict]) -> Optional[str]:
     if not ticket or not isinstance(ticket, dict):
         return None
@@ -393,7 +472,6 @@ def send_update_email(service, summary: str, label_id: Optional[str] = None):
 def process_freescout_conversation(
     client: FreeScoutClient,
     conversation: dict,
-    actions_cfg: dict,
     settings: dict,
 ):
     conv_id = conversation.get("id")
@@ -446,13 +524,18 @@ def process_freescout_conversation(
     if high_priority:
         note_lines.append("Marked as high priority")
 
-    if actions_cfg.get("post_internal_notes", True):
-        try:
-            client.add_internal_note(conv_id, "\n".join(note_lines))
-        except requests.RequestException as exc:
-            print(f"Failed to add internal note to {conv_id}: {exc}")
+    result = process_conversation(
+        conv_id,
+        {
+            "subject": subject,
+            "latest_text": latest_text,
+        },
+        settings,
+        client,
+    )
+    cls = result["classification"]
 
-    if actions_cfg.get("post_suggested_reply", True):
+    if settings.get("FREESCOUT_ACTIONS", {}).get("post_suggested_reply", True):
         try:
             suggestion = generate_ai_reply(
                 subject,
@@ -477,12 +560,11 @@ def poll_freescout_updates(
         print("FreeScout polling skipped because ticket system is not set to freescout.")
         return
 
-    actions_cfg = settings.get("FREESCOUT_ACTIONS", {})
     since = datetime.utcnow() - timedelta(minutes=5)
     while True:
         convs = fetch_recent_conversations(since.isoformat(), timeout=http_timeout)
         for conv in convs:
-            process_freescout_conversation(client, conv, actions_cfg, settings)
+            process_freescout_conversation(client, conv, settings)
         since = datetime.utcnow()
         time.sleep(interval)
 
@@ -506,8 +588,7 @@ def freescout_webhook_handler(payload: dict, headers: dict) -> tuple[str, int]:
     if not client:
         return "freescout disabled", 503
 
-    actions_cfg = settings.get("FREESCOUT_ACTIONS", {})
-    process_freescout_conversation(client, {"id": conv_id}, actions_cfg, settings)
+    process_freescout_conversation(client, {"id": conv_id}, settings)
     return "ok", 200
 
 
