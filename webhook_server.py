@@ -80,9 +80,10 @@ async def freescout(payload: Request, x_webhook_secret: str | None = Header(None
         body = {"raw": raw_body.decode("utf-8", errors="replace")}
 
     logfile = log_webhook_payload(body)
-    conversation_id = (
-        body.get("conversation_id") or body.get("id") if isinstance(body, dict) else None
-    )
+    if isinstance(body, dict):
+        conversation_id = body.get("conversation_id") or body.get("id")
+    else:
+        conversation_id = None
     log_event(
         "webhook_ingest",
         action="log_payload",
@@ -90,6 +91,22 @@ async def freescout(payload: Request, x_webhook_secret: str | None = Header(None
         conversation_id=conversation_id,
         logfile=str(logfile),
     )
+
+    if not isinstance(body, dict):
+        message = "Expected JSON object payload for FreeScout webhook."
+        counter_store = _get_counter_store()
+        try:
+            counter_store.increment_webhook_counter("failed")
+            log_event(
+                "webhook_ingest",
+                action="handle_payload",
+                outcome="failed",
+                conversation_id=conversation_id,
+                reason=message,
+            )
+        finally:
+            counter_store.close()
+        return JSONResponse({"message": message}, status_code=400)
 
     message, status, outcome = freescout_webhook_handler(
         body, {"X-Webhook-Secret": x_webhook_secret}
