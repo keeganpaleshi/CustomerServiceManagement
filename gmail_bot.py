@@ -128,7 +128,7 @@ def process_gmail_message(
             reason = "missing thread id"
             store.mark_failed(message_id, thread_id, reason)
             print(f"{message_id[:8]}… error: missing thread id")
-            return ProcessResult(status="failed_retryable", reason=reason)
+            return ProcessResult(status="failed_permanent", reason=reason)
 
         def get_header_value(
             payload: Optional[dict], name: str, default: str = ""
@@ -199,7 +199,7 @@ def process_gmail_message(
             reason = "freescout mailbox missing"
             store.mark_failed(message_id, thread_id, reason)
             print(f"{message_id[:8]}… error: freescout mailbox missing")
-            return ProcessResult(status="failed_retryable", reason=reason)
+            return ProcessResult(status="failed_permanent", reason=reason)
 
         gmail_thread_field = settings.get("FREESCOUT_GMAIL_THREAD_FIELD_ID")
         gmail_message_field = settings.get("FREESCOUT_GMAIL_MESSAGE_FIELD_ID")
@@ -539,6 +539,7 @@ def main():
     appended_threads = 0
     filtered_terminal = 0
     failed_retryable = 0
+    failed_permanent = 0
 
     for ref in fetch_all_unread_messages(svc, query=args.gmail_query)[
         : settings["MAX_DRAFTS"]
@@ -554,6 +555,8 @@ def main():
             created_conversations += 1
         elif result.status == "failed_retryable":
             failed_retryable += 1
+        elif result.status == "failed_permanent":
+            failed_permanent += 1
 
     updates = poll_ticket_updates()
     if updates:
@@ -565,6 +568,7 @@ def main():
     print(f"  appended_threads: {appended_threads}")
     print(f"  filtered_terminal: {filtered_terminal}")
     print(f"  failed_retryable: {failed_retryable}")
+    print(f"  failed_permanent: {failed_permanent}")
 
 
 if __name__ == "__main__":
