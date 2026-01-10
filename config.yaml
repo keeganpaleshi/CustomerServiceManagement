@@ -2,6 +2,8 @@ openai:
   api_key_env: OPENAI_API_KEY        # name of env var or you can inline a key (not recommended)
   classify_model: "gpt-4.1"
   draft_model:    "o3"
+  timeout_seconds: 60
+  rate_limit_seconds: 0
   # Maximum tokens allowed in the draft generation call
   draft_max_tokens: 16384
   # System prompt used when drafting replies. Modify to change tone or style.

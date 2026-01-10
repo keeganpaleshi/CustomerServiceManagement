@@ -18,7 +18,7 @@ from utils import (
     get_settings,
     FreeScoutClient,
     is_promotional_or_spam,
-    thread_has_draft,
+    retry_with_backoff,
     extract_plain_text,
     require_ticket_settings,
 )
@@ -53,6 +53,11 @@ def parse_args(settings: Optional[Dict] = None):
         action="store_true",
         default=settings["GMAIL_USE_CONSOLE"],
         help="Use console-based OAuth (paste auth code) instead of opening a browser",
+    )
+    parser.add_argument(
+        "--status",
+        action="store_true",
+        help="Print DB counts and recent failures then exit",
     )
     return parser.parse_args()
 
@@ -163,7 +168,15 @@ def process_gmail_message(
                     freescout_conversation_id=conv_id,
                 )
             try:
-                freescout.add_customer_thread(conv_id, body_text, imported=True)
+                settings = get_settings()
+                retry_with_backoff(
+                    lambda: freescout.add_customer_thread(
+                        conv_id, body_text, imported=True
+                    ),
+                    retries=settings["MAX_RETRIES"],
+                    retry_exceptions=(requests.RequestException,),
+                    action_name="freescout append",
+                )
             except requests.RequestException as exc:
                 reason = f"append failed: {exc}"
                 store.mark_failed(message_id, thread_id, str(exc), conv_id)
@@ -201,15 +214,20 @@ def process_gmail_message(
         gmail_message_field = settings.get("FREESCOUT_GMAIL_MESSAGE_FIELD_ID")
 
         try:
-            ticket = freescout.create_conversation(
-                subject,
-                sender,
-                body_text,
-                mailbox_id,
-                thread_id=thread_id,
-                message_id=message_id,
-                gmail_thread_field=gmail_thread_field,
-                gmail_message_field=gmail_message_field,
+            ticket = retry_with_backoff(
+                lambda: freescout.create_conversation(
+                    subject,
+                    sender,
+                    body_text,
+                    mailbox_id,
+                    thread_id=thread_id,
+                    message_id=message_id,
+                    gmail_thread_field=gmail_thread_field,
+                    gmail_message_field=gmail_message_field,
+                ),
+                retries=settings["MAX_RETRIES"],
+                retry_exceptions=(requests.RequestException,),
+                action_name="freescout create",
             )
         except requests.RequestException as exc:
             reason = f"ticket creation failed: {exc}"
@@ -522,6 +540,27 @@ def main():
 
     sqlite_path = settings.get("TICKET_SQLITE_PATH") or "./csm.sqlite"
     ticket_store = TicketStore(sqlite_path)
+    if args.status:
+        counts = ticket_store.get_status_counts()
+        print(
+            "status "
+            + " ".join(f"{key}={value}" for key, value in counts.items())
+        )
+        failures = ticket_store.get_recent_failures(limit=10)
+        if failures:
+            print("recent_failures:")
+            for failure in failures:
+                print(
+                    "failure "
+                    + " ".join(
+                        f"{key}={value}"
+                        for key, value in failure.items()
+                    )
+                )
+        else:
+            print("recent_failures none")
+        return
+
     svc = get_gmail_service(use_console=args.console_auth)
     ticket_label_id = None
     if settings["TICKET_SYSTEM"] == "freescout":
@@ -530,41 +569,38 @@ def main():
     _TICKET_LABEL_ID = ticket_label_id
     client = _build_freescout_client(timeout=args.timeout)
 
-    skipped_already_processed = 0
-    created_conversations = 0
-    appended_threads = 0
-    filtered_terminal = 0
-    failed_retryable = 0
-    failed_permanent = 0
+    counters = {
+        "processed": 0,
+        "created": 0,
+        "appended": 0,
+        "drafted": 0,
+        "filtered": 0,
+        "failed": 0,
+    }
 
     for ref in fetch_all_unread_messages(svc, query=args.gmail_query)[
         : settings["MAX_DRAFTS"]
     ]:
+        counters["processed"] += 1
         result = process_gmail_message(ref, ticket_store, client, svc)
         if result.status == "skipped_already_success":
-            skipped_already_processed += 1
+            continue
         elif result.status == "filtered":
-            filtered_terminal += 1
+            counters["filtered"] += 1
         elif result.status == "freescout_appended":
-            appended_threads += 1
+            counters["appended"] += 1
         elif result.status == "freescout_created":
-            created_conversations += 1
+            counters["created"] += 1
         elif result.status == "failed_retryable":
-            failed_retryable += 1
+            counters["failed"] += 1
         elif result.status == "failed_permanent":
-            failed_permanent += 1
+            counters["failed"] += 1
 
     updates = poll_ticket_updates()
     if updates:
         print(f"Fetched {len(updates)} ticket updates from FreeScout")
 
-    print("Ingestion summary:")
-    print(f"  skipped_already_processed: {skipped_already_processed}")
-    print(f"  created_conversations: {created_conversations}")
-    print(f"  appended_threads: {appended_threads}")
-    print(f"  filtered_terminal: {filtered_terminal}")
-    print(f"  failed_retryable: {failed_retryable}")
-    print(f"  failed_permanent: {failed_permanent}")
+    print("summary " + " ".join(f"{key}={value}" for key, value in counters.items()))
 
 
 if __name__ == "__main__":

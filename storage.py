@@ -249,6 +249,55 @@ class TicketStore:
         )
         self._conn.commit()
 
+    def get_status_counts(self) -> dict:
+        cur = self._conn.execute(
+            """
+            SELECT status, COUNT(*) as count
+            FROM processed_messages
+            GROUP BY status
+            """
+        )
+        status_counts = {row[0]: row[1] for row in cur.fetchall()}
+        cur = self._conn.execute(
+            """
+            SELECT action, COUNT(*) as count
+            FROM processed_messages
+            WHERE action IS NOT NULL
+            GROUP BY action
+            """
+        )
+        action_counts = {row[0]: row[1] for row in cur.fetchall()}
+        total = sum(status_counts.values())
+        return {
+            "total": total,
+            "success": status_counts.get("success", 0),
+            "filtered": status_counts.get("filtered", 0),
+            "failed": status_counts.get("failed", 0),
+            "created": action_counts.get("create", 0),
+            "appended": action_counts.get("append", 0),
+        }
+
+    def get_recent_failures(self, limit: int = 10) -> list[dict]:
+        cur = self._conn.execute(
+            """
+            SELECT gmail_message_id, gmail_thread_id, error, processed_at
+            FROM processed_messages
+            WHERE status = 'failed'
+            ORDER BY processed_at DESC
+            LIMIT ?
+            """,
+            (limit,),
+        )
+        return [
+            {
+                "message_id": row[0],
+                "thread_id": row[1],
+                "error": row[2],
+                "processed_at": row[3],
+            }
+            for row in cur.fetchall()
+        ]
+
     def close(self) -> None:
         try:
             self._conn.close()

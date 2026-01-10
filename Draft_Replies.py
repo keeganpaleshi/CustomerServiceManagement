@@ -4,6 +4,7 @@ from typing import Dict, Optional
 from openai import OpenAI
 
 from utils import (
+    apply_llm_rate_limit,
     classify_email,
     create_base64_message,
     create_draft,
@@ -79,6 +80,7 @@ def generate_ai_reply(subject, sender, snippet_or_body, email_type):
         "Please write a friendly and professional draft reply addressing the sender's query."
     )
     try:
+        apply_llm_rate_limit()
         response = client.chat.completions.create(
             model=settings["DRAFT_MODEL"],
             messages=[
@@ -87,6 +89,7 @@ def generate_ai_reply(subject, sender, snippet_or_body, email_type):
             ],
             max_tokens=settings["DRAFT_MAX_TOKENS"],
             temperature=0.7,
+            timeout=settings["OPENAI_TIMEOUT"],
         )
         # Extract the actual reply text
         return response.choices[0].message.content.strip()
@@ -133,9 +136,19 @@ def main():
     print(
         f"Fetched {len(unread_messages)} unread messages (limited to {settings['MAX_DRAFTS']}).")
 
+    counters = {
+        "processed": 0,
+        "created": 0,
+        "appended": 0,
+        "drafted": 0,
+        "filtered": 0,
+        "failed": 0,
+    }
+
     # Process each unread message
     ticket_label_id = ensure_label(service, "Ticketed")
     for msg_ref in unread_messages:
+        counters["processed"] += 1
         msg_id = msg_ref["id"]
         msg_detail = (
             service.users()
@@ -159,12 +172,14 @@ def main():
         # Skip newsletters or spam before using any AI models
         if is_promotional_or_spam(msg_detail, body_txt):
             print(f"{msg_id[:8]}… skipped promotional/spam")
+            counters["filtered"] += 1
             continue
 
         cls = classify_email(f"Subject:{subject}\n\n{body_txt}")
         email_type = cls["type"]
         importance = cls["importance"]
         if email_type == "other":
+            counters["filtered"] += 1
             continue
         print(f"{msg_id[:8]}… type={email_type}, imp={importance}")
 
@@ -193,6 +208,7 @@ def main():
             )
             if ticket_response and ticket_label_id:
                 apply_label_to_thread(service, thread_id, ticket_label_id)
+            counters["failed"] += 1
             continue
         else:
             print(
@@ -208,8 +224,15 @@ def main():
             print(
                 f"Draft created for unread email from {sender} (subject: '{subject}')"
             )
+            counters["drafted"] += 1
         else:
             print(f"Failed to create draft for message ID {msg_id}")
+            counters["failed"] += 1
+
+    print(
+        "summary "
+        + " ".join(f"{key}={value}" for key, value in counters.items())
+    )
 
 
 if __name__ == "__main__":

@@ -6,7 +6,7 @@ import time
 from email.mime.text import MIMEText
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Callable, Dict, Optional, Tuple, Type
 
 import requests
 import yaml
@@ -18,6 +18,7 @@ from openai import OpenAI
 
 
 CONFIG_PATH = Path(__file__).with_name("config.yaml")
+_LLM_LAST_CALL = 0.0
 
 
 @lru_cache(maxsize=1)
@@ -43,6 +44,8 @@ def _load_settings() -> Dict[str, Any]:
         "DRAFT_SYSTEM_MSG": cfg["openai"].get("draft_system_message", ""),
         "CLASSIFY_MODEL": cfg["openai"]["classify_model"],
         "CLASSIFY_MAX_TOKENS": cfg["openai"].get("classify_max_tokens", 50),
+        "OPENAI_TIMEOUT": cfg["openai"].get("timeout_seconds", 60),
+        "OPENAI_RATE_LIMIT_SECONDS": cfg["openai"].get("rate_limit_seconds", 0),
         "PROMO_LABELS": {
             "SPAM",
             "CATEGORY_PROMOTIONS",
@@ -114,6 +117,49 @@ def serialize_custom_fields(field_map: Dict[Any, Any]) -> list[dict]:
         serialized.append({"id": field_id, "value": str(value)})
 
     return serialized
+
+
+def retry_with_backoff(
+    operation: Callable[[], Any],
+    *,
+    retries: int,
+    base_delay: float = 1.0,
+    max_delay: float = 30.0,
+    retry_exceptions: Tuple[Type[BaseException], ...] = (Exception,),
+    action_name: str = "operation",
+) -> Any:
+    """Retry an operation with exponential backoff."""
+
+    last_exc: Optional[BaseException] = None
+    for attempt in range(1, retries + 1):
+        try:
+            return operation()
+        except retry_exceptions as exc:
+            last_exc = exc
+            if attempt >= retries:
+                break
+            delay = min(max_delay, base_delay * (2 ** (attempt - 1)))
+            print(f"{action_name} failed: {exc}. Retrying in {delay:.1f}s...")
+            time.sleep(delay)
+    if last_exc:
+        raise last_exc
+    raise RuntimeError(f"{action_name} failed without exception")
+
+
+def apply_llm_rate_limit() -> None:
+    """Sleep to respect an optional LLM rate limit."""
+
+    settings = _load_settings()
+    interval = settings.get("OPENAI_RATE_LIMIT_SECONDS", 0) or 0
+    if interval <= 0:
+        return
+
+    global _LLM_LAST_CALL
+    now = time.monotonic()
+    wait_time = interval - (now - _LLM_LAST_CALL)
+    if wait_time > 0:
+        time.sleep(wait_time)
+    _LLM_LAST_CALL = time.monotonic()
 
 
 class FreeScoutClient:
@@ -370,10 +416,24 @@ def create_base64_message(sender, to, subject, body):
 
 
 def create_draft(service, user_id, msg_body, thread_id=None):
+    settings = _load_settings()
     data = {"message": msg_body}
     if thread_id:
         data["message"]["threadId"] = thread_id
-    return service.users().drafts().create(userId=user_id, body=data).execute()
+
+    def _create():
+        return service.users().drafts().create(userId=user_id, body=data).execute()
+
+    try:
+        return retry_with_backoff(
+            _create,
+            retries=settings["MAX_RETRIES"],
+            retry_exceptions=(HttpError,),
+            action_name="draft creation",
+        )
+    except HttpError as exc:
+        print(f"Draft creation failed after retries: {exc}")
+        return None
 
 
 def thread_has_draft(service, thread_id):
@@ -406,12 +466,21 @@ def ensure_label(service, label_name: str) -> Optional[str]:
 
 def apply_label_to_thread(service, thread_id: str, label_id: str) -> bool:
     """Add a label to a thread; return True on success."""
+    settings = _load_settings()
 
-    try:
+    def _apply():
         service.users().threads().modify(
             userId="me", id=thread_id, body={"addLabelIds": [label_id]}
         ).execute()
         return True
+
+    try:
+        return retry_with_backoff(
+            _apply,
+            retries=settings["MAX_RETRIES"],
+            retry_exceptions=(HttpError,),
+            action_name="apply label",
+        )
     except HttpError as exc:
         print(f"Failed to apply label to thread {thread_id}: {exc}")
         return False
@@ -437,9 +506,11 @@ def critic_email(draft, original):
         "feedback": "Critic check failed; please review manually.",
     }
 
+    settings = _load_settings()
+    apply_llm_rate_limit()
     try:
         resp = client.chat.completions.create(
-            model=_load_settings()["CLASSIFY_MODEL"],
+            model=settings["CLASSIFY_MODEL"],
             messages=[
                 {
                     "role": "system",
@@ -450,6 +521,7 @@ def critic_email(draft, original):
                 {"role": "assistant", "content": draft},
                 {"role": "user", "content": f"Original email:\n\n{original}"},
             ],
+            timeout=settings["OPENAI_TIMEOUT"],
         )
         parsed = json.loads(resp.choices[0].message.content)
         if not isinstance(parsed, dict):
@@ -468,6 +540,7 @@ def classify_email(text):
     """Classify an email and return a dict with type and importance."""
     settings = _load_settings()
     client = OpenAI(api_key=require_openai_api_key())
+    apply_llm_rate_limit()
     try:
         resp = client.chat.completions.create(
             model=settings["CLASSIFY_MODEL"],
@@ -482,6 +555,7 @@ def classify_email(text):
             ],
             temperature=0,
             max_tokens=settings["CLASSIFY_MAX_TOKENS"],
+            timeout=settings["OPENAI_TIMEOUT"],
         )
         return json.loads(resp.choices[0].message.content)
     except Exception as e:
@@ -553,24 +627,28 @@ def create_ticket(
         payload["customFields"] = serialized
 
     http_timeout = timeout if timeout is not None else settings["HTTP_TIMEOUT"]
-    for attempt in range(1, retries + 1):
-        try:
-            resp = requests.post(
-                f"{url.rstrip('/')}/api/conversations",
-                headers={
-                    "Accept": "application/json",
-                    "Content-Type": "application/json",
-                    "X-FreeScout-API-Key": key,
-                },
-                json=payload,
-                timeout=http_timeout,
-            )
-            resp.raise_for_status()
-            return resp.json()
-        except requests.RequestException as exc:
-            if attempt == retries:
-                print(f"Failed to create ticket after {retries} attempts: {exc}")
-                return None
-            delay = 2 ** (attempt - 1)
-            print(f"Ticket creation error: {exc}. Retrying in {delay}s…")
-            time.sleep(delay)
+
+    def _create():
+        resp = requests.post(
+            f"{url.rstrip('/')}/api/conversations",
+            headers={
+                "Accept": "application/json",
+                "Content-Type": "application/json",
+                "X-FreeScout-API-Key": key,
+            },
+            json=payload,
+            timeout=http_timeout,
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+    try:
+        return retry_with_backoff(
+            _create,
+            retries=retries,
+            retry_exceptions=(requests.RequestException,),
+            action_name="ticket creation",
+        )
+    except requests.RequestException as exc:
+        print(f"Failed to create ticket after {retries} attempts: {exc}")
+        return None
