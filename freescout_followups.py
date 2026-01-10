@@ -309,12 +309,24 @@ def _notify_if_configured(
 
 
 def _iter_conversations(
-    client: FreeScoutClient, params: dict, limit: int
+    client: FreeScoutClient, params: dict, limit: int, max_pages: int = 100
 ) -> list[dict]:
+    """
+    Iterate through FreeScout conversations with pagination.
+
+    Args:
+        client: FreeScoutClient instance
+        params: Query parameters
+        limit: Maximum number of conversations to return
+        max_pages: Maximum number of pages to fetch (prevents infinite loops)
+
+    Returns:
+        List of conversations up to limit
+    """
     conversations: list[dict] = []
     page = 1
     page_size = min(50, limit)
-    while len(conversations) < limit:
+    while len(conversations) < limit and page <= max_pages:
         page_params = dict(params)
         page_params["page"] = page
         page_params.setdefault("limit", page_size)
@@ -325,6 +337,16 @@ def _iter_conversations(
         if len(data) < page_params["limit"]:
             break
         page += 1
+
+    if page > max_pages:
+        log_event(
+            "freescout_followup",
+            action="pagination",
+            outcome="max_pages_reached",
+            max_pages=max_pages,
+            conversations_fetched=len(conversations),
+        )
+
     return conversations[:limit]
 
 

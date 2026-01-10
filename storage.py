@@ -164,11 +164,23 @@ class TicketStore:
         self._conn.commit()
 
     def mark_processing_if_new(
-        self, gmail_message_id: str, gmail_thread_id: Optional[str]
+        self, gmail_message_id: str, gmail_thread_id: Optional[str], processing_timeout_minutes: int = 30
     ) -> bool:
+        """
+        Mark message as processing if new or if stuck in processing for too long.
+
+        Args:
+            gmail_message_id: The Gmail message ID
+            gmail_thread_id: The Gmail thread ID
+            processing_timeout_minutes: How many minutes before a stale 'processing' state can be reclaimed
+
+        Returns:
+            True if successfully claimed, False if already being processed or completed
+        """
         # Use IMMEDIATE transaction to prevent race conditions
         self._conn.execute("BEGIN IMMEDIATE")
         try:
+            # First, try to insert a new row
             cur = self._conn.execute(
                 """
                 INSERT INTO processed_messages (
@@ -185,8 +197,82 @@ class TicketStore:
                 """,
                 (gmail_message_id, gmail_thread_id),
             )
+
+            if cur.rowcount == 1:
+                # Successfully inserted new row
+                self._conn.commit()
+                return True
+
+            # Message already exists. Check if it's stale and can be reclaimed
+            cur = self._conn.execute(
+                """
+                SELECT status, processed_at
+                FROM processed_messages
+                WHERE gmail_message_id = ?
+                """,
+                (gmail_message_id,),
+            )
+            row = cur.fetchone()
+
+            if not row:
+                # Race condition - message was deleted? Allow retry
+                self._conn.rollback()
+                return False
+
+            status, processed_at = row
+
+            # If status is terminal (success/filtered), don't reclaim
+            if status in ('success', 'filtered'):
+                self._conn.rollback()
+                return False
+
+            # If status is failed, allow reclaim (retry logic)
+            # If status is processing, check if it's stale
+            if status == 'processing':
+                # Check if the processing timestamp is too old
+                cur = self._conn.execute(
+                    f"""
+                    SELECT CASE
+                        WHEN datetime(processed_at, '+{processing_timeout_minutes} minutes') < datetime('now')
+                        THEN 1 ELSE 0 END as is_stale
+                    FROM processed_messages
+                    WHERE gmail_message_id = ?
+                    """,
+                    (gmail_message_id,),
+                )
+                stale_row = cur.fetchone()
+                if stale_row and stale_row[0] == 1:
+                    # Reclaim stale processing state
+                    self._conn.execute(
+                        """
+                        UPDATE processed_messages
+                        SET status = 'processing',
+                            processed_at = CURRENT_TIMESTAMP,
+                            error = 'reclaimed from stale processing state'
+                        WHERE gmail_message_id = ?
+                        """,
+                        (gmail_message_id,),
+                    )
+                    self._conn.commit()
+                    return True
+                else:
+                    # Still being actively processed
+                    self._conn.rollback()
+                    return False
+
+            # Status is 'failed', allow reclaim for retry
+            self._conn.execute(
+                """
+                UPDATE processed_messages
+                SET status = 'processing',
+                    processed_at = CURRENT_TIMESTAMP
+                WHERE gmail_message_id = ?
+                """,
+                (gmail_message_id,),
+            )
             self._conn.commit()
-            return cur.rowcount == 1
+            return True
+
         except Exception:
             self._conn.rollback()
             raise
