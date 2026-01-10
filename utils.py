@@ -1,5 +1,6 @@
 import base64
 import json
+import logging
 import os
 import pickle
 import re
@@ -19,9 +20,12 @@ from openai import OpenAI
 
 
 CONFIG_PATH = Path(__file__).with_name("config.yaml")
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
+logging.basicConfig(level=LOG_LEVEL)
+LOGGER = logging.getLogger("csm")
 
 
-def log_event(event: str, **fields: Any) -> None:
+def log_event(event: str, level: int = logging.INFO, **fields: Any) -> None:
     """Emit a structured log line."""
 
     payload = {
@@ -29,7 +33,7 @@ def log_event(event: str, **fields: Any) -> None:
         "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
     payload.update(fields)
-    print(json.dumps(payload, ensure_ascii=False, default=str))
+    LOGGER.log(level, json.dumps(payload, ensure_ascii=False, default=str))
 
 
 @lru_cache(maxsize=1)
@@ -167,12 +171,16 @@ def retry_request(
             }
             if context:
                 log_payload["context"] = context
-            print(json.dumps(log_payload, sort_keys=True))
+            log_event(
+                log_payload.pop("event", "retrying"),
+                level=logging.WARNING,
+                **log_payload,
+            )
             if is_last_attempt:
                 raise
             time.sleep(delay)
     raise RuntimeError(f"Retry loop failed for {action_name}")
-=======
+
 class SimpleRateLimiter:
     """Simple rolling-window rate limiter."""
 
@@ -601,7 +609,12 @@ def generate_ai_reply(subject, sender, snippet_or_body, email_type):
     settings = get_settings()
     limiter = _get_openai_rate_limiter()
     if limiter and not limiter.allow():
-        print("OpenAI request throttled: skipping draft reply generation.")
+        log_event(
+            "openai_throttled",
+            level=logging.WARNING,
+            action="generate_ai_reply",
+            reason="rate_limited",
+        )
         fallback_lines = [
             "Hello,",
             "",
@@ -637,7 +650,12 @@ def generate_ai_reply(subject, sender, snippet_or_body, email_type):
         raw_reply = response.choices[0].message.content.strip()
         return sanitize_draft_reply(raw_reply)
     except Exception as exc:
-        print(f"Error calling OpenAI API: {exc}")
+        log_event(
+            "openai_error",
+            level=logging.ERROR,
+            action="generate_ai_reply",
+            reason=str(exc),
+        )
         fallback_lines = [
             "Hello,",
             "",
@@ -687,7 +705,12 @@ def classify_email(text):
     settings = _load_settings()
     limiter = _get_openai_rate_limiter()
     if limiter and not limiter.allow():
-        print("OpenAI request throttled: skipping email classification.")
+        log_event(
+            "openai_throttled",
+            level=logging.WARNING,
+            action="classify_email",
+            reason="rate_limited",
+        )
         return {"type": "other", "importance": 0}
     client = OpenAI(
         api_key=require_openai_api_key(), timeout=settings["OPENAI_TIMEOUT"]
@@ -713,7 +736,12 @@ def classify_email(text):
         )
         return json.loads(resp.choices[0].message.content)
     except Exception as e:
-        print(f"Error classifying email: {e}")
+        log_event(
+            "openai_error",
+            level=logging.ERROR,
+            action="classify_email",
+            reason=str(e),
+        )
         return {"type": "other", "importance": 0}
 
 
@@ -814,8 +842,19 @@ def create_ticket(
             return resp.json()
         except requests.RequestException as exc:
             if attempt == retries:
-                print(f"Failed to create ticket after {retries} attempts: {exc}")
+                log_event(
+                    "ticket_create_failed",
+                    level=logging.ERROR,
+                    attempts=retries,
+                    reason=str(exc),
+                )
                 return None
             delay = 2 ** (attempt - 1)
-            print(f"Ticket creation error: {exc}. Retrying in {delay}s…")
+            log_event(
+                "ticket_create_retry",
+                level=logging.WARNING,
+                attempt=attempt,
+                reason=str(exc),
+                delay_seconds=delay,
+            )
             time.sleep(delay)
