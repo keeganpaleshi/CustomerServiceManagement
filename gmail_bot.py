@@ -71,9 +71,8 @@ def parse_args(settings: Optional[Dict] = None):
 # Label used to mark messages that already have a ticket to avoid duplicates
 TICKET_LABEL_NAME = "Ticketed"
 
-# Default thresholds and timeouts
+# Default thresholds
 DEFAULT_PRIORITY_HIGH_THRESHOLD = 8  # Default importance score that marks a message as high priority
-DEFAULT_PROCESSING_TIMEOUT_MINUTES = 30  # How long before a stale 'processing' state can be reclaimed
 
 
 @dataclass(frozen=True)
@@ -1122,7 +1121,7 @@ def freescout_webhook_handler(
     settings = get_settings()
     secret = settings.get("FREESCOUT_WEBHOOK_SECRET", "")
     if secret:
-        provided_secret = headers.get("X-Webhook-Secret", "")
+        provided_secret = headers.get("X-Webhook-Secret") or ""
         if not hmac.compare_digest(provided_secret, secret):
             return "invalid signature", 401, None
 

@@ -248,6 +248,15 @@ def _send_email_notification(email_cfg: dict, subject: str, body: str) -> None:
     use_tls = email_cfg.get("use_tls", True)
     use_ssl = email_cfg.get("use_ssl", False)
 
+    # Validate mutually exclusive TLS/SSL settings
+    if use_tls and use_ssl:
+        log_event(
+            "freescout_followup",
+            action="email_notification",
+            outcome="config_warning",
+            reason="Both use_tls and use_ssl are enabled; SSL takes precedence",
+        )
+
     server = None
     try:
         if use_ssl:
