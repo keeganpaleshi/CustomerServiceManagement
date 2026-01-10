@@ -1,4 +1,5 @@
 import argparse
+import hashlib
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -310,6 +311,43 @@ def _extract_latest_thread_text(conversation: dict) -> str:
     return latest.get("text", "") or latest.get("body", "")
 
 
+def _extract_thread_text(thread: dict) -> str:
+    return thread.get("text", "") or thread.get("body", "")
+
+
+def _extract_thread_id(thread_payload: Optional[dict]) -> Optional[int]:
+    if not thread_payload or not isinstance(thread_payload, dict):
+        return None
+    candidates = [
+        thread_payload.get("id"),
+        thread_payload.get("thread_id"),
+        (thread_payload.get("thread") or {}).get("id"),
+        (thread_payload.get("data") or {}).get("id"),
+    ]
+    for thread_id in candidates:
+        if thread_id is None:
+            continue
+        try:
+            return int(thread_id)
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def _find_thread_by_id(threads: list[dict], thread_id: int) -> Optional[dict]:
+    for thread in threads:
+        if not isinstance(thread, dict):
+            continue
+        thread_id_value = thread.get("id")
+        if thread_id_value == thread_id or str(thread_id_value) == str(thread_id):
+            return thread
+    return None
+
+
+def _hash_text(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
 def _build_tags(cls: dict, high_priority: bool) -> list[str]:
     tags = [cls.get("type", "other")]
     if high_priority:
@@ -394,9 +432,15 @@ def process_freescout_conversation(
     conversation: dict,
     actions_cfg: dict,
     settings: dict,
+    store: Optional[TicketStore] = None,
 ):
     conv_id = conversation.get("id")
     if not conv_id:
+        return
+    try:
+        conv_id_int = int(conv_id)
+    except (TypeError, ValueError):
+        print(f"Skipping conversation with non-numeric id: {conv_id}")
         return
 
     try:
@@ -407,6 +451,9 @@ def process_freescout_conversation(
 
     subject = details.get("subject") or conversation.get("subject") or "(no subject)"
     latest_text = _extract_latest_thread_text(details) or conversation.get("last_text", "")
+    threads = details.get("threads") or []
+    if isinstance(threads, dict):
+        threads = threads.get("threads", []) or []
 
     cls = classify_email(f"Subject:{subject}\n\n{latest_text}")
     importance = cls.get("importance", 0)
@@ -451,6 +498,11 @@ def process_freescout_conversation(
             print(f"Failed to add internal note to {conv_id}: {exc}")
 
     if actions_cfg.get("post_suggested_reply", True):
+        created_store = False
+        if store is None:
+            sqlite_path = settings.get("TICKET_SQLITE_PATH") or "./csm.sqlite"
+            store = TicketStore(sqlite_path)
+            created_store = True
         try:
             suggestion = generate_ai_reply(
                 subject,
@@ -458,9 +510,55 @@ def process_freescout_conversation(
                 latest_text,
                 cls.get("type", "other"),
             )
-            client.add_suggested_reply(conv_id, suggestion)
+            suggestion_hash = _hash_text(suggestion)
+            now_iso = datetime.utcnow().isoformat()
+
+            draft_record = store.get_bot_draft(conv_id_int)
+            if not draft_record:
+                created = client.create_draft_thread(conv_id, suggestion)
+                thread_id = _extract_thread_id(created)
+                store.upsert_bot_draft(
+                    conv_id_int,
+                    thread_id,
+                    suggestion_hash,
+                    now_iso,
+                )
+            else:
+                stored_thread_id = draft_record.get("freescout_thread_id")
+                if stored_thread_id is None:
+                    created = client.create_draft_thread(conv_id, suggestion)
+                    thread_id = _extract_thread_id(created)
+                    store.upsert_bot_draft(
+                        conv_id_int,
+                        thread_id,
+                        suggestion_hash,
+                        now_iso,
+                    )
+                else:
+                    thread = _find_thread_by_id(threads, stored_thread_id)
+                    if thread and thread.get("type") == "draft":
+                        current_text = _extract_thread_text(thread)
+                        current_hash = _hash_text(current_text)
+                        if current_hash == draft_record.get("last_hash"):
+                            client.update_thread(conv_id, stored_thread_id, suggestion)
+                            store.upsert_bot_draft(
+                                conv_id_int,
+                                stored_thread_id,
+                                suggestion_hash,
+                                now_iso,
+                            )
+                        else:
+                            note = (
+                                "Skipped updating bot draft because it was edited by a human."
+                            )
+                            client.add_internal_note(conv_id, note)
+                    elif thread and thread.get("type") != "draft":
+                        pass
         except requests.RequestException as exc:
-            print(f"Failed to add suggested reply to {conv_id}: {exc}")
+            print(f"Failed to manage suggested reply for {conv_id}: {exc}")
+        finally:
+            if created_store:
+                store.close()
 
 
 def poll_freescout_updates(
@@ -476,11 +574,19 @@ def poll_freescout_updates(
         return
 
     actions_cfg = settings.get("FREESCOUT_ACTIONS", {})
+    sqlite_path = settings.get("TICKET_SQLITE_PATH") or "./csm.sqlite"
+    ticket_store = TicketStore(sqlite_path)
     since = datetime.utcnow() - timedelta(minutes=5)
     while True:
         convs = fetch_recent_conversations(since.isoformat(), timeout=http_timeout)
         for conv in convs:
-            process_freescout_conversation(client, conv, actions_cfg, settings)
+            process_freescout_conversation(
+                client,
+                conv,
+                actions_cfg,
+                settings,
+                store=ticket_store,
+            )
         since = datetime.utcnow()
         time.sleep(interval)
 
@@ -505,7 +611,18 @@ def freescout_webhook_handler(payload: dict, headers: dict) -> tuple[str, int]:
         return "freescout disabled", 503
 
     actions_cfg = settings.get("FREESCOUT_ACTIONS", {})
-    process_freescout_conversation(client, {"id": conv_id}, actions_cfg, settings)
+    sqlite_path = settings.get("TICKET_SQLITE_PATH") or "./csm.sqlite"
+    ticket_store = TicketStore(sqlite_path)
+    try:
+        process_freescout_conversation(
+            client,
+            {"id": conv_id},
+            actions_cfg,
+            settings,
+            store=ticket_store,
+        )
+    finally:
+        ticket_store.close()
     return "ok", 200
 
 

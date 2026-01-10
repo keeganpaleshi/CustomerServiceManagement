@@ -261,6 +261,34 @@ class FreeScoutClient:
         resp.raise_for_status()
         return resp.json()
 
+    def create_draft_thread(
+        self, conversation_id: int, text: str, user_id: Optional[int] = None
+    ) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {"type": "draft", "text": text}
+        if user_id:
+            payload["user_id"] = user_id
+        resp = requests.post(
+            f"{self.base_url}/api/conversations/{conversation_id}/threads",
+            headers=self._headers(),
+            json=payload,
+            timeout=self.timeout,
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+    def update_thread(
+        self, conversation_id: int, thread_id: int, text: str
+    ) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {"type": "draft", "text": text}
+        resp = requests.put(
+            f"{self.base_url}/api/conversations/{conversation_id}/threads/{thread_id}",
+            headers=self._headers(),
+            json=payload,
+            timeout=self.timeout,
+        )
+        resp.raise_for_status()
+        return resp.json()
+
     def add_suggested_reply(
         self, conversation_id: int, text: str, user_id: Optional[int] = None
     ) -> Dict[str, Any]:

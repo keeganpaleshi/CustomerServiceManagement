@@ -40,6 +40,16 @@ class TicketStore:
             )
             """
         )
+        self._conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS bot_drafts (
+                freescout_conversation_id INTEGER PRIMARY KEY,
+                freescout_thread_id INTEGER NULL,
+                last_hash TEXT,
+                last_generated_at TEXT
+            )
+            """
+        )
         self._conn.commit()
 
     def _migrate_processed_messages(self) -> None:
@@ -246,6 +256,55 @@ class TicketStore:
                 processed_at = CURRENT_TIMESTAMP
             """,
             (gmail_message_id, gmail_thread_id, reason),
+        )
+        self._conn.commit()
+
+    def get_bot_draft(self, freescout_conversation_id: int) -> Optional[dict]:
+        cur = self._conn.execute(
+            """
+            SELECT freescout_conversation_id, freescout_thread_id, last_hash, last_generated_at
+            FROM bot_drafts
+            WHERE freescout_conversation_id = ?
+            """,
+            (freescout_conversation_id,),
+        )
+        row = cur.fetchone()
+        if not row:
+            return None
+        return {
+            "freescout_conversation_id": row[0],
+            "freescout_thread_id": row[1],
+            "last_hash": row[2],
+            "last_generated_at": row[3],
+        }
+
+    def upsert_bot_draft(
+        self,
+        freescout_conversation_id: int,
+        freescout_thread_id: Optional[int],
+        last_hash: str,
+        last_generated_at: str,
+    ) -> None:
+        self._conn.execute(
+            """
+            INSERT INTO bot_drafts (
+                freescout_conversation_id,
+                freescout_thread_id,
+                last_hash,
+                last_generated_at
+            )
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(freescout_conversation_id) DO UPDATE SET
+                freescout_thread_id = excluded.freescout_thread_id,
+                last_hash = excluded.last_hash,
+                last_generated_at = excluded.last_generated_at
+            """,
+            (
+                freescout_conversation_id,
+                freescout_thread_id,
+                last_hash,
+                last_generated_at,
+            ),
         )
         self._conn.commit()
 
