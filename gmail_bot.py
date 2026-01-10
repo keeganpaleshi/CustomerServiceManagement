@@ -2,7 +2,7 @@ import argparse
 import hashlib
 import time
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from email.utils import parseaddr
 from typing import Dict, Optional, Tuple
 
@@ -510,6 +510,26 @@ def _is_customer_thread(thread: dict) -> bool:
     return bool(thread.get("customer_id") and not thread.get("user_id"))
 
 
+def _parse_datetime(value: Optional[str]) -> Optional[datetime]:
+    if not value:
+        return None
+    if isinstance(value, datetime):
+        return value
+    if value.endswith("Z"):
+        value = value.replace("Z", "+00:00")
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
+def _thread_timestamp(thread: dict) -> Optional[datetime]:
+    return _parse_datetime(thread.get("created_at") or thread.get("updated_at"))
+
+
 def _extract_latest_thread_text(conversation: dict) -> str:
     threads = conversation.get("threads") or conversation.get("data") or []
     if isinstance(threads, dict):
@@ -521,7 +541,17 @@ def _extract_latest_thread_text(conversation: dict) -> str:
     if not customer_threads:
         return conversation.get("last_text", "") or conversation.get("text", "")
 
-    latest = customer_threads[-1]
+    latest: Optional[dict] = None
+    latest_time: Optional[datetime] = None
+    for thread in customer_threads:
+        ts = _thread_timestamp(thread)
+        if ts and (latest_time is None or ts > latest_time):
+            latest_time = ts
+            latest = thread
+
+    if latest is None:
+        return conversation.get("last_text", "") or conversation.get("text", "")
+
     return latest.get("text", "") or latest.get("body", "")
 
 
