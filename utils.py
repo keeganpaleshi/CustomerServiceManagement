@@ -208,8 +208,9 @@ class SimpleRateLimiter:
             return True
         now = time.monotonic()
         window_start = now - self.window_seconds
-        # Remove timestamps that are strictly before the window (< not <=)
-        # This makes "N requests per X seconds" inclusive of the boundary
+        # Remove timestamps that fall outside the sliding window.
+        # Using < (not <=) keeps timestamps at exactly window_start,
+        # making the window [window_start, now] inclusive on both ends.
         while self.timestamps and self.timestamps[0] < window_start:
             self.timestamps.popleft()
         if len(self.timestamps) >= self.max_requests:
