@@ -78,8 +78,8 @@ optional suggested reply.
 
 `Draft_Replies.py` is a standalone, draft-only script. It does not gate or
 replace Phase 2C FreeScout ingestion, and draft creation should not block
-FreeScout create/append flows. Use `--skip-existing-drafts` only when you want
-to avoid new drafts in threads that already have one (default: off).
+FreeScout create/append flows. Gmail-label-based draft skipping is disabled,
+so Phase 2C idempotency must remain database-only.
 
 ### Configure actions
 

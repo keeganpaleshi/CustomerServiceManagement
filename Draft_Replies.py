@@ -15,7 +15,6 @@ from utils import (
     get_gmail_service,
     get_settings,
     is_promotional_or_spam,
-    thread_has_draft,
     extract_plain_text,
     require_openai_api_key,
 )
@@ -38,7 +37,10 @@ def parse_args(settings: Optional[Dict] = None):
         "--skip-existing-drafts",
         action="store_true",
         default=False,
-        help="Skip threads that already have a draft (off by default for Phase 2C)",
+        help=(
+            "Deprecated: Gmail-label-based draft skipping is disabled. "
+            "Use DB-only idempotency for Phase 2C flows."
+        ),
     )
     return parser.parse_args()
 
@@ -112,7 +114,6 @@ def main():
     1) Authenticate & build Gmail service.
     2) Fetch unread messages & limit to the configured amount.
     3) For each message:
-       - Optionally skip if there's already a draft in the same thread.
        - Generate AI-based draft.
        - Create the draft (email remains unread).
     """
@@ -167,14 +168,7 @@ def main():
             continue
         print(f"{msg_id[:8]}… type={email_type}, imp={importance}")
 
-        # 1) Check if there's already a draft in this thread
-        if args.skip_existing_drafts and thread_has_draft(service, thread_id):
-            print(
-                f"Skipping message {msg_id} (thread {thread_id}) because a draft already exists."
-            )
-            continue
-
-        # 2) If not, generate a new draft
+        # Generate a new draft
         reply_subject = f"Re: {subject}" if subject else "Re: (no subject)"
         draft_body_text = generate_ai_reply(
             subject, sender, snippet, email_type)
