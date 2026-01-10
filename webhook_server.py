@@ -12,7 +12,7 @@ from fastapi.responses import JSONResponse
 
 from gmail_bot import freescout_webhook_handler
 from storage import TicketStore
-from utils import get_settings, log_event
+from utils import get_settings, log_event, reload_settings
 
 LOG_DIR = Path(__file__).resolve().parent / "logs" / "webhooks"
 SAFE_FILENAME_RE = re.compile(r"[^A-Za-z0-9_.-]+")
@@ -65,6 +65,7 @@ def log_webhook_payload(payload: Any) -> Path:
 
 
 def _get_counter_store() -> TicketStore:
+    reload_settings()
     settings = get_settings()
     sqlite_path = settings.get("TICKET_SQLITE_PATH") or "./csm.sqlite"
     return TicketStore(sqlite_path)
@@ -121,4 +122,3 @@ async def freescout(payload: Request, x_webhook_secret: str | None = Header(None
     finally:
         counter_store.close()
     return JSONResponse({"message": message}, status_code=status)
-
