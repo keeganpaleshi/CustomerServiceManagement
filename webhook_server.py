@@ -68,7 +68,9 @@ async def freescout(payload: Request, x_webhook_secret: str | None = Header(None
         logfile=str(logfile),
     )
 
-    message, status = freescout_webhook_handler(body, {"X-Webhook-Secret": x_webhook_secret})
+    message, status, outcome = freescout_webhook_handler(
+        body, {"X-Webhook-Secret": x_webhook_secret}
+    )
     if status >= 400:
         COUNTERS["failed"] += 1
         log_event(
@@ -80,6 +82,12 @@ async def freescout(payload: Request, x_webhook_secret: str | None = Header(None
         )
     else:
         COUNTERS["processed"] += 1
+        if outcome:
+            action = outcome.action
+            if action in COUNTERS:
+                COUNTERS[action] += 1
+            if outcome.drafted:
+                COUNTERS["drafted"] += 1
         log_event(
             "webhook_ingest",
             action="handle_payload",
