@@ -1054,6 +1054,7 @@ def main():
     created_conversations = 0
     appended_threads = 0
     drafted = 0
+    skipped = 0
     filtered_terminal = 0
     failed = 0
 
@@ -1063,7 +1064,7 @@ def main():
         processed += 1
         result = process_gmail_message(ref, ticket_store, client, svc)
         if result.status == "skipped_already_success":
-            filtered_terminal += 1
+            skipped += 1
         elif result.status == "filtered":
             filtered_terminal += 1
         elif result.status == "freescout_appended":
@@ -1092,6 +1093,7 @@ def main():
         created=created_conversations,
         appended=appended_threads,
         drafted=drafted,
+        skipped=skipped,
         filtered=filtered_terminal,
         failed=failed,
     )
