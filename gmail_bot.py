@@ -971,11 +971,21 @@ def poll_freescout_updates(
 
     since = datetime.utcnow() - timedelta(minutes=5)
     while True:
-        convs = fetch_recent_conversations(since.isoformat(), timeout=http_timeout)
-        for conv in convs:
-            process_freescout_conversation(client, conv, settings)
-        since = datetime.utcnow()
-        time.sleep(interval)
+        try:
+            convs = fetch_recent_conversations(
+                since.isoformat(), timeout=http_timeout
+            )
+            for conv in convs:
+                process_freescout_conversation(client, conv, settings)
+            since = datetime.utcnow()
+            time.sleep(interval)
+        except Exception as exc:
+            log_event(
+                "freescout_poll",
+                action="poll_updates",
+                outcome="failed",
+                error=str(exc),
+            )
 
 
 def _infer_webhook_outcome(payload: dict) -> WebhookOutcome:
