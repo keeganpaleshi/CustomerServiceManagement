@@ -10,6 +10,7 @@ from utils import (
     FreeScoutClient,
     generate_ai_reply,
     get_settings,
+    log_event,
     require_ticket_settings,
 )
 
@@ -307,7 +308,12 @@ def main() -> None:
     settings = get_settings()
     args = parse_args(settings)
     if settings["TICKET_SYSTEM"] != "freescout":
-        print("FreeScout follow-up skipped because ticket system is not freescout.")
+        log_event(
+            "freescout_followup",
+            action="start",
+            outcome="skipped",
+            reason="ticket system not freescout",
+        )
         return
 
     url, key = require_ticket_settings()
@@ -319,44 +325,61 @@ def main() -> None:
     now = datetime.now(timezone.utc)
     min_age = timedelta(hours=args.hours)
 
-    inspected = 0
+    processed = 0
     qualified = 0
     drafted = 0
+    filtered = 0
+    failed = 0
 
     conversations = _iter_conversations(client, params, args.limit)
     for conversation in conversations:
-        inspected += 1
+        processed += 1
         conv_id = conversation.get("id")
         if not conv_id:
+            filtered += 1
             continue
 
         try:
             details = client.get_conversation(conv_id)
         except requests.RequestException as exc:
-            print(f"Failed to fetch conversation {conv_id}: {exc}")
+            failed += 1
+            log_event(
+                "freescout_followup",
+                action="fetch_conversation",
+                outcome="failed",
+                conversation_id=conv_id,
+                reason=str(exc),
+            )
             continue
 
         tags = _extract_tags(details or conversation)
         if _has_excluded(tags, args.excluded_tags):
+            filtered += 1
             continue
         if not _matches_required(tags, args.required_tags):
+            filtered += 1
             continue
         if not _matches_any(_status_values(details or conversation), args.states):
+            filtered += 1
             continue
         if args.followup_tag in tags:
+            filtered += 1
             continue
 
         threads = _conversation_threads(details)
         latest_customer = _extract_latest_customer_thread(threads)
         if not latest_customer:
+            filtered += 1
             continue
 
         last_customer_time = _thread_timestamp(latest_customer)
         if not last_customer_time or now - last_customer_time < min_age:
+            filtered += 1
             continue
 
         last_agent_time = _latest_timestamp(threads, _is_agent_thread)
         if last_agent_time and last_agent_time >= last_customer_time:
+            filtered += 1
             continue
 
         qualified += 1
@@ -368,24 +391,50 @@ def main() -> None:
 
         draft = generate_ai_reply(subject, sender, snippet, "customer")
         if args.dry_run:
-            print(f"{conv_id}: would add follow-up draft and tag '{args.followup_tag}'")
+            log_event(
+                "freescout_followup",
+                action="draft_followup",
+                outcome="dry_run",
+                conversation_id=conv_id,
+                followup_tag=args.followup_tag,
+            )
             continue
 
         try:
             client.create_agent_draft_reply(conv_id, draft)
         except requests.RequestException as exc:
-            print(f"Failed to add draft to {conv_id}: {exc}")
+            failed += 1
+            log_event(
+                "freescout_followup",
+                action="draft_followup",
+                outcome="failed",
+                conversation_id=conv_id,
+                reason=str(exc),
+            )
             continue
 
         updated_tags = tags + [args.followup_tag]
         try:
             client.update_conversation(conv_id, tags=updated_tags)
         except requests.RequestException as exc:
-            print(f"Failed to tag conversation {conv_id}: {exc}")
+            failed += 1
+            log_event(
+                "freescout_followup",
+                action="tag_followup",
+                outcome="failed",
+                conversation_id=conv_id,
+                reason=str(exc),
+            )
             continue
 
         drafted += 1
-        print(f"{conv_id}: follow-up draft created and tagged {args.followup_tag}")
+        log_event(
+            "freescout_followup",
+            action="draft_followup",
+            outcome="success",
+            conversation_id=conv_id,
+            followup_tag=args.followup_tag,
+        )
         try:
             _notify_if_configured(
                 settings,
@@ -395,12 +444,24 @@ def main() -> None:
                 args.followup_tag,
             )
         except Exception as exc:
-            print(f"Failed to send notification for {conv_id}: {exc}")
+            failed += 1
+            log_event(
+                "freescout_followup",
+                action="notify_followup",
+                outcome="failed",
+                conversation_id=conv_id,
+                reason=str(exc),
+            )
 
-    print("Follow-up summary:")
-    print(f"  inspected: {inspected}")
-    print(f"  qualified: {qualified}")
-    print(f"  drafted: {drafted}")
+    log_event(
+        "freescout_followup_summary",
+        processed=processed,
+        created=0,
+        appended=0,
+        drafted=drafted,
+        filtered=filtered,
+        failed=failed,
+    )
 
 
 if __name__ == "__main__":

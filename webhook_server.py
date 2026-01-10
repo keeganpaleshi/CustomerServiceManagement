@@ -10,10 +10,19 @@ from fastapi import FastAPI, Header, Request
 from fastapi.responses import JSONResponse
 
 from gmail_bot import freescout_webhook_handler
+from utils import log_event
 
 app = FastAPI()
 LOG_DIR = Path(__file__).resolve().parent / "logs" / "webhooks"
 SAFE_FILENAME_RE = re.compile(r"[^A-Za-z0-9_.-]+")
+COUNTERS = {
+    "processed": 0,
+    "created": 0,
+    "appended": 0,
+    "drafted": 0,
+    "filtered": 0,
+    "failed": 0,
+}
 
 
 def _safe_filename(value: str) -> str:
@@ -47,7 +56,47 @@ async def freescout(payload: Request, x_webhook_secret: str | None = Header(None
     except json.JSONDecodeError:
         body = {"raw": raw_body.decode("utf-8", errors="replace")}
 
-    log_webhook_payload(body)
+    logfile = log_webhook_payload(body)
+    conversation_id = (
+        body.get("conversation_id") or body.get("id") if isinstance(body, dict) else None
+    )
+    log_event(
+        "webhook_ingest",
+        action="log_payload",
+        outcome="success",
+        conversation_id=conversation_id,
+        logfile=str(logfile),
+    )
 
     message, status = freescout_webhook_handler(body, {"X-Webhook-Secret": x_webhook_secret})
+    if status >= 400:
+        COUNTERS["failed"] += 1
+        log_event(
+            "webhook_ingest",
+            action="handle_payload",
+            outcome="failed",
+            conversation_id=conversation_id,
+            reason=message,
+        )
+    else:
+        COUNTERS["processed"] += 1
+        log_event(
+            "webhook_ingest",
+            action="handle_payload",
+            outcome="success",
+            conversation_id=conversation_id,
+        )
     return JSONResponse({"message": message}, status_code=status)
+
+
+@app.on_event("shutdown")
+def log_summary() -> None:
+    log_event(
+        "webhook_ingest_summary",
+        processed=COUNTERS["processed"],
+        created=COUNTERS["created"],
+        appended=COUNTERS["appended"],
+        drafted=COUNTERS["drafted"],
+        filtered=COUNTERS["filtered"],
+        failed=COUNTERS["failed"],
+    )
