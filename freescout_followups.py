@@ -6,8 +6,7 @@ from typing import Dict, Iterable, Optional, Sequence
 
 import requests
 
-from Draft_Replies import generate_ai_reply
-from utils import FreeScoutClient, get_settings, require_ticket_settings
+from utils import FreeScoutClient, generate_ai_reply, get_settings, require_ticket_settings
 
 
 def parse_args(settings: Optional[Dict] = None):
