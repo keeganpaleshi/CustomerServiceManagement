@@ -106,13 +106,6 @@ def process_gmail_message(
             status="skipped_already_success",
             reason="already processed",
         )
-    if store.processed_filtered(message_id) is True:
-        print(f"{message_id[:8]}… skipped (already filtered)")
-        return ProcessResult(
-            status="filtered",
-            reason="already filtered",
-        )
-
     try:
         full_message = message
         if "payload" not in message:
@@ -150,10 +143,12 @@ def process_gmail_message(
         message_with_body = dict(full_message)
         message_with_body["body_text"] = body_text
         filtered, reason = should_filter_message(message_with_body)
-        if filtered:
-            store.mark_filtered(message_id, thread_id, reason=reason)
-            print(f"{message_id[:8]}… {reason}")
-            return ProcessResult(status="filtered", reason=reason)
+        already_filtered = store.processed_filtered(message_id) is True
+        if filtered or already_filtered:
+            final_reason = reason or "already filtered"
+            store.mark_filtered(message_id, thread_id, reason=final_reason)
+            print(f"{message_id[:8]}… {final_reason}")
+            return ProcessResult(status="filtered", reason=final_reason)
 
         conv_id = store.get_conversation_id_for_thread(thread_id)
         if conv_id:
