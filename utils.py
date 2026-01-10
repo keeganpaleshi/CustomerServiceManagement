@@ -595,11 +595,62 @@ def is_promotional_or_spam(message, body_text):
         h.get("name", "").lower(): h.get("value", "")
         for h in message.get("payload", {}).get("headers", [])
     }
-    if "list-unsubscribe" in headers or "list-id" in headers:
+    body_text = body_text or ""
+    body_lower = body_text.lower()
+    subject = headers.get("subject", "").lower()
+    from_header = headers.get("from", "").lower()
+
+    list_headers = {
+        "list-unsubscribe",
+        "list-id",
+        "list-help",
+        "list-subscribe",
+        "list-post",
+        "list-archive",
+        "list-owner",
+    }
+    if list_headers.intersection(headers):
         return True
-    if "unsubscribe" in body_text.lower():
+
+    spam_flag = headers.get("x-spam-flag", "").strip().lower() == "yes"
+    spam_status = headers.get("x-spam-status", "").lower().startswith("yes")
+    if spam_flag or spam_status:
         return True
-    return False
+
+    scl_header = headers.get("x-ms-exchange-organization-scl", "").strip()
+    if scl_header.isdigit() and int(scl_header) >= 5:
+        return True
+
+    precedence = headers.get("precedence", "").strip().lower()
+    bulk_header = precedence in {"bulk", "list", "junk"}
+
+    footer_patterns = [
+        r"(?im)^\s*unsubscribe\b",
+        r"(?im)\bclick here to unsubscribe\b",
+        r"(?im)\bto unsubscribe\b",
+        r"(?im)\bmanage (your )?(email )?preferences\b",
+        r"(?im)\bupdate (your )?(email )?preferences\b",
+        r"(?im)\bmanage subscriptions?\b",
+        r"(?im)\bopt[- ]?out\b",
+    ]
+    footer_match = any(re.search(pattern, body_text) for pattern in footer_patterns)
+
+    promo_subject = re.search(
+        r"\b(newsletter|promo|promotion|sale|deal|discount|offer|coupon|limited time|free trial)\b",
+        subject,
+    )
+
+    score = 0
+    if bulk_header:
+        score += 2
+    if footer_match:
+        score += 2
+    if promo_subject:
+        score += 1
+    if "no-reply" in from_header or "noreply" in from_header:
+        score += 1
+
+    return score >= 3
 
 
 def generate_ai_reply(subject, sender, snippet_or_body, email_type):
