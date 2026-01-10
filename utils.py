@@ -8,14 +8,13 @@ from collections import deque
 from email.mime.text import MIMEText
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Callable, Dict, Optional, Tuple
 
 import requests
 import yaml
 from google.auth.transport.requests import Request
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
-from googleapiclient.errors import HttpError
 from openai import OpenAI
 
 
@@ -133,6 +132,47 @@ def serialize_custom_fields(field_map: Dict[Any, Any]) -> list[dict]:
     return serialized
 
 
+def retry_request(
+    action: Callable[[], Any],
+    *,
+    action_name: str,
+    max_attempts: Optional[int] = None,
+    base_delay: float = 1.0,
+    max_delay: float = 30.0,
+    exceptions: Tuple[type[BaseException], ...] = (Exception,),
+    log_context: Optional[Dict[str, Any]] = None,
+) -> Any:
+    """Retry an action with exponential backoff and structured logging."""
+
+    settings = get_settings()
+    if max_attempts is None:
+        max_attempts = int(settings.get("MAX_RETRIES", 3))
+    max_attempts = max(1, max_attempts)
+    context = log_context or {}
+
+    for attempt in range(1, max_attempts + 1):
+        try:
+            return action()
+        except exceptions as exc:
+            is_last_attempt = attempt >= max_attempts
+            delay = min(base_delay * (2 ** (attempt - 1)), max_delay)
+            event = "retry_failed" if is_last_attempt else "retrying"
+            log_payload = {
+                "event": event,
+                "action": action_name,
+                "attempt": attempt,
+                "max_attempts": max_attempts,
+                "error": str(exc),
+                "delay_seconds": 0 if is_last_attempt else delay,
+            }
+            if context:
+                log_payload["context"] = context
+            print(json.dumps(log_payload, sort_keys=True))
+            if is_last_attempt:
+                raise
+            time.sleep(delay)
+    raise RuntimeError(f"Retry loop failed for {action_name}")
+=======
 class SimpleRateLimiter:
     """Simple rolling-window rate limiter."""
 
@@ -247,14 +287,23 @@ class FreeScoutClient:
         self, conversation_id: int, text: str, imported: bool = True
     ) -> Dict[str, Any]:
         payload: Dict[str, Any] = {"type": "customer", "text": text, "imported": imported}
-        resp = requests.post(
-            f"{self.base_url}/api/conversations/{conversation_id}/threads",
-            headers=self._headers(),
-            json=payload,
-            timeout=self.timeout,
+
+        def _request() -> Dict[str, Any]:
+            resp = requests.post(
+                f"{self.base_url}/api/conversations/{conversation_id}/threads",
+                headers=self._headers(),
+                json=payload,
+                timeout=self.timeout,
+            )
+            resp.raise_for_status()
+            return resp.json()
+
+        return retry_request(
+            _request,
+            action_name="freescout.add_customer_thread",
+            exceptions=(requests.RequestException,),
+            log_context={"conversation_id": conversation_id},
         )
-        resp.raise_for_status()
-        return resp.json()
 
     def create_conversation(
         self,
@@ -306,14 +355,22 @@ class FreeScoutClient:
         if serialized:
             payload["customFields"] = serialized
 
-        resp = requests.post(
-            f"{self.base_url}/api/conversations",
-            headers=self._headers(),
-            json=payload,
-            timeout=self.timeout,
+        def _request() -> Dict[str, Any]:
+            resp = requests.post(
+                f"{self.base_url}/api/conversations",
+                headers=self._headers(),
+                json=payload,
+                timeout=self.timeout,
+            )
+            resp.raise_for_status()
+            return resp.json()
+
+        return retry_request(
+            _request,
+            action_name="freescout.create_conversation",
+            exceptions=(requests.RequestException,),
+            log_context={"mailbox_id": mailbox_id},
         )
-        resp.raise_for_status()
-        return resp.json()
 
     def add_internal_note(
         self, conversation_id: int, text: str, user_id: Optional[int] = None
@@ -353,14 +410,22 @@ class FreeScoutClient:
             payload["user_id"] = user_id
         if draft:
             payload["draft"] = True
-        resp = requests.post(
-            f"{self.base_url}/api/conversations/{conversation_id}/threads",
-            headers=self._headers(),
-            json=payload,
-            timeout=self.timeout,
+        def _request() -> Dict[str, Any]:
+            resp = requests.post(
+                f"{self.base_url}/api/conversations/{conversation_id}/threads",
+                headers=self._headers(),
+                json=payload,
+                timeout=self.timeout,
+            )
+            resp.raise_for_status()
+            return resp.json()
+
+        return retry_request(
+            _request,
+            action_name="freescout.create_agent_draft_reply",
+            exceptions=(requests.RequestException,),
+            log_context={"conversation_id": conversation_id},
         )
-        resp.raise_for_status()
-        return resp.json()
 
     def update_thread(
         self,
@@ -370,14 +435,25 @@ class FreeScoutClient:
         draft: bool = True,
     ) -> Dict[str, Any]:
         payload: Dict[str, Any] = {"text": text, "draft": draft}
-        resp = requests.put(
-            f"{self.base_url}/api/conversations/{conversation_id}/threads/{thread_id}",
-            headers=self._headers(),
-            json=payload,
-            timeout=self.timeout,
+        def _request() -> Dict[str, Any]:
+            resp = requests.put(
+                f"{self.base_url}/api/conversations/{conversation_id}/threads/{thread_id}",
+                headers=self._headers(),
+                json=payload,
+                timeout=self.timeout,
+            )
+            resp.raise_for_status()
+            return resp.json()
+
+        return retry_request(
+            _request,
+            action_name="freescout.update_thread",
+            exceptions=(requests.RequestException,),
+            log_context={
+                "conversation_id": conversation_id,
+                "thread_id": thread_id,
+            },
         )
-        resp.raise_for_status()
-        return resp.json()
 
 
 # ----- Gmail helpers -----
@@ -481,37 +557,29 @@ def create_base64_message(sender, to, subject, body):
 def ensure_label(service, label_name: str) -> Optional[str]:
     """Return an existing label's ID, creating it when missing."""
 
-    try:
-        labels = (
-            service.users().labels().list(userId="me", fields="labels/id,labels/name").execute()
-        ).get("labels", [])
-        for label in labels:
-            if label.get("name") == label_name:
-                return label.get("id")
+    labels = (
+        service.users().labels().list(userId="me", fields="labels/id,labels/name").execute()
+    ).get("labels", [])
+    for label in labels:
+        if label.get("name") == label_name:
+            return label.get("id")
 
-        body = {
-            "name": label_name,
-            "labelListVisibility": "labelShow",
-            "messageListVisibility": "show",
-        }
-        created = service.users().labels().create(userId="me", body=body).execute()
-        return created.get("id")
-    except HttpError as exc:
-        print(f"Error ensuring label '{label_name}': {exc}")
-        return None
+    body = {
+        "name": label_name,
+        "labelListVisibility": "labelShow",
+        "messageListVisibility": "show",
+    }
+    created = service.users().labels().create(userId="me", body=body).execute()
+    return created.get("id")
 
 
 def apply_label_to_thread(service, thread_id: str, label_id: str) -> bool:
     """Add a label to a thread; return True on success."""
 
-    try:
-        service.users().threads().modify(
-            userId="me", id=thread_id, body={"addLabelIds": [label_id]}
-        ).execute()
-        return True
-    except HttpError as exc:
-        print(f"Failed to apply label to thread {thread_id}: {exc}")
-        return False
+    service.users().threads().modify(
+        userId="me", id=thread_id, body={"addLabelIds": [label_id]}
+    ).execute()
+    return True
 
 
 def is_promotional_or_spam(message, body_text):
