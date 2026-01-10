@@ -6,7 +6,7 @@ import time
 from email.mime.text import MIMEText
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Callable
 
 import requests
 import yaml
@@ -18,6 +18,7 @@ from openai import OpenAI
 
 
 CONFIG_PATH = Path(__file__).with_name("config.yaml")
+_LLM_LAST_CALL = 0.0
 
 
 @lru_cache(maxsize=1)
@@ -34,6 +35,7 @@ def _load_settings() -> Dict[str, Any]:
         "MAX_DRAFTS": cfg.get("limits", {}).get("max_drafts", 100),
         "CRITIC_THRESHOLD": cfg["thresholds"]["critic_threshold"],
         "MAX_RETRIES": cfg["thresholds"]["max_retries"],
+        "RETRY_BASE_DELAY": cfg["thresholds"].get("retry_base_delay", 1.0),
         "GMAIL_TOKEN_FILE": cfg["gmail"]["token_file"],
         "HTTP_TIMEOUT": cfg.get("http", {}).get("timeout", 15),
         "OPENAI_API_KEY": os.getenv(cfg["openai"]["api_key_env"]),
@@ -43,6 +45,10 @@ def _load_settings() -> Dict[str, Any]:
         "DRAFT_SYSTEM_MSG": cfg["openai"].get("draft_system_message", ""),
         "CLASSIFY_MODEL": cfg["openai"]["classify_model"],
         "CLASSIFY_MAX_TOKENS": cfg["openai"].get("classify_max_tokens", 50),
+        "OPENAI_TIMEOUT": cfg["openai"].get(
+            "timeout_seconds", cfg.get("http", {}).get("timeout", 15)
+        ),
+        "OPENAI_RATE_LIMIT_PER_MIN": cfg["openai"].get("rate_limit_per_min"),
         "PROMO_LABELS": {
             "SPAM",
             "CATEGORY_PROMOTIONS",
@@ -87,6 +93,32 @@ def require_openai_api_key() -> str:
             f"Please set your {env_name} environment variable before calling OpenAI helpers."
         )
     return api_key
+
+
+def _apply_llm_rate_limit(settings: Dict[str, Any]) -> None:
+    rate_limit = settings.get("OPENAI_RATE_LIMIT_PER_MIN")
+    if not rate_limit:
+        return
+    try:
+        rate_limit = float(rate_limit)
+    except (TypeError, ValueError):
+        return
+    if rate_limit <= 0:
+        return
+    global _LLM_LAST_CALL
+    min_interval = 60.0 / rate_limit
+    now = time.monotonic()
+    elapsed = now - _LLM_LAST_CALL
+    if elapsed < min_interval:
+        time.sleep(min_interval - elapsed)
+    _LLM_LAST_CALL = time.monotonic()
+
+
+def _openai_client(settings: Dict[str, Any]) -> OpenAI:
+    return OpenAI(
+        api_key=require_openai_api_key(),
+        timeout=settings.get("OPENAI_TIMEOUT"),
+    )
 
 
 def require_ticket_settings() -> tuple[str, str]:
@@ -436,17 +468,32 @@ def ensure_label(service, label_name: str) -> Optional[str]:
         return None
 
 
-def apply_label_to_thread(service, thread_id: str, label_id: str) -> bool:
+def apply_label_to_thread(
+    service,
+    thread_id: str,
+    label_id: str,
+    *,
+    retries: int = 1,
+    base_delay: float = 1.0,
+    on_retry: Optional[Callable[[int, float, Exception], None]] = None,
+) -> bool:
     """Add a label to a thread; return True on success."""
 
-    try:
-        service.users().threads().modify(
-            userId="me", id=thread_id, body={"addLabelIds": [label_id]}
-        ).execute()
-        return True
-    except HttpError as exc:
-        print(f"Failed to apply label to thread {thread_id}: {exc}")
-        return False
+    retries = max(1, int(retries))
+    for attempt in range(1, retries + 1):
+        try:
+            service.users().threads().modify(
+                userId="me", id=thread_id, body={"addLabelIds": [label_id]}
+            ).execute()
+            return True
+        except HttpError as exc:
+            if attempt >= retries:
+                return False
+            delay = base_delay * (2 ** (attempt - 1))
+            if on_retry:
+                on_retry(attempt, delay, exc)
+            time.sleep(delay)
+    return False
 
 
 def is_promotional_or_spam(message, body_text):
@@ -463,13 +510,15 @@ def is_promotional_or_spam(message, body_text):
 
 def critic_email(draft, original):
     """Self-grade a draft reply using GPT-4.1."""
-    client = OpenAI(api_key=require_openai_api_key())
+    settings = _load_settings()
+    client = _openai_client(settings)
     default_rating = {
         "score": 0,
         "feedback": "Critic check failed; please review manually.",
     }
 
     try:
+        _apply_llm_rate_limit(settings)
         resp = client.chat.completions.create(
             model=_load_settings()["CLASSIFY_MODEL"],
             messages=[
@@ -501,7 +550,7 @@ def generate_ai_reply(subject, sender, snippet_or_body, email_type):
     Generate a draft reply using OpenAI's new library (>=1.0.0).
     """
     settings = get_settings()
-    client = OpenAI(api_key=require_openai_api_key())
+    client = _openai_client(settings)
 
     instructions = (
         f"[Email type: {email_type}]\n\n"
@@ -512,6 +561,7 @@ def generate_ai_reply(subject, sender, snippet_or_body, email_type):
         "Please write a friendly and professional draft reply addressing the sender's query."
     )
     try:
+        _apply_llm_rate_limit(settings)
         response = client.chat.completions.create(
             model=settings["DRAFT_MODEL"],
             messages=[
@@ -538,8 +588,9 @@ def generate_ai_reply(subject, sender, snippet_or_body, email_type):
 def classify_email(text):
     """Classify an email and return a dict with type, importance, and reasoning."""
     settings = _load_settings()
-    client = OpenAI(api_key=require_openai_api_key())
+    client = _openai_client(settings)
     try:
+        _apply_llm_rate_limit(settings)
         resp = client.chat.completions.create(
             model=settings["CLASSIFY_MODEL"],
             messages=[

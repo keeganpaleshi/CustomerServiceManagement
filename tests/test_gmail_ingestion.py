@@ -13,6 +13,8 @@ def _base_settings():
         "FREESCOUT_POLL_INTERVAL": 300,
         "GMAIL_USE_CONSOLE": False,
         "MAX_DRAFTS": 10,
+        "MAX_RETRIES": 2,
+        "RETRY_BASE_DELAY": 0,
         "TICKET_SYSTEM": "none",
         "TICKET_SQLITE_PATH": ":memory:",
         "FREESCOUT_MAILBOX_ID": "mailbox-1",
@@ -174,14 +176,17 @@ class GmailIngestionTests(unittest.TestCase):
 
         with patch.object(gmail_bot, "_TICKET_LABEL_ID", None), \
             patch.object(gmail_bot, "extract_plain_text", return_value="hello"), \
-            patch.object(gmail_bot, "is_promotional_or_spam", return_value=False):
+            patch.object(gmail_bot, "is_promotional_or_spam", return_value=False), \
+            patch.object(gmail_bot, "get_settings", return_value=_base_settings()), \
+            patch.object(gmail_bot.time, "sleep"):
             result = gmail_bot.process_gmail_message(message, store, freescout, Mock())
 
         self.assertEqual(result.status, "failed_retryable")
         self.assertEqual(result.reason, "append failed: boom")
         self.assertEqual(result.freescout_conversation_id, "conv-789")
         store.processed_success.assert_called_once_with("msg-5")
-        freescout.add_customer_thread.assert_called_once_with("conv-789", "hello", imported=True)
+        self.assertEqual(freescout.add_customer_thread.call_count, 2)
+        freescout.add_customer_thread.assert_called_with("conv-789", "hello", imported=True)
         freescout.create_conversation.assert_not_called()
         store.mark_success.assert_not_called()
         store.mark_failed.assert_called_once_with("msg-5", "thread-5", "boom", "conv-789")
@@ -269,14 +274,15 @@ class GmailIngestionTests(unittest.TestCase):
         with patch.object(gmail_bot, "_TICKET_LABEL_ID", None), \
             patch.object(gmail_bot, "extract_plain_text", return_value="hello"), \
             patch.object(gmail_bot, "is_promotional_or_spam", return_value=False), \
-            patch.object(gmail_bot, "get_settings", return_value=_base_settings()):
+            patch.object(gmail_bot, "get_settings", return_value=_base_settings()), \
+            patch.object(gmail_bot.time, "sleep"):
             result = gmail_bot.process_gmail_message(message, store, freescout, Mock())
 
         self.assertEqual(result.status, "failed_retryable")
         self.assertEqual(result.reason, "ticket creation failed: boom")
         self.assertIsNone(result.freescout_conversation_id)
         store.processed_success.assert_called_once_with("msg-6")
-        freescout.create_conversation.assert_called_once()
+        self.assertEqual(freescout.create_conversation.call_count, 2)
         freescout.add_customer_thread.assert_not_called()
         store.upsert_thread_map.assert_not_called()
         store.mark_success.assert_not_called()

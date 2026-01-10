@@ -3,9 +3,10 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from email.utils import parseaddr
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional, Tuple, Callable, Any
 
 import requests
+from googleapiclient.errors import HttpError
 
 from utils import (
     classify_email,
@@ -54,6 +55,11 @@ def parse_args(settings: Optional[Dict] = None):
         default=settings["GMAIL_USE_CONSOLE"],
         help="Use console-based OAuth (paste auth code) instead of opening a browser",
     )
+    parser.add_argument(
+        "--status",
+        action="store_true",
+        help="Print database counts and last 10 failures",
+    )
     return parser.parse_args()
 
 
@@ -62,11 +68,46 @@ TICKET_LABEL_NAME = "Ticketed"
 _TICKET_LABEL_ID: Optional[str] = None
 
 
+def log_event(event: str, **fields: Any) -> None:
+    parts = [f"event={event}"]
+    for key, value in fields.items():
+        parts.append(f"{key}={value}")
+    print(" ".join(parts))
+
+
+def _retry_with_backoff(
+    operation: str,
+    func: Callable[[], Any],
+    *,
+    max_retries: int,
+    base_delay: float = 1.0,
+    retry_exceptions: tuple[type[BaseException], ...] = (requests.RequestException, HttpError),
+) -> Any:
+    max_retries = max(1, int(max_retries))
+    for attempt in range(1, max_retries + 1):
+        try:
+            return func()
+        except retry_exceptions as exc:
+            if attempt >= max_retries:
+                raise
+            delay = base_delay * (2 ** (attempt - 1))
+            log_event(
+                "retry",
+                operation=operation,
+                attempt=attempt,
+                delay=f"{delay:.1f}s",
+                error=str(exc),
+            )
+            time.sleep(delay)
+    return None
+
+
 @dataclass(frozen=True)
 class ProcessResult:
     status: str
     reason: str
     freescout_conversation_id: Optional[str] = None
+    drafted: bool = False
 
 
 ProcessResult.SKIPPED_ALREADY_SUCCESS = ProcessResult(
@@ -97,17 +138,17 @@ def process_gmail_message(
 
     if not message_id:
         reason = "missing message id"
-        print("Skipping message without id")
+        log_event("skip", reason=reason)
         return ProcessResult(status="failed_retryable", reason=reason)
 
     if store.processed_success(message_id) is True:
-        print(f"{message_id[:8]}… skipped (already processed)")
+        log_event("skip", message_id=message_id, reason="already processed")
         return ProcessResult(
             status="skipped_already_success",
             reason="already processed",
         )
     if store.processed_filtered(message_id) is True:
-        print(f"{message_id[:8]}… skipped (already filtered)")
+        log_event("skip", message_id=message_id, reason="already filtered")
         return ProcessResult.FILTERED
     try:
         full_message = message
@@ -123,7 +164,7 @@ def process_gmail_message(
         if not thread_id:
             reason = "missing thread id"
             store.mark_failed(message_id, thread_id, reason)
-            print(f"{message_id[:8]}… error: missing thread id")
+            log_event("error", message_id=message_id, reason=reason)
             return ProcessResult(status="failed_permanent", reason=reason)
 
         def get_header_value(
@@ -148,27 +189,41 @@ def process_gmail_message(
         filtered, reason = should_filter_message(message_with_body)
         if filtered:
             store.mark_filtered(message_id, thread_id, reason=reason)
-            print(f"{message_id[:8]}… {reason}")
+            log_event("filtered", message_id=message_id, reason=reason)
             return ProcessResult(status="filtered", reason=reason)
 
         settings = get_settings()
+        max_retries = settings.get("MAX_RETRIES", 2)
+        base_delay = settings.get("RETRY_BASE_DELAY", 1.0)
         conv_id = store.get_conversation_id_for_thread(thread_id)
         if conv_id:
             if not freescout:
                 reason = "freescout disabled"
                 store.mark_failed(message_id, thread_id, reason, conv_id)
-                print(f"{message_id[:8]}… failed: freescout disabled")
+                log_event("error", message_id=message_id, reason=reason)
                 return ProcessResult(
                     status="failed_retryable",
                     reason=reason,
                     freescout_conversation_id=conv_id,
                 )
             try:
-                freescout.add_customer_thread(conv_id, body_text, imported=True)
+                _retry_with_backoff(
+                    "freescout_append",
+                    lambda: freescout.add_customer_thread(
+                        conv_id, body_text, imported=True
+                    ),
+                    max_retries=max_retries,
+                    base_delay=base_delay,
+                )
             except requests.RequestException as exc:
                 reason = f"append failed: {exc}"
                 store.mark_failed(message_id, thread_id, str(exc), conv_id)
-                print(f"{message_id[:8]}… error appending to {conv_id}: {exc}")
+                log_event(
+                    "error",
+                    message_id=message_id,
+                    conversation_id=conv_id,
+                    reason=reason,
+                )
                 return ProcessResult(
                     status="failed_retryable",
                     reason=reason,
@@ -186,58 +241,85 @@ def process_gmail_message(
                 freescout,
             )
             if _TICKET_LABEL_ID:
-                apply_label_to_thread(gmail, thread_id, _TICKET_LABEL_ID)
-            _post_write_draft_reply(
+                applied = apply_label_to_thread(
+                    gmail,
+                    thread_id,
+                    _TICKET_LABEL_ID,
+                    retries=max_retries,
+                    base_delay=base_delay,
+                    on_retry=lambda attempt, delay, exc: log_event(
+                        "retry",
+                        operation="gmail_apply_label",
+                        attempt=attempt,
+                        delay=f"{delay:.1f}s",
+                        error=str(exc),
+                    ),
+                )
+                if not applied:
+                    log_event(
+                        "error",
+                        message_id=message_id,
+                        reason="gmail label apply failed",
+                    )
+            drafted = _post_write_draft_reply(
                 freescout,
                 conv_id,
                 subject,
                 sender,
                 body_text,
+                max_retries=max_retries,
+                base_delay=base_delay,
             )
             return ProcessResult(
                 status="freescout_appended",
                 reason="append success",
                 freescout_conversation_id=conv_id,
+                drafted=drafted,
             )
 
         if not freescout:
             reason = "freescout disabled"
             store.mark_failed(message_id, thread_id, reason)
-            print(f"{message_id[:8]}… failed: freescout disabled")
+            log_event("error", message_id=message_id, reason=reason)
             return ProcessResult(status="failed_retryable", reason=reason)
 
         mailbox_id = settings.get("FREESCOUT_MAILBOX_ID")
         if not mailbox_id:
             reason = "freescout mailbox missing"
             store.mark_failed(message_id, thread_id, reason)
-            print(f"{message_id[:8]}… error: freescout mailbox missing")
+            log_event("error", message_id=message_id, reason=reason)
             return ProcessResult(status="failed_permanent", reason=reason)
 
         gmail_thread_field = settings.get("FREESCOUT_GMAIL_THREAD_FIELD_ID")
         gmail_message_field = settings.get("FREESCOUT_GMAIL_MESSAGE_FIELD_ID")
 
         try:
-            ticket = freescout.create_conversation(
-                subject,
-                sender,
-                body_text,
-                mailbox_id,
-                thread_id=thread_id,
-                message_id=message_id,
-                gmail_thread_field=gmail_thread_field,
-                gmail_message_field=gmail_message_field,
+            ticket = _retry_with_backoff(
+                "freescout_create",
+                lambda: freescout.create_conversation(
+                    subject,
+                    sender,
+                    body_text,
+                    mailbox_id,
+                    thread_id=thread_id,
+                    message_id=message_id,
+                    gmail_thread_field=gmail_thread_field,
+                    gmail_message_field=gmail_message_field,
+                ),
+                max_retries=max_retries,
+                base_delay=base_delay,
             )
         except requests.RequestException as exc:
             reason = f"ticket creation failed: {exc}"
             store.mark_failed(message_id, thread_id, str(exc))
-            print(f"{message_id[:8]}… error: ticket creation failed: {exc}")
+            log_event("error", message_id=message_id, reason=reason)
             return ProcessResult(status="failed_retryable", reason=reason)
 
         conv_id = _extract_conversation_id(ticket)
         if not ticket or not conv_id:
             reason = "ticket creation failed"
             store.mark_failed(message_id, thread_id, reason, conv_id)
-            print(f"{message_id[:8]}… error: ticket creation failed")
+            log_event("error", message_id=message_id, reason=reason)
             return ProcessResult(
                 status="failed_retryable",
                 reason=reason,
@@ -256,23 +338,45 @@ def process_gmail_message(
             freescout,
         )
         if _TICKET_LABEL_ID:
-            apply_label_to_thread(gmail, thread_id, _TICKET_LABEL_ID)
-        _post_write_draft_reply(
+            applied = apply_label_to_thread(
+                gmail,
+                thread_id,
+                _TICKET_LABEL_ID,
+                retries=max_retries,
+                base_delay=base_delay,
+                on_retry=lambda attempt, delay, exc: log_event(
+                    "retry",
+                    operation="gmail_apply_label",
+                    attempt=attempt,
+                    delay=f"{delay:.1f}s",
+                    error=str(exc),
+                ),
+            )
+            if not applied:
+                log_event(
+                    "error",
+                    message_id=message_id,
+                    reason="gmail label apply failed",
+                )
+        drafted = _post_write_draft_reply(
             freescout,
             conv_id,
             subject,
             sender,
             body_text,
+            max_retries=max_retries,
+            base_delay=base_delay,
         )
         return ProcessResult(
             status="freescout_created",
             reason="create success",
             freescout_conversation_id=conv_id,
+            drafted=drafted,
         )
     except Exception as exc:
         reason = f"unexpected error: {exc}"
         store.mark_failed(message_id, thread_id, str(exc))
-        print(f"{message_id[:8]}… error: {exc}")
+        log_event("error", message_id=message_id, reason=str(exc))
         return ProcessResult(status="failed_retryable", reason=reason)
 
 
@@ -296,7 +400,7 @@ def poll_ticket_updates(limit: int = 10, timeout: Optional[int] = None):
         resp.raise_for_status()
         return resp.json().get("data", [])
     except requests.RequestException as e:
-        print(f"Error polling FreeScout: {e}")
+        log_event("error", operation="poll_freescout", reason=str(e))
         return []
 
 
@@ -389,16 +493,28 @@ def process_conversation(
 
     assignee = actions_cfg.get("assign_to_user_id")
 
+    max_retries = settings.get("MAX_RETRIES", 2)
+    base_delay = settings.get("RETRY_BASE_DELAY", 1.0)
+
     try:
-        freescout_client.update_conversation(
-            conversation_id,
-            priority=priority_value,
-            assignee=assignee,
-            tags=tags,
-            custom_fields=custom_fields,
+        _retry_with_backoff(
+            "freescout_update_conversation",
+            lambda: freescout_client.update_conversation(
+                conversation_id,
+                priority=priority_value,
+                assignee=assignee,
+                tags=tags,
+                custom_fields=custom_fields,
+            ),
+            max_retries=max_retries,
+            base_delay=base_delay,
         )
     except requests.RequestException as exc:
-        print(f"Failed to update conversation {conversation_id}: {exc}")
+        log_event(
+            "error",
+            conversation_id=conversation_id,
+            reason=f"update conversation failed: {exc}",
+        )
 
     note_lines = [
         f"AI classification: {cls.get('type', 'unknown')}",
@@ -409,9 +525,20 @@ def process_conversation(
 
     if actions_cfg.get("post_internal_notes", True):
         try:
-            freescout_client.add_internal_note(conversation_id, "\n".join(note_lines))
+            _retry_with_backoff(
+                "freescout_internal_note",
+                lambda: freescout_client.add_internal_note(
+                    conversation_id, "\n".join(note_lines)
+                ),
+                max_retries=max_retries,
+                base_delay=base_delay,
+            )
         except requests.RequestException as exc:
-            print(f"Failed to add internal note to {conversation_id}: {exc}")
+            log_event(
+                "error",
+                conversation_id=conversation_id,
+                reason=f"internal note failed: {exc}",
+            )
 
     return {
         "classification": cls,
@@ -445,14 +572,31 @@ def _post_write_draft_reply(
     subject: str,
     sender: str,
     body_text: str,
-) -> None:
+    *,
+    max_retries: Optional[int] = None,
+    base_delay: Optional[float] = None,
+) -> bool:
     if not client or not conversation_id:
-        return
+        return False
+    settings = get_settings()
+    max_retries = max_retries if max_retries is not None else settings.get("MAX_RETRIES", 2)
+    base_delay = base_delay if base_delay is not None else settings.get("RETRY_BASE_DELAY", 1.0)
     try:
         reply_text = generate_ai_reply(subject, sender, body_text, "customer")
-        client.create_agent_draft_reply(conversation_id, reply_text)
+        _retry_with_backoff(
+            "freescout_create_draft",
+            lambda: client.create_agent_draft_reply(conversation_id, reply_text),
+            max_retries=max_retries,
+            base_delay=base_delay,
+        )
+        return True
     except requests.RequestException as exc:
-        print(f"Failed to add draft reply to {conversation_id}: {exc}")
+        log_event(
+            "error",
+            conversation_id=conversation_id,
+            reason=f"draft reply failed: {exc}",
+        )
+        return False
 
 
 def fetch_recent_conversations(
@@ -487,7 +631,7 @@ def fetch_recent_conversations(
             return data
         return []
     except requests.RequestException as e:
-        print(f"Error polling FreeScout: {e}")
+        log_event("error", operation="poll_freescout", reason=str(e))
         return []
 
 
@@ -506,11 +650,18 @@ def process_freescout_conversation(
     conv_id = conversation.get("id")
     if not conv_id:
         return
+    actions_cfg = settings.get("FREESCOUT_ACTIONS", {})
+    max_retries = settings.get("MAX_RETRIES", 2)
+    base_delay = settings.get("RETRY_BASE_DELAY", 1.0)
 
     try:
         details = client.get_conversation(conv_id)
     except requests.RequestException as exc:
-        print(f"Failed to fetch conversation {conv_id}: {exc}")
+        log_event(
+            "error",
+            conversation_id=conv_id,
+            reason=f"fetch conversation failed: {exc}",
+        )
         return
 
     subject = details.get("subject") or conversation.get("subject") or "(no subject)"
@@ -536,15 +687,24 @@ def process_freescout_conversation(
     assignee = actions_cfg.get("assign_to_user_id")
 
     try:
-        client.update_conversation(
-            conv_id,
-            priority=priority_value,
-            assignee=assignee,
-            tags=tags,
-            custom_fields=custom_fields,
+        _retry_with_backoff(
+            "freescout_update_conversation",
+            lambda: client.update_conversation(
+                conv_id,
+                priority=priority_value,
+                assignee=assignee,
+                tags=tags,
+                custom_fields=custom_fields,
+            ),
+            max_retries=max_retries,
+            base_delay=base_delay,
         )
     except requests.RequestException as exc:
-        print(f"Failed to update conversation {conv_id}: {exc}")
+        log_event(
+            "error",
+            conversation_id=conv_id,
+            reason=f"update conversation failed: {exc}",
+        )
 
     note_lines = [
         f"AI classification: {cls.get('type', 'unknown')}",
@@ -583,9 +743,18 @@ def process_freescout_conversation(
                 latest_text,
                 cls.get("type", "other"),
             )
-            client.add_suggested_reply(conv_id, suggestion)
+            _retry_with_backoff(
+                "freescout_add_suggested_reply",
+                lambda: client.add_suggested_reply(conv_id, suggestion),
+                max_retries=max_retries,
+                base_delay=base_delay,
+            )
         except requests.RequestException as exc:
-            print(f"Failed to add suggested reply to {conv_id}: {exc}")
+            log_event(
+                "error",
+                conversation_id=conv_id,
+                reason=f"suggested reply failed: {exc}",
+            )
 
 
 def poll_freescout_updates(
@@ -597,7 +766,7 @@ def poll_freescout_updates(
     http_timeout = timeout if timeout is not None else settings["HTTP_TIMEOUT"]
     client = _build_freescout_client(timeout=http_timeout)
     if not client:
-        print("FreeScout polling skipped because ticket system is not set to freescout.")
+        log_event("skip", reason="freescout polling disabled")
         return
 
     since = datetime.utcnow() - timedelta(minutes=5)
@@ -636,6 +805,19 @@ def main():
     settings = get_settings()
     args = parse_args(settings)
 
+    sqlite_path = settings.get("TICKET_SQLITE_PATH") or "./csm.sqlite"
+    if args.status:
+        ticket_store = TicketStore(sqlite_path)
+        counts = ticket_store.get_status_counts()
+        log_event("db_status", **counts)
+        failures = ticket_store.get_recent_failures(limit=10)
+        if not failures:
+            log_event("db_failures", count=0)
+        else:
+            for failure in failures:
+                log_event("db_failure", **failure)
+        return
+
     if args.poll_freescout:
         poll_freescout_updates(
             interval=args.poll_interval,
@@ -643,7 +825,6 @@ def main():
         )
         return
 
-    sqlite_path = settings.get("TICKET_SQLITE_PATH") or "./csm.sqlite"
     ticket_store = TicketStore(sqlite_path)
     svc = get_gmail_service(use_console=args.console_auth)
     ticket_label_id = None
@@ -653,41 +834,36 @@ def main():
     _TICKET_LABEL_ID = ticket_label_id
     client = _build_freescout_client(timeout=args.timeout)
 
-    skipped_already_processed = 0
-    created_conversations = 0
-    appended_threads = 0
-    filtered_terminal = 0
-    failed_retryable = 0
-    failed_permanent = 0
+    counters = {
+        "processed": 0,
+        "created": 0,
+        "appended": 0,
+        "drafted": 0,
+        "filtered": 0,
+        "failed": 0,
+    }
 
     for ref in fetch_all_unread_messages(svc, query=args.gmail_query)[
         : settings["MAX_DRAFTS"]
     ]:
         result = process_gmail_message(ref, ticket_store, client, svc)
-        if result.status == "skipped_already_success":
-            skipped_already_processed += 1
-        elif result.status == "filtered":
-            filtered_terminal += 1
+        counters["processed"] += 1
+        if result.status == "filtered":
+            counters["filtered"] += 1
         elif result.status == "freescout_appended":
-            appended_threads += 1
+            counters["appended"] += 1
         elif result.status == "freescout_created":
-            created_conversations += 1
-        elif result.status == "failed_retryable":
-            failed_retryable += 1
-        elif result.status == "failed_permanent":
-            failed_permanent += 1
+            counters["created"] += 1
+        elif result.status in {"failed_retryable", "failed_permanent"}:
+            counters["failed"] += 1
+        if result.drafted:
+            counters["drafted"] += 1
 
     updates = poll_ticket_updates()
     if updates:
-        print(f"Fetched {len(updates)} ticket updates from FreeScout")
+        log_event("freescout_updates", count=len(updates))
 
-    print("Ingestion summary:")
-    print(f"  skipped_already_processed: {skipped_already_processed}")
-    print(f"  created_conversations: {created_conversations}")
-    print(f"  appended_threads: {appended_threads}")
-    print(f"  filtered_terminal: {filtered_terminal}")
-    print(f"  failed_retryable: {failed_retryable}")
-    print(f"  failed_permanent: {failed_permanent}")
+    log_event("ingestion_summary", **counters)
 
 
 if __name__ == "__main__":

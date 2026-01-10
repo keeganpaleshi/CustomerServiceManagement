@@ -255,6 +255,69 @@ class TicketStore:
         except Exception:
             pass
 
+    def get_status_counts(self) -> dict:
+        counts = {
+            "processed": 0,
+            "created": 0,
+            "appended": 0,
+            "filtered": 0,
+            "failed": 0,
+        }
+        cur = self._conn.execute("SELECT COUNT(*) FROM processed_messages")
+        counts["processed"] = cur.fetchone()[0]
+        cur = self._conn.execute(
+            "SELECT COUNT(*) FROM processed_messages WHERE status = 'filtered'"
+        )
+        counts["filtered"] = cur.fetchone()[0]
+        cur = self._conn.execute(
+            "SELECT COUNT(*) FROM processed_messages WHERE status = 'failed'"
+        )
+        counts["failed"] = cur.fetchone()[0]
+        cur = self._conn.execute(
+            """
+            SELECT action, COUNT(*)
+            FROM processed_messages
+            WHERE status = 'success' AND action IN ('create', 'append')
+            GROUP BY action
+            """
+        )
+        for action, count in cur.fetchall():
+            if action == "create":
+                counts["created"] = count
+            elif action == "append":
+                counts["appended"] = count
+        return counts
+
+    def get_recent_failures(self, limit: int = 10) -> list[dict]:
+        cur = self._conn.execute(
+            """
+            SELECT
+                gmail_message_id,
+                gmail_thread_id,
+                freescout_conversation_id,
+                error,
+                processed_at
+            FROM processed_messages
+            WHERE status = 'failed'
+            ORDER BY processed_at DESC
+            LIMIT ?
+            """,
+            (limit,),
+        )
+        rows = cur.fetchall()
+        failures = []
+        for row in rows:
+            failures.append(
+                {
+                    "gmail_message_id": row[0],
+                    "gmail_thread_id": row[1],
+                    "freescout_conversation_id": row[2],
+                    "error": row[3],
+                    "processed_at": row[4],
+                }
+            )
+        return failures
+
     def __del__(self) -> None:  # pragma: no cover - best-effort cleanup
         try:
             self.close()
