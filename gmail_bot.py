@@ -21,6 +21,7 @@ from utils import (
     thread_has_draft,
     extract_plain_text,
     require_ticket_settings,
+    importance_to_bucket,
 )
 from storage import TicketStore
 
@@ -310,8 +311,8 @@ def _extract_latest_thread_text(conversation: dict) -> str:
     return latest.get("text", "") or latest.get("body", "")
 
 
-def _build_tags(cls: dict, high_priority: bool) -> list[str]:
-    tags = [cls.get("type", "other")]
+def _build_tags(cls: dict, bucket: str, high_priority: bool) -> list[str]:
+    tags = [cls.get("type", "other"), bucket]
     if high_priority:
         tags.append("high-priority")
     return tags
@@ -411,10 +412,11 @@ def process_freescout_conversation(
     cls = classify_email(f"Subject:{subject}\n\n{latest_text}")
     importance = cls.get("importance", 0)
     high_priority = importance >= actions_cfg.get("priority_high_threshold", 8)
+    bucket = importance_to_bucket(importance)
 
     tags = None
     if actions_cfg.get("apply_tags", True):
-        tags = _build_tags(cls, high_priority)
+        tags = _build_tags(cls, bucket, high_priority)
 
     custom_fields = _prepare_custom_fields(cls, settings)
     if not custom_fields:
@@ -422,7 +424,7 @@ def process_freescout_conversation(
 
     priority_value = None
     if actions_cfg.get("update_priority", True):
-        priority_value = "urgent" if high_priority else "normal"
+        priority_value = bucket
 
     assignee = actions_cfg.get("assign_to_user_id")
 
