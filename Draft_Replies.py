@@ -76,7 +76,9 @@ def generate_ai_reply(subject, sender, snippet_or_body, email_type):
         f"Subject: {subject}\n"
         f"From: {sender}\n"
         f"Email content/snippet: {snippet_or_body}\n\n"
-        "Please write a friendly and professional draft reply addressing the sender's query."
+        "Please write a friendly and professional draft reply addressing the sender's query.\n"
+        "Return only the reply text that can be sent to the customer. "
+        "Do not include analysis, classification labels, or meta commentary."
     )
     try:
         response = client.chat.completions.create(
