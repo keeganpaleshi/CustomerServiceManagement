@@ -153,7 +153,9 @@ app = FastAPI()
 @app.post("/freescout")
 async def freescout(payload: Request, x_webhook_secret: str | None = Header(None)):
     body = await payload.json()
-    message, status = freescout_webhook_handler(body, {"X-Webhook-Secret": x_webhook_secret})
+    message, status, _ = freescout_webhook_handler(
+        body, {"X-Webhook-Secret": x_webhook_secret}
+    )
     return message, status
 ```
 

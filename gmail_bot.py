@@ -89,6 +89,12 @@ ProcessResult.FILTERED = ProcessResult(
 )
 
 
+@dataclass(frozen=True)
+class WebhookOutcome:
+    action: str
+    drafted: bool = False
+
+
 def should_filter_message(message: dict) -> Tuple[bool, str]:
     body_text = message.get("body_text", "")
     if is_promotional_or_spam(message, body_text):
@@ -968,27 +974,46 @@ def poll_freescout_updates(
         time.sleep(interval)
 
 
-def freescout_webhook_handler(payload: dict, headers: dict) -> tuple[str, int]:
+def _infer_webhook_outcome(payload: dict) -> WebhookOutcome:
+    event = str(
+        payload.get("event") or payload.get("event_type") or payload.get("type") or ""
+    ).lower()
+    thread_type = str(payload.get("thread_type") or payload.get("thread", "")).lower()
+    is_draft = bool(payload.get("draft")) or "draft" in event or "draft" in thread_type
+    if "filter" in event or payload.get("filtered") is True:
+        return WebhookOutcome(action="filtered", drafted=is_draft)
+    if "conversation" in event and "created" in event:
+        return WebhookOutcome(action="created", drafted=is_draft)
+    if "thread" in event and "created" in event:
+        return WebhookOutcome(action="appended", drafted=is_draft)
+    if ("message" in event or "reply" in event) and "created" in event:
+        return WebhookOutcome(action="appended", drafted=is_draft)
+    return WebhookOutcome(action="processed", drafted=is_draft)
+
+
+def freescout_webhook_handler(
+    payload: dict, headers: dict
+) -> tuple[str, int, Optional[WebhookOutcome]]:
     """Generic webhook handler usable by Flask or FastAPI routes."""
 
     settings = get_settings()
     secret = settings.get("FREESCOUT_WEBHOOK_SECRET", "")
     if secret and headers.get("X-Webhook-Secret") != secret:
-        return "invalid signature", 401
+        return "invalid signature", 401, None
 
     if not payload:
-        return "missing payload", 400
+        return "missing payload", 400, None
 
     conv_id = payload.get("conversation_id") or payload.get("id")
     if not conv_id:
-        return "missing conversation id", 400
+        return "missing conversation id", 400, None
 
     client = _build_freescout_client(timeout=settings["HTTP_TIMEOUT"])
     if not client:
-        return "freescout disabled", 503
+        return "freescout disabled", 503, None
 
     process_freescout_conversation(client, {"id": conv_id}, settings)
-    return "ok", 200
+    return "ok", 200, _infer_webhook_outcome(payload)
 
 
 def main():
