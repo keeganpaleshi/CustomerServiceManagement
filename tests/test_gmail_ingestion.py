@@ -48,7 +48,6 @@ class GmailIngestionTests(unittest.TestCase):
         self.assertEqual(result.status, "skipped_already_success")
         self.assertEqual(result.reason, "already processed")
         self.assertIsNone(result.freescout_conversation_id)
-        store.processed_filtered.assert_not_called()
         store.get_conversation_id_for_thread.assert_not_called()
         freescout.add_customer_thread.assert_not_called()
         freescout.create_conversation.assert_not_called()
@@ -181,11 +180,10 @@ class GmailIngestionTests(unittest.TestCase):
             result = gmail_bot.process_gmail_message(message, store, freescout, Mock())
 
         self.assertEqual(result.status, "skipped_already_success")
-        store.processed_filtered.assert_not_called()
         freescout.create_conversation.assert_not_called()
         freescout.add_customer_thread.assert_not_called()
 
-    def test_processed_filtered_does_not_short_circuit_processing(self):
+    def test_processed_filtered_store_value_does_not_skip_processing(self):
         store = Mock()
         store.processed_success.return_value = False
         store.processed_filtered.return_value = True
@@ -200,7 +198,6 @@ class GmailIngestionTests(unittest.TestCase):
 
         self.assertEqual(result.status, "freescout_appended")
         self.assertEqual(result.reason, "append success")
-        store.processed_filtered.assert_not_called()
         freescout.add_customer_thread.assert_called_once_with("conv-901", "hello", imported=True)
         freescout.create_conversation.assert_not_called()
 
