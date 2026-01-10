@@ -7,7 +7,6 @@ from typing import Dict, Optional, Tuple
 
 import requests
 
-from Draft_Replies import generate_ai_reply
 from utils import (
     classify_email,
     create_base64_message,
@@ -18,8 +17,8 @@ from utils import (
     get_settings,
     FreeScoutClient,
     is_promotional_or_spam,
-    thread_has_draft,
     extract_plain_text,
+    generate_ai_reply,
     require_ticket_settings,
     importance_to_bucket,
 )
