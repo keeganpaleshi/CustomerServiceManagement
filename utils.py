@@ -2,7 +2,6 @@ import base64
 import json
 import logging
 import os
-import pickle
 import re
 import time
 from collections import deque
@@ -14,6 +13,7 @@ from typing import Any, Callable, Dict, Optional, Tuple
 import requests
 import yaml
 from google.auth.transport.requests import Request
+from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 from openai import OpenAI
@@ -539,8 +539,20 @@ def get_gmail_service(
         else settings.get("GMAIL_USE_CONSOLE", False)
     )
     if os.path.exists(token_filename):
-        with open(token_filename, "rb") as t:
-            creds = pickle.load(t)
+        try:
+            with open(token_filename, "r", encoding="utf-8") as t:
+                creds = Credentials.from_authorized_user_info(
+                    json.load(t), settings["SCOPES"]
+                )
+        except (json.JSONDecodeError, ValueError, KeyError) as e:
+            log_event(
+                "gmail_auth",
+                level=logging.WARNING,
+                action="load_credentials",
+                outcome="failed",
+                reason=f"Invalid token file, will re-authenticate: {e}",
+            )
+            creds = None
     if not creds or not creds.valid:
         if creds and creds.expired and creds.refresh_token:
             creds.refresh(Request())
@@ -552,8 +564,18 @@ def get_gmail_service(
                 creds = flow.run_console()
             else:
                 creds = flow.run_local_server(port=0)
-        with open(token_filename, "wb") as t:
-            pickle.dump(creds, t)
+        # Save credentials as JSON instead of pickle for security
+        with open(token_filename, "w", encoding="utf-8") as t:
+            # Convert credentials to JSON-serializable format
+            creds_data = {
+                "token": creds.token,
+                "refresh_token": creds.refresh_token,
+                "token_uri": creds.token_uri,
+                "client_id": creds.client_id,
+                "client_secret": creds.client_secret,
+                "scopes": creds.scopes,
+            }
+            json.dump(creds_data, t, indent=2)
     return build("gmail", "v1", credentials=creds)
 
 

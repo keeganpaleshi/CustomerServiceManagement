@@ -166,24 +166,30 @@ class TicketStore:
     def mark_processing_if_new(
         self, gmail_message_id: str, gmail_thread_id: Optional[str]
     ) -> bool:
-        cur = self._conn.execute(
-            """
-            INSERT INTO processed_messages (
-                gmail_message_id,
-                gmail_thread_id,
-                freescout_conversation_id,
-                status,
-                action,
-                error,
-                processed_at
+        # Use IMMEDIATE transaction to prevent race conditions
+        self._conn.execute("BEGIN IMMEDIATE")
+        try:
+            cur = self._conn.execute(
+                """
+                INSERT INTO processed_messages (
+                    gmail_message_id,
+                    gmail_thread_id,
+                    freescout_conversation_id,
+                    status,
+                    action,
+                    error,
+                    processed_at
+                )
+                VALUES (?, ?, NULL, 'processing', NULL, NULL, CURRENT_TIMESTAMP)
+                ON CONFLICT(gmail_message_id) DO NOTHING
+                """,
+                (gmail_message_id, gmail_thread_id),
             )
-            VALUES (?, ?, NULL, 'processing', NULL, NULL, CURRENT_TIMESTAMP)
-            ON CONFLICT(gmail_message_id) DO NOTHING
-            """,
-            (gmail_message_id, gmail_thread_id),
-        )
-        self._conn.commit()
-        return cur.rowcount == 1
+            self._conn.commit()
+            return cur.rowcount == 1
+        except Exception:
+            self._conn.rollback()
+            raise
 
     def processed_success(self, gmail_message_id: str) -> bool:
         cur = self._conn.execute(

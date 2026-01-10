@@ -1,8 +1,9 @@
 import argparse
 import hashlib
+import hmac
 import time
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from email.utils import parseaddr
 from typing import Dict, Optional, Tuple
 
@@ -68,7 +69,6 @@ def parse_args(settings: Optional[Dict] = None):
 
 # Label used to mark messages that already have a ticket to avoid duplicates
 TICKET_LABEL_NAME = "Ticketed"
-_TICKET_LABEL_ID: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -118,6 +118,7 @@ def process_gmail_message(
     store: TicketStore,
     freescout: Optional[FreeScoutClient],
     gmail,
+    ticket_label_id: Optional[str] = None,
 ) -> ProcessResult:
     message_id = message.get("id", "")
     thread_id: Optional[str] = message.get("threadId")
@@ -275,15 +276,15 @@ def process_gmail_message(
                 settings,
                 freescout,
             )
-            if _TICKET_LABEL_ID:
+            if ticket_label_id:
                 try:
                     retry_request(
                         lambda: apply_label_to_thread(
-                            gmail, thread_id, _TICKET_LABEL_ID
+                            gmail, thread_id, ticket_label_id
                         ),
                         action_name="gmail.apply_label",
                         exceptions=(HttpError,),
-                        log_context={"thread_id": thread_id, "label_id": _TICKET_LABEL_ID},
+                        log_context={"thread_id": thread_id, "label_id": ticket_label_id},
                     )
                 except HttpError as exc:
                     log_event(
@@ -292,7 +293,7 @@ def process_gmail_message(
                         outcome="failed",
                         reason=str(exc),
                         thread_id=thread_id,
-                        label_id=_TICKET_LABEL_ID,
+                        label_id=ticket_label_id,
                     )
             drafted = _post_write_draft_reply(
                 freescout,
@@ -405,13 +406,13 @@ def process_gmail_message(
             settings,
             freescout,
         )
-        if _TICKET_LABEL_ID:
+        if ticket_label_id:
             try:
                 retry_request(
-                    lambda: apply_label_to_thread(gmail, thread_id, _TICKET_LABEL_ID),
+                    lambda: apply_label_to_thread(gmail, thread_id, ticket_label_id),
                     action_name="gmail.apply_label",
                     exceptions=(HttpError,),
-                    log_context={"thread_id": thread_id, "label_id": _TICKET_LABEL_ID},
+                    log_context={"thread_id": thread_id, "label_id": ticket_label_id},
                 )
             except HttpError as exc:
                 log_event(
@@ -420,7 +421,7 @@ def process_gmail_message(
                     outcome="failed",
                     reason=str(exc),
                     thread_id=thread_id,
-                    label_id=_TICKET_LABEL_ID,
+                    label_id=ticket_label_id,
                 )
         drafted = _post_write_draft_reply(
             freescout,
@@ -488,11 +489,8 @@ def process_gmail_message_freescout(
     timeout: int,
 ) -> Optional[ProcessResult]:
     """Deprecated: use process_gmail_message for single-message ingestion."""
-    global _TICKET_LABEL_ID
-    if ticket_label_id is not None:
-        _TICKET_LABEL_ID = ticket_label_id
     _ = timeout
-    return process_gmail_message(ref, ticket_store, client, svc)
+    return process_gmail_message(ref, ticket_store, client, svc, ticket_label_id)
 
 
 def _build_freescout_client(timeout: Optional[int] = None) -> Optional[FreeScoutClient]:
@@ -678,7 +676,7 @@ def _post_write_draft_reply(
         return False
     reply_text = generate_ai_reply(subject, sender, body_text, "customer")
     reply_hash = _hash_draft_text(reply_text)
-    generated_at = datetime.utcnow().isoformat()
+    generated_at = datetime.now(timezone.utc).isoformat()
     existing = store.get_bot_draft(conversation_id)
     if not existing:
         try:
@@ -995,7 +993,7 @@ def poll_freescout_updates(
         )
         return
 
-    since = datetime.utcnow() - timedelta(minutes=5)
+    since = datetime.now(timezone.utc) - timedelta(minutes=5)
     while True:
         try:
             convs = fetch_recent_conversations(
@@ -1003,7 +1001,7 @@ def poll_freescout_updates(
             )
             for conv in convs:
                 process_freescout_conversation(client, conv, settings)
-            since = datetime.utcnow()
+            since = datetime.now(timezone.utc)
             time.sleep(interval)
         except Exception as exc:
             log_event(
@@ -1038,8 +1036,10 @@ def freescout_webhook_handler(
 
     settings = get_settings()
     secret = settings.get("FREESCOUT_WEBHOOK_SECRET", "")
-    if secret and headers.get("X-Webhook-Secret") != secret:
-        return "invalid signature", 401, None
+    if secret:
+        provided_secret = headers.get("X-Webhook-Secret", "")
+        if not hmac.compare_digest(provided_secret, secret):
+            return "invalid signature", 401, None
 
     if not payload:
         return "missing payload", 400, None
@@ -1111,8 +1111,6 @@ def main():
                     reason=str(exc),
                     label_name=TICKET_LABEL_NAME,
                 )
-        global _TICKET_LABEL_ID
-        _TICKET_LABEL_ID = ticket_label_id
         client = _build_freescout_client(timeout=args.timeout)
 
         processed = 0
@@ -1127,7 +1125,7 @@ def main():
             : settings["MAX_MESSAGES_PER_RUN"]
         ]:
             processed += 1
-            result = process_gmail_message(ref, ticket_store, client, svc)
+            result = process_gmail_message(ref, ticket_store, client, svc, ticket_label_id)
             if result.status in {"skipped_already_success", "skipped_already_claimed"}:
                 skipped += 1
             elif result.status == "filtered":
