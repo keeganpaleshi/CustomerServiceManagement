@@ -270,6 +270,27 @@ class FreeScoutClient:
     ) -> Dict[str, Any]:
         return self.add_internal_note(conversation_id, text, user_id=user_id)
 
+    def create_agent_draft_reply(
+        self,
+        conversation_id: int,
+        text: str,
+        user_id: Optional[int] = None,
+        draft: bool = True,
+    ) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {"type": "reply", "text": text}
+        if user_id:
+            payload["user_id"] = user_id
+        if draft:
+            payload["draft"] = True
+        resp = requests.post(
+            f"{self.base_url}/api/conversations/{conversation_id}/threads",
+            headers=self._headers(),
+            json=payload,
+            timeout=self.timeout,
+        )
+        resp.raise_for_status()
+        return resp.json()
+
 
 # ----- Gmail helpers -----
 

@@ -187,6 +187,13 @@ def process_gmail_message(
             )
             if _TICKET_LABEL_ID:
                 apply_label_to_thread(gmail, thread_id, _TICKET_LABEL_ID)
+            _post_write_draft_reply(
+                freescout,
+                conv_id,
+                subject,
+                sender,
+                body_text,
+            )
             return ProcessResult(
                 status="freescout_appended",
                 reason="append success",
@@ -250,6 +257,13 @@ def process_gmail_message(
         )
         if _TICKET_LABEL_ID:
             apply_label_to_thread(gmail, thread_id, _TICKET_LABEL_ID)
+        _post_write_draft_reply(
+            freescout,
+            conv_id,
+            subject,
+            sender,
+            body_text,
+        )
         return ProcessResult(
             status="freescout_created",
             reason="create success",
@@ -423,6 +437,22 @@ def _extract_conversation_id(ticket: Optional[dict]) -> Optional[str]:
         if conv_id:
             return str(conv_id)
     return None
+
+
+def _post_write_draft_reply(
+    client: Optional[FreeScoutClient],
+    conversation_id: Optional[str],
+    subject: str,
+    sender: str,
+    body_text: str,
+) -> None:
+    if not client or not conversation_id:
+        return
+    try:
+        reply_text = generate_ai_reply(subject, sender, body_text, "customer")
+        client.create_agent_draft_reply(conversation_id, reply_text)
+    except requests.RequestException as exc:
+        print(f"Failed to add draft reply to {conversation_id}: {exc}")
 
 
 def fetch_recent_conversations(
