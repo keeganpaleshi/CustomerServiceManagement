@@ -377,10 +377,11 @@ def process_conversation(
     cls = classify_email(f"Subject:{subject}\n\n{latest_text}")
     importance = cls.get("importance", 0)
     high_priority = importance >= actions_cfg.get("priority_high_threshold", 8)
+    bucket = importance_to_bucket(importance)
 
     tags = None
     if actions_cfg.get("apply_tags", True):
-        tags = _build_tags(cls, high_priority)
+        tags = _build_tags(cls, bucket, high_priority)
 
     custom_fields = _prepare_custom_fields(cls, settings)
     if not custom_fields:
@@ -388,7 +389,7 @@ def process_conversation(
 
     priority_value = None
     if actions_cfg.get("update_priority", True):
-        priority_value = "urgent" if high_priority else "normal"
+        priority_value = bucket
 
     assignee = actions_cfg.get("assign_to_user_id")
 
