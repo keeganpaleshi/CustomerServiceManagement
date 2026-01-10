@@ -6,8 +6,12 @@ from typing import Dict, Iterable, Optional, Sequence
 
 import requests
 
-from Draft_Replies import generate_ai_reply
-from utils import FreeScoutClient, get_settings, require_ticket_settings
+from utils import (
+    FreeScoutClient,
+    generate_ai_reply,
+    get_settings,
+    require_ticket_settings,
+)
 
 
 def parse_args(settings: Optional[Dict] = None):
@@ -368,7 +372,7 @@ def main() -> None:
             continue
 
         try:
-            client.add_draft_reply(conv_id, draft)
+            client.create_agent_draft_reply(conv_id, draft)
         except requests.RequestException as exc:
             print(f"Failed to add draft to {conv_id}: {exc}")
             continue
