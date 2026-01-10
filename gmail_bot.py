@@ -1,4 +1,5 @@
 import argparse
+import hashlib
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -189,6 +190,7 @@ def process_gmail_message(
                 apply_label_to_thread(gmail, thread_id, _TICKET_LABEL_ID)
             _post_write_draft_reply(
                 freescout,
+                store,
                 conv_id,
                 subject,
                 sender,
@@ -259,6 +261,7 @@ def process_gmail_message(
             apply_label_to_thread(gmail, thread_id, _TICKET_LABEL_ID)
         _post_write_draft_reply(
             freescout,
+            store,
             conv_id,
             subject,
             sender,
@@ -441,6 +444,7 @@ def _extract_conversation_id(ticket: Optional[dict]) -> Optional[str]:
 
 def _post_write_draft_reply(
     client: Optional[FreeScoutClient],
+    store: TicketStore,
     conversation_id: Optional[str],
     subject: str,
     sender: str,
@@ -448,11 +452,132 @@ def _post_write_draft_reply(
 ) -> None:
     if not client or not conversation_id:
         return
+    reply_text = generate_ai_reply(subject, sender, body_text, "customer")
+    reply_hash = _hash_draft_text(reply_text)
+    generated_at = datetime.utcnow().isoformat()
+    existing = store.get_bot_draft(conversation_id)
+    if not existing:
+        try:
+            response = client.create_agent_draft_reply(conversation_id, reply_text)
+        except requests.RequestException as exc:
+            print(f"Failed to add draft reply to {conversation_id}: {exc}")
+            return
+        thread_id = _extract_thread_id(response)
+        store.upsert_bot_draft(conversation_id, thread_id, reply_hash, generated_at)
+        return
+
     try:
-        reply_text = generate_ai_reply(subject, sender, body_text, "customer")
-        client.create_agent_draft_reply(conversation_id, reply_text)
+        details = client.get_conversation(conversation_id)
     except requests.RequestException as exc:
-        print(f"Failed to add draft reply to {conversation_id}: {exc}")
+        print(f"Failed to fetch conversation {conversation_id} for draft update: {exc}")
+        return
+
+    threads = _extract_conversation_threads(details)
+    stored_thread_id = existing.get("freescout_thread_id")
+    if not stored_thread_id:
+        try:
+            response = client.create_agent_draft_reply(conversation_id, reply_text)
+        except requests.RequestException as exc:
+            print(f"Failed to add draft reply to {conversation_id}: {exc}")
+            return
+        thread_id = _extract_thread_id(response)
+        store.upsert_bot_draft(conversation_id, thread_id, reply_hash, generated_at)
+        return
+
+    thread = _find_thread_by_id(threads, stored_thread_id)
+    if not thread:
+        try:
+            response = client.create_agent_draft_reply(conversation_id, reply_text)
+        except requests.RequestException as exc:
+            print(f"Failed to add draft reply to {conversation_id}: {exc}")
+            return
+        thread_id = _extract_thread_id(response)
+        store.upsert_bot_draft(conversation_id, thread_id, reply_hash, generated_at)
+        return
+
+    if not _thread_is_draft(thread) or not existing.get("last_hash"):
+        _post_draft_skip_note(client, conversation_id, stored_thread_id)
+        return
+
+    current_text = _thread_text(thread)
+    current_hash = _hash_draft_text(current_text)
+    if current_hash != existing.get("last_hash"):
+        _post_draft_skip_note(client, conversation_id, stored_thread_id)
+        return
+
+    try:
+        client.update_thread(conversation_id, stored_thread_id, reply_text, draft=True)
+    except requests.RequestException as exc:
+        print(f"Failed to update draft reply in {conversation_id}: {exc}")
+        return
+
+    store.upsert_bot_draft(conversation_id, stored_thread_id, reply_hash, generated_at)
+
+
+def _hash_draft_text(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _extract_conversation_threads(conversation: dict) -> list[dict]:
+    threads = conversation.get("threads") or conversation.get("data") or []
+    if isinstance(threads, dict):
+        threads = threads.get("threads", [])
+    if not isinstance(threads, list):
+        return []
+    return [thread for thread in threads if isinstance(thread, dict)]
+
+
+def _find_thread_by_id(threads: list[dict], thread_id: Optional[object]) -> Optional[dict]:
+    if not thread_id:
+        return None
+    thread_id_str = str(thread_id)
+    for thread in threads:
+        if str(thread.get("id")) == thread_id_str:
+            return thread
+    return None
+
+
+def _thread_is_draft(thread: dict) -> bool:
+    if "draft" in thread:
+        return bool(thread.get("draft"))
+    state = thread.get("state") or thread.get("status")
+    if state:
+        return str(state).lower() == "draft"
+    return False
+
+
+def _thread_text(thread: dict) -> str:
+    return thread.get("text") or thread.get("body") or ""
+
+
+def _extract_thread_id(response: Optional[dict]) -> Optional[str]:
+    if not response:
+        return None
+    candidates = [
+        response.get("id"),
+        response.get("thread_id"),
+        (response.get("thread") or {}).get("id"),
+        (response.get("data") or {}).get("id"),
+        ((response.get("data") or {}).get("thread") or {}).get("id"),
+    ]
+    for candidate in candidates:
+        if candidate:
+            return str(candidate)
+    return None
+
+
+def _post_draft_skip_note(
+    client: FreeScoutClient,
+    conversation_id: str,
+    thread_id: Optional[str],
+) -> None:
+    message = "Skipped updating the AI draft because it appears to have been edited."
+    if thread_id:
+        message = f"{message} (draft thread {thread_id})"
+    try:
+        client.add_internal_note(conversation_id, message)
+    except requests.RequestException as exc:
+        print(f"Failed to add draft skip note to {conversation_id}: {exc}")
 
 
 def fetch_recent_conversations(
