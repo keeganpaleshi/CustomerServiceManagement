@@ -206,22 +206,16 @@ class GmailIngestionTests(unittest.TestCase):
         store.processed_filtered.return_value = True
         store.get_conversation_id_for_thread.return_value = "conv-901"
         freescout = Mock()
-        message = _make_message("msg-9", "thread-9")
+        message = {"id": "msg-9", "threadId": "thread-9"}
 
-        with patch.object(gmail_bot, "_TICKET_LABEL_ID", None), \
-            patch.object(gmail_bot, "extract_plain_text", return_value="hello"), \
-            patch.object(gmail_bot, "is_promotional_or_spam", return_value=True):
+        with patch.object(gmail_bot, "_TICKET_LABEL_ID", None):
             result = gmail_bot.process_gmail_message(message, store, freescout, Mock())
 
         self.assertEqual(result.status, "filtered")
-        self.assertEqual(result.reason, "filtered: promotional/spam")
+        self.assertEqual(result.reason, "already filtered")
         freescout.add_customer_thread.assert_not_called()
         freescout.create_conversation.assert_not_called()
-        store.mark_filtered.assert_called_once_with(
-            "msg-9",
-            "thread-9",
-            reason="filtered: promotional/spam",
-        )
+        store.mark_filtered.assert_not_called()
 
     def test_append_without_freescout_does_not_mark_success(self):
         store = Mock()
@@ -302,6 +296,24 @@ class GmailIngestionTests(unittest.TestCase):
         store.processed_success.assert_called_once_with("msg-10")
         store.upsert_thread_map.assert_not_called()
         store.mark_success.assert_not_called()
+
+    def test_filtered_message_skips_fetch_and_freescout_on_rerun(self):
+        store = Mock()
+        store.processed_success.return_value = False
+        store.processed_filtered.return_value = True
+        freescout = Mock()
+        gmail = Mock()
+        message = {"id": "msg-13", "threadId": "thread-13"}
+
+        with patch.object(gmail_bot, "_TICKET_LABEL_ID", None):
+            result = gmail_bot.process_gmail_message(message, store, freescout, gmail)
+
+        self.assertEqual(result.status, "filtered")
+        self.assertEqual(result.reason, "already filtered")
+        gmail.users.return_value.messages.return_value.get.assert_not_called()
+        freescout.add_customer_thread.assert_not_called()
+        freescout.create_conversation.assert_not_called()
+        store.mark_filtered.assert_not_called()
 
 if __name__ == "__main__":
     unittest.main()
