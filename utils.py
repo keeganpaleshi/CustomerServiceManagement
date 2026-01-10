@@ -291,6 +291,23 @@ class FreeScoutClient:
         resp.raise_for_status()
         return resp.json()
 
+    def update_thread(
+        self,
+        conversation_id: int,
+        thread_id: int,
+        text: str,
+        draft: bool = True,
+    ) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {"text": text, "draft": draft}
+        resp = requests.put(
+            f"{self.base_url}/api/conversations/{conversation_id}/threads/{thread_id}",
+            headers=self._headers(),
+            json=payload,
+            timeout=self.timeout,
+        )
+        resp.raise_for_status()
+        return resp.json()
+
 
 # ----- Gmail helpers -----
 
