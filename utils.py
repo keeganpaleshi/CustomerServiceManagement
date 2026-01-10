@@ -583,16 +583,28 @@ def get_gmail_service(
     return build("gmail", "v1", credentials=creds)
 
 
-def fetch_all_unread_messages(service, query):
+def fetch_all_unread_messages(service, query, limit=None):
     unread, token = [], None
     while True:
-        resp = (
-            service.users()
-            .messages()
-            .list(userId="me", q=query, pageToken=token)
-            .execute()
-        )
-        unread.extend(resp.get("messages", []))
+        # Apply limit to maxResults if specified to avoid over-fetching
+        list_params = {"userId": "me", "q": query}
+        if token:
+            list_params["pageToken"] = token
+        if limit is not None:
+            # Request only what we still need (up to 500 per Gmail API limits)
+            remaining = limit - len(unread)
+            if remaining <= 0:
+                break
+            list_params["maxResults"] = min(remaining, 500)
+
+        resp = service.users().messages().list(**list_params).execute()
+        messages = resp.get("messages", [])
+        unread.extend(messages)
+
+        # Stop if we've reached the limit
+        if limit is not None and len(unread) >= limit:
+            break
+
         token = resp.get("nextPageToken")
         if not token:
             break

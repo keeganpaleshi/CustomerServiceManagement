@@ -149,10 +149,11 @@ async def freescout(payload: Request, x_webhook_secret: str | None = Header(None
         logfile=str(logfile),
     )
 
-    if not isinstance(body, dict):
-        message = "Expected JSON object payload for FreeScout webhook."
-        counter_store = _get_counter_store()
-        try:
+    # Create a single TicketStore instance and reuse it for all counter operations
+    counter_store = _get_counter_store()
+    try:
+        if not isinstance(body, dict):
+            message = "Expected JSON object payload for FreeScout webhook."
             counter_store.increment_webhook_counter("failed")
             log_event(
                 "webhook_ingest",
@@ -161,15 +162,11 @@ async def freescout(payload: Request, x_webhook_secret: str | None = Header(None
                 conversation_id=conversation_id,
                 reason=message,
             )
-        finally:
-            counter_store.close()
-        return JSONResponse({"message": message}, status_code=400)
+            return JSONResponse({"message": message}, status_code=400)
 
-    message, status, outcome = freescout_webhook_handler(
-        body, {"X-Webhook-Secret": x_webhook_secret}
-    )
-    counter_store = _get_counter_store()
-    try:
+        message, status, outcome = freescout_webhook_handler(
+            body, {"X-Webhook-Secret": x_webhook_secret}
+        )
         if status >= 400:
             counter_store.increment_webhook_counter("failed")
             log_event(
@@ -193,6 +190,6 @@ async def freescout(payload: Request, x_webhook_secret: str | None = Header(None
                 outcome="success",
                 conversation_id=conversation_id,
             )
+        return JSONResponse({"message": message}, status_code=status)
     finally:
         counter_store.close()
-    return JSONResponse({"message": message}, status_code=status)

@@ -402,8 +402,8 @@ def process_gmail_message(
                 freescout_conversation_id=conv_id,
             )
 
-        store.upsert_thread_map(thread_id, conv_id)
         store.mark_success(message_id, thread_id, conv_id, action="create")
+        store.upsert_thread_map(thread_id, conv_id)
         log_event(
             "gmail_ingest",
             action="create_ticket",
@@ -1093,6 +1093,8 @@ def poll_freescout_updates(
                 outcome="failed",
                 error=str(exc),
             )
+            # Sleep before retry to avoid busy-wait loop on persistent errors
+            time.sleep(min(interval, 60))
 
 
 def _infer_webhook_outcome(payload: dict) -> WebhookOutcome:
@@ -1206,9 +1208,9 @@ def main():
         filtered_terminal = 0
         failed = 0
 
-        for ref in fetch_all_unread_messages(svc, query=args.gmail_query)[
-            : settings["MAX_MESSAGES_PER_RUN"]
-        ]:
+        for ref in fetch_all_unread_messages(
+            svc, query=args.gmail_query, limit=settings["MAX_MESSAGES_PER_RUN"]
+        ):
             processed += 1
             result = process_gmail_message(ref, ticket_store, client, svc, ticket_label_id)
             if result.status in {"skipped_already_success", "skipped_already_claimed"}:
