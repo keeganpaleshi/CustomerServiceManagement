@@ -172,7 +172,6 @@ def retry_request(
                 raise
             time.sleep(delay)
     raise RuntimeError(f"Retry loop failed for {action_name}")
-=======
 class SimpleRateLimiter:
     """Simple rolling-window rate limiter."""
 
