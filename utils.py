@@ -66,6 +66,7 @@ def _load_settings() -> Dict[str, Any]:
         "FREESCOUT_WEBHOOK_SECRET": cfg["ticket"].get("webhook_secret", ""),
         "FREESCOUT_POLL_INTERVAL": cfg["ticket"].get("poll_interval", 300),
         "FREESCOUT_ACTIONS": cfg["ticket"].get("actions", {}),
+        "FREESCOUT_FOLLOWUP": cfg["ticket"].get("followup", {}),
         "TICKET_SQLITE_PATH": cfg["ticket"].get("sqlite_path", "./csm.sqlite"),
     }
 
@@ -142,6 +143,22 @@ class FreeScoutClient:
         if isinstance(data, dict):
             return data.get("conversation") or data.get("data") or data
         return {}
+
+    def list_conversations(self, params: Optional[Dict[str, Any]] = None) -> list[dict]:
+        resp = requests.get(
+            f"{self.base_url}/api/conversations",
+            headers=self._headers(),
+            params=params,
+            timeout=self.timeout,
+        )
+        resp.raise_for_status()
+        payload = resp.json() or {}
+        if isinstance(payload, dict):
+            data = payload.get("data") or payload.get("conversations") or []
+            return data if isinstance(data, list) else []
+        if isinstance(payload, list):
+            return payload
+        return []
 
     def update_conversation(
         self,
@@ -264,6 +281,12 @@ class FreeScoutClient:
         )
         resp.raise_for_status()
         return resp.json()
+
+    def add_draft_reply(
+        self, conversation_id: int, text: str, user_id: Optional[int] = None
+    ) -> Dict[str, Any]:
+        draft_text = f"Follow-up draft (not sent):\n\n{text}"
+        return self.add_internal_note(conversation_id, draft_text, user_id=user_id)
 
     def add_suggested_reply(
         self, conversation_id: int, text: str, user_id: Optional[int] = None

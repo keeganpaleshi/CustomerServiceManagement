@@ -115,6 +115,25 @@ The bot fetches recent conversations from FreeScout, classifies the newest
 customer thread, updates ticket metadata, and posts notes/suggestions based on
 the configured toggles.
 
+### Follow-up drafts for stale conversations
+
+Use `freescout_followups.py` to find conversations with no agent reply after a
+minimum number of hours, draft a follow-up reply (as an internal note), and tag
+them with `followup-ready`.
+
+```bash
+python freescout_followups.py --hours 24 --required-tags needs-followup
+```
+
+Configuration lives under `ticket.followup` in `config.yaml`:
+
+- `hours_without_reply` – minimum hours since the last customer message.
+- `required_tags` / `excluded_tags` – tag filters for qualifying conversations.
+- `required_states` – optional FreeScout status/state filters.
+- `followup_tag` – tag applied after drafting the follow-up.
+- `list_params` – raw query params sent to `/api/conversations` (optional).
+- `p0_tags` / `notify` – optional Slack/email notifications for P0 follow-ups.
+
 ### Webhook handler
 
 Add this minimal FastAPI or Flask endpoint to receive FreeScout webhooks and
