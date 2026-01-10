@@ -96,6 +96,16 @@ def get_settings() -> Dict[str, Any]:
     return _load_settings().copy()
 
 
+def reload_settings() -> None:
+    """Clear cached settings after config or environment changes.
+
+    Call this in long-running processes (or tests) when config.yaml or
+    environment variables are updated and fresh settings are required.
+    """
+
+    _load_settings.cache_clear()
+
+
 def require_openai_api_key() -> str:
     """Return the OpenAI API key or raise a clear error when missing."""
 
