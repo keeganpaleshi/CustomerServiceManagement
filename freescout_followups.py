@@ -243,7 +243,10 @@ def _send_email_notification(email_cfg: dict, subject: str, body: str) -> None:
             server.login(username, password)
         server.send_message(message)
     finally:
-        server.quit()
+        try:
+            server.quit()
+        except Exception:
+            pass
 
 
 def _notify_if_configured(
