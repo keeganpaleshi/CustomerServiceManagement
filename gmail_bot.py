@@ -106,6 +106,9 @@ def process_gmail_message(
             status="skipped_already_success",
             reason="already processed",
         )
+    if store.processed_filtered(message_id) is True:
+        print(f"{message_id[:8]}… skipped (already filtered)")
+        return ProcessResult.FILTERED
     try:
         full_message = message
         if "payload" not in message:
