@@ -43,6 +43,8 @@ thresholds:
 limits:
   # Maximum number of drafts created in a single run
   max_drafts: 100
+  # Maximum number of messages to process in a single run
+  max_messages_per_run: 100
 
 ticket:
   system:         "freescout"        # or "helpscout", "freshdesk", etc.
