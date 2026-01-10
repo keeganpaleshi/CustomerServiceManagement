@@ -655,7 +655,7 @@ def is_promotional_or_spam(message, body_text):
     subject = headers.get("subject", "").lower()
     from_header = headers.get("from", "").lower()
 
-    list_headers = {
+    list_header_names = {
         "list-unsubscribe",
         "list-id",
         "list-help",
@@ -664,8 +664,8 @@ def is_promotional_or_spam(message, body_text):
         "list-archive",
         "list-owner",
     }
-    if list_headers.intersection(headers):
-        return True
+    list_headers_present = list_header_names.intersection(headers)
+    list_unsubscribe_present = "list-unsubscribe" in list_headers_present
 
     spam_flag = headers.get("x-spam-flag", "").strip().lower() == "yes"
     spam_status = headers.get("x-spam-status", "").lower().startswith("yes")
@@ -678,6 +678,8 @@ def is_promotional_or_spam(message, body_text):
 
     precedence = headers.get("precedence", "").strip().lower()
     bulk_header = precedence in {"bulk", "list", "junk"}
+    auto_submitted = headers.get("auto-submitted", "").strip().lower()
+    auto_generated = auto_submitted in {"auto-generated", "auto-replied"}
 
     footer_patterns = [
         r"(?im)^\s*unsubscribe\b",
@@ -689,23 +691,44 @@ def is_promotional_or_spam(message, body_text):
         r"(?im)\bopt[- ]?out\b",
     ]
     footer_match = any(re.search(pattern, body_text) for pattern in footer_patterns)
+    negated_unsubscribe = re.search(
+        r"\b(do\s*not|don't|dont|no)\s+(want\s+to\s+)?unsubscribe\b",
+        body_lower,
+    )
+    if footer_match and negated_unsubscribe:
+        footer_match = False
 
     promo_subject = re.search(
         r"\b(newsletter|promo|promotion|sale|deal|discount|offer|coupon|limited time|free trial)\b",
         subject,
     )
 
-    score = 0
+    header_signals = 0
+    if list_unsubscribe_present:
+        header_signals += 2
+    if list_headers_present:
+        header_signals += 1
     if bulk_header:
-        score += 2
+        header_signals += 2
+    if auto_generated:
+        header_signals += 1
+
+    if footer_match and header_signals >= 1:
+        return True
+
+    noreply_sender = "no-reply" in from_header or "noreply" in from_header
+    if list_unsubscribe_present and promo_subject and noreply_sender:
+        return True
+
+    score = header_signals
     if footer_match:
         score += 2
     if promo_subject:
         score += 1
-    if "no-reply" in from_header or "noreply" in from_header:
+    if noreply_sender:
         score += 1
 
-    return score >= 3
+    return score >= 5
 
 
 def generate_ai_reply(subject, sender, snippet_or_body, email_type):
