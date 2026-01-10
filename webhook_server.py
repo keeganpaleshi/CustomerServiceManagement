@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -12,7 +13,6 @@ from fastapi.responses import JSONResponse
 from gmail_bot import freescout_webhook_handler
 from utils import log_event
 
-app = FastAPI()
 LOG_DIR = Path(__file__).resolve().parent / "logs" / "webhooks"
 SAFE_FILENAME_RE = re.compile(r"[^A-Za-z0-9_.-]+")
 COUNTERS = {
@@ -23,6 +23,23 @@ COUNTERS = {
     "filtered": 0,
     "failed": 0,
 }
+
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    yield
+    log_event(
+        "webhook_ingest_summary",
+        processed=COUNTERS["processed"],
+        created=COUNTERS["created"],
+        appended=COUNTERS["appended"],
+        drafted=COUNTERS["drafted"],
+        filtered=COUNTERS["filtered"],
+        failed=COUNTERS["failed"],
+    )
+
+
+app = FastAPI(lifespan=lifespan)
 
 
 def _safe_filename(value: str) -> str:
@@ -96,15 +113,3 @@ async def freescout(payload: Request, x_webhook_secret: str | None = Header(None
         )
     return JSONResponse({"message": message}, status_code=status)
 
-
-@app.on_event("shutdown")
-def log_summary() -> None:
-    log_event(
-        "webhook_ingest_summary",
-        processed=COUNTERS["processed"],
-        created=COUNTERS["created"],
-        appended=COUNTERS["appended"],
-        drafted=COUNTERS["drafted"],
-        filtered=COUNTERS["filtered"],
-        failed=COUNTERS["failed"],
-    )
