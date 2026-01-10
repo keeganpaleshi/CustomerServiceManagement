@@ -4,6 +4,7 @@ import os
 import pickle
 import re
 import time
+from collections import deque
 from email.mime.text import MIMEText
 from functools import lru_cache
 from pathlib import Path
@@ -44,6 +45,8 @@ def _load_settings() -> Dict[str, Any]:
         "DRAFT_SYSTEM_MSG": cfg["openai"].get("draft_system_message", ""),
         "CLASSIFY_MODEL": cfg["openai"]["classify_model"],
         "CLASSIFY_MAX_TOKENS": cfg["openai"].get("classify_max_tokens", 50),
+        "OPENAI_TIMEOUT": cfg["openai"].get("timeout", 30),
+        "OPENAI_RATE_LIMIT": cfg["openai"].get("rate_limit", {}),
         "PROMO_LABELS": {
             "SPAM",
             "CATEGORY_PROMOTIONS",
@@ -117,6 +120,38 @@ def serialize_custom_fields(field_map: Dict[Any, Any]) -> list[dict]:
         serialized.append({"id": field_id, "value": str(value)})
 
     return serialized
+
+
+class SimpleRateLimiter:
+    """Simple rolling-window rate limiter."""
+
+    def __init__(self, max_requests: int, window_seconds: int) -> None:
+        self.max_requests = max_requests
+        self.window_seconds = window_seconds
+        self.timestamps: deque[float] = deque()
+
+    def allow(self) -> bool:
+        if self.max_requests <= 0 or self.window_seconds <= 0:
+            return True
+        now = time.monotonic()
+        window_start = now - self.window_seconds
+        while self.timestamps and self.timestamps[0] <= window_start:
+            self.timestamps.popleft()
+        if len(self.timestamps) >= self.max_requests:
+            return False
+        self.timestamps.append(now)
+        return True
+
+
+@lru_cache(maxsize=1)
+def _get_openai_rate_limiter() -> Optional[SimpleRateLimiter]:
+    settings = _load_settings()
+    rate_limit = settings.get("OPENAI_RATE_LIMIT", {}) or {}
+    max_requests = rate_limit.get("max_requests", 0)
+    window_seconds = rate_limit.get("window_seconds", 0)
+    if not max_requests or not window_seconds:
+        return None
+    return SimpleRateLimiter(int(max_requests), int(window_seconds))
 
 
 class FreeScoutClient:
@@ -485,7 +520,21 @@ def generate_ai_reply(subject, sender, snippet_or_body, email_type):
     Generate a draft reply using OpenAI's new library (>=1.0.0).
     """
     settings = get_settings()
-    client = OpenAI(api_key=require_openai_api_key())
+    limiter = _get_openai_rate_limiter()
+    if limiter and not limiter.allow():
+        print("OpenAI request throttled: skipping draft reply generation.")
+        fallback_lines = [
+            "Hello,",
+            "",
+            "I'm sorry, but I couldn't generate a response at this time. Please review this email manually.",
+            "",
+            "Best,",
+            "Automated Script",
+        ]
+        return "\n".join(fallback_lines)
+    client = OpenAI(
+        api_key=require_openai_api_key(), timeout=settings["OPENAI_TIMEOUT"]
+    )
 
     instructions = (
         f"[Email type: {email_type}]\n\n"
@@ -557,7 +606,13 @@ def sanitize_draft_reply(text: str) -> str:
 def classify_email(text):
     """Classify an email and return a dict with type, importance, and reasoning."""
     settings = _load_settings()
-    client = OpenAI(api_key=require_openai_api_key())
+    limiter = _get_openai_rate_limiter()
+    if limiter and not limiter.allow():
+        print("OpenAI request throttled: skipping email classification.")
+        return {"type": "other", "importance": 0}
+    client = OpenAI(
+        api_key=require_openai_api_key(), timeout=settings["OPENAI_TIMEOUT"]
+    )
     try:
         resp = client.chat.completions.create(
             model=settings["CLASSIFY_MODEL"],
