@@ -263,7 +263,11 @@ class TicketStore:
         self._conn.commit()
 
     def mark_failed(
-        self, gmail_message_id: str, gmail_thread_id: str, error: str, conv_id: Optional[str] = None
+        self,
+        gmail_message_id: str,
+        gmail_thread_id: Optional[str],
+        error: str,
+        conv_id: Optional[str] = None,
     ) -> None:
         self._conn.execute(
             """

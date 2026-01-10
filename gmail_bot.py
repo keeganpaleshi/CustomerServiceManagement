@@ -113,7 +113,7 @@ def process_gmail_message(
     gmail,
 ) -> ProcessResult:
     message_id = message.get("id", "")
-    thread_id = message.get("threadId")
+    thread_id: Optional[str] = message.get("threadId")
 
     if not message_id:
         reason = "missing message id"
