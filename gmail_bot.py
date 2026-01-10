@@ -7,6 +7,7 @@ from email.utils import parseaddr
 from typing import Dict, Optional, Tuple
 
 import requests
+from googleapiclient.errors import HttpError
 
 from utils import (
     classify_email,
@@ -22,6 +23,7 @@ from utils import (
     generate_ai_reply,
     require_ticket_settings,
     importance_to_bucket,
+    retry_request,
 )
 from storage import TicketStore
 
@@ -187,7 +189,17 @@ def process_gmail_message(
                 freescout,
             )
             if _TICKET_LABEL_ID:
-                apply_label_to_thread(gmail, thread_id, _TICKET_LABEL_ID)
+                try:
+                    retry_request(
+                        lambda: apply_label_to_thread(
+                            gmail, thread_id, _TICKET_LABEL_ID
+                        ),
+                        action_name="gmail.apply_label",
+                        exceptions=(HttpError,),
+                        log_context={"thread_id": thread_id, "label_id": _TICKET_LABEL_ID},
+                    )
+                except HttpError as exc:
+                    print(f"Failed to apply label to thread {thread_id}: {exc}")
             _post_write_draft_reply(
                 freescout,
                 store,
@@ -258,7 +270,15 @@ def process_gmail_message(
             freescout,
         )
         if _TICKET_LABEL_ID:
-            apply_label_to_thread(gmail, thread_id, _TICKET_LABEL_ID)
+            try:
+                retry_request(
+                    lambda: apply_label_to_thread(gmail, thread_id, _TICKET_LABEL_ID),
+                    action_name="gmail.apply_label",
+                    exceptions=(HttpError,),
+                    log_context={"thread_id": thread_id, "label_id": _TICKET_LABEL_ID},
+                )
+            except HttpError as exc:
+                print(f"Failed to apply label to thread {thread_id}: {exc}")
         _post_write_draft_reply(
             freescout,
             store,
@@ -748,7 +768,15 @@ def main():
     svc = get_gmail_service(use_console=args.console_auth)
     ticket_label_id = None
     if settings["TICKET_SYSTEM"] == "freescout":
-        ticket_label_id = ensure_label(svc, TICKET_LABEL_NAME)
+        try:
+            ticket_label_id = retry_request(
+                lambda: ensure_label(svc, TICKET_LABEL_NAME),
+                action_name="gmail.ensure_label",
+                exceptions=(HttpError,),
+                log_context={"label_name": TICKET_LABEL_NAME},
+            )
+        except HttpError as exc:
+            print(f"Error ensuring label '{TICKET_LABEL_NAME}': {exc}")
     global _TICKET_LABEL_ID
     _TICKET_LABEL_ID = ticket_label_id
     client = _build_freescout_client(timeout=args.timeout)
