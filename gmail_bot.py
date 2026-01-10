@@ -174,7 +174,7 @@ def process_gmail_message(
                     freescout_conversation_id=conv_id,
                 )
 
-            store.mark_success(message_id, thread_id, conv_id)
+            store.mark_success(message_id, thread_id, conv_id, action="append")
             if _TICKET_LABEL_ID:
                 apply_label_to_thread(gmail, thread_id, _TICKET_LABEL_ID)
             return ProcessResult(
@@ -229,7 +229,7 @@ def process_gmail_message(
             )
 
         store.upsert_thread_map(thread_id, conv_id)
-        store.mark_success(message_id, thread_id, conv_id)
+        store.mark_success(message_id, thread_id, conv_id, action="create")
         if _TICKET_LABEL_ID:
             apply_label_to_thread(gmail, thread_id, _TICKET_LABEL_ID)
         return ProcessResult(

@@ -99,7 +99,12 @@ class GmailIngestionTests(unittest.TestCase):
         freescout.add_customer_thread.assert_called_once_with("conv-123", "hello", imported=True)
         freescout.create_conversation.assert_not_called()
         store.upsert_thread_map.assert_not_called()
-        store.mark_success.assert_called_once_with("msg-3", "thread-3", "conv-123")
+        store.mark_success.assert_called_once_with(
+            "msg-3",
+            "thread-3",
+            "conv-123",
+            action="append",
+        )
 
     def test_create_new_thread_marks_success_after_upsert(self):
         store = Mock()
@@ -132,7 +137,12 @@ class GmailIngestionTests(unittest.TestCase):
         )
         freescout.add_customer_thread.assert_not_called()
         store.upsert_thread_map.assert_called_once_with("thread-4", "conv-456")
-        store.mark_success.assert_called_once_with("msg-4", "thread-4", "conv-456")
+        store.mark_success.assert_called_once_with(
+            "msg-4",
+            "thread-4",
+            "conv-456",
+            action="create",
+        )
 
     def test_non_filtered_message_makes_single_freescout_call(self):
         store = Mock()

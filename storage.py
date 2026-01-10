@@ -23,6 +23,7 @@ class TicketStore:
                 gmail_thread_id TEXT,
                 freescout_conversation_id TEXT,
                 status TEXT NOT NULL CHECK(status IN ('success', 'filtered', 'failed')),
+                action TEXT CHECK(action IN ('create','append')),
                 error TEXT,
                 processed_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
             )
@@ -49,42 +50,53 @@ class TicketStore:
         if not row or not row[0]:
             return
         schema_sql = row[0]
-        if "filtered" in schema_sql:
+        needs_filtered = "filtered" not in schema_sql
+        needs_action = "action" not in schema_sql
+        if not needs_filtered and not needs_action:
             return
-        self._conn.execute("ALTER TABLE processed_messages RENAME TO processed_messages_old")
-        self._conn.execute(
-            """
-            CREATE TABLE processed_messages (
-                gmail_message_id TEXT PRIMARY KEY,
-                gmail_thread_id TEXT,
-                freescout_conversation_id TEXT,
-                status TEXT NOT NULL CHECK(status IN ('success', 'filtered', 'failed')),
-                error TEXT,
-                processed_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+        if needs_filtered:
+            self._conn.execute("ALTER TABLE processed_messages RENAME TO processed_messages_old")
+            self._conn.execute(
+                """
+                CREATE TABLE processed_messages (
+                    gmail_message_id TEXT PRIMARY KEY,
+                    gmail_thread_id TEXT,
+                    freescout_conversation_id TEXT,
+                    status TEXT NOT NULL CHECK(status IN ('success', 'filtered', 'failed')),
+                    action TEXT CHECK(action IN ('create','append')),
+                    error TEXT,
+                    processed_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+                """
             )
-            """
-        )
-        self._conn.execute(
-            """
-            INSERT INTO processed_messages (
-                gmail_message_id,
-                gmail_thread_id,
-                freescout_conversation_id,
-                status,
-                error,
-                processed_at
+            self._conn.execute(
+                """
+                INSERT INTO processed_messages (
+                    gmail_message_id,
+                    gmail_thread_id,
+                    freescout_conversation_id,
+                    status,
+                    action,
+                    error,
+                    processed_at
+                )
+                SELECT
+                    gmail_message_id,
+                    gmail_thread_id,
+                    freescout_conversation_id,
+                    status,
+                    NULL,
+                    error,
+                    processed_at
+                FROM processed_messages_old
+                """
             )
-            SELECT
-                gmail_message_id,
-                gmail_thread_id,
-                freescout_conversation_id,
-                status,
-                error,
-                processed_at
-            FROM processed_messages_old
-            """
-        )
-        self._conn.execute("DROP TABLE processed_messages_old")
+            self._conn.execute("DROP TABLE processed_messages_old")
+        elif needs_action:
+            self._conn.execute(
+                "ALTER TABLE processed_messages "
+                "ADD COLUMN action TEXT CHECK(action IN ('create','append'))"
+            )
         self._conn.commit()
 
     def processed_success(self, gmail_message_id: str) -> bool:
@@ -156,6 +168,7 @@ class TicketStore:
         gmail_message_id: str,
         gmail_thread_id: str,
         conv_id: Optional[str],
+        action: str,
         error: Optional[str] = None,
     ) -> None:
         self._conn.execute(
@@ -165,18 +178,20 @@ class TicketStore:
                 gmail_thread_id,
                 freescout_conversation_id,
                 status,
+                action,
                 error,
                 processed_at
             )
-            VALUES (?, ?, ?, 'success', ?, CURRENT_TIMESTAMP)
+            VALUES (?, ?, ?, 'success', ?, ?, CURRENT_TIMESTAMP)
             ON CONFLICT(gmail_message_id) DO UPDATE SET
                 gmail_thread_id = excluded.gmail_thread_id,
                 freescout_conversation_id = excluded.freescout_conversation_id,
                 status = 'success',
+                action = excluded.action,
                 error = excluded.error,
                 processed_at = CURRENT_TIMESTAMP
             """,
-            (gmail_message_id, gmail_thread_id, conv_id, error),
+            (gmail_message_id, gmail_thread_id, conv_id, action, error),
         )
         self._conn.commit()
 
