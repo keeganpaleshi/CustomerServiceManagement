@@ -714,6 +714,12 @@ def poll_freescout_updates(
     """Continuously poll FreeScout and classify new/updated conversations."""
 
     settings = get_settings()
+    if settings.get("FREESCOUT_WEBHOOK_ENABLED"):
+        print(
+            "FreeScout polling is disabled because webhook ingestion is enabled. "
+            "Set ticket.webhook_enabled to false to use polling instead."
+        )
+        return
     http_timeout = timeout if timeout is not None else settings["HTTP_TIMEOUT"]
     client = _build_freescout_client(timeout=http_timeout)
     if not client:
@@ -757,6 +763,12 @@ def main():
     args = parse_args(settings)
 
     if args.poll_freescout:
+        if settings.get("FREESCOUT_WEBHOOK_ENABLED"):
+            print(
+                "Polling requested, but webhook ingestion is enabled. "
+                "Disable ticket.webhook_enabled to use polling."
+            )
+            return
         poll_freescout_updates(
             interval=args.poll_interval,
             timeout=args.timeout,
