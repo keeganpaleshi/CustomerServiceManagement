@@ -58,6 +58,27 @@ ticket:
       importance_field_id: null     # FreeScout custom field ID used to store the numeric importance
     post_internal_notes: true       # add an internal note summarizing the classification
     post_suggested_reply: true      # add an internal note containing a suggested AI reply
+  followup:
+    hours_without_reply: 24         # minimum hours since last customer message
+    required_tags: []               # tags that must be present to qualify
+    excluded_tags: ["followup-ready"] # tags that disqualify a conversation
+    required_states: []             # optional FreeScout states/statuses to include
+    followup_tag: "followup-ready"  # tag applied after drafting a follow-up
+    limit: 100                      # maximum conversations to inspect per run
+    dry_run: false                  # if true, log only
+    list_params: {}                 # optional raw query params for /api/conversations
+    p0_tags: ["p0"]                 # tags that mark a conversation as P0
+    notify:
+      slack_webhook_url: ""         # set to enable Slack notifications for P0 follow-ups
+      email:
+        smtp_host: ""               # set to enable email notifications for P0 follow-ups
+        smtp_port: 587
+        smtp_username: ""
+        smtp_password: ""
+        from: ""
+        to: ""
+        use_tls: true
+        use_ssl: false
 
 gmail:
   scopes:
