@@ -81,6 +81,13 @@ def _parse_datetime(value: Optional[str]) -> Optional[datetime]:
     return parsed
 
 
+def _normalize_id(value: object) -> Optional[str]:
+    if value is None:
+        return None
+    value_str = str(value).strip()
+    return value_str or None
+
+
 def _extract_tags(conversation: dict) -> list[str]:
     tags = conversation.get("tags") or []
     if isinstance(tags, dict):
@@ -264,7 +271,9 @@ def _notify_if_configured(
     if not _is_p0(conversation, tags, p0_tags):
         return
 
-    conv_id = str(conversation.get("id"))
+    conv_id = _normalize_id(conversation.get("id"))
+    if not conv_id:
+        return
     base_url = settings.get("FREESCOUT_URL", "")
     link = _conversation_link(base_url, conv_id) if base_url else ""
 
@@ -334,7 +343,7 @@ def main() -> None:
     conversations = _iter_conversations(client, params, args.limit)
     for conversation in conversations:
         processed += 1
-        conv_id = conversation.get("id")
+        conv_id = _normalize_id(conversation.get("id"))
         if not conv_id:
             filtered += 1
             continue
