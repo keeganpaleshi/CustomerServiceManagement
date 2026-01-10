@@ -46,6 +46,7 @@ ticket:
   gmail_thread_field_id: null         # custom field ID to store the Gmail threadId (optional)
   gmail_message_field_id: null        # custom field ID to store the Gmail messageId (optional)
   sqlite_path: "./csm.sqlite"        # durable store for processed messages and thread mapping
+  webhook_enabled: false            # set true to use webhook ingestion (polling is disabled when enabled)
   webhook_secret: ""                 # shared secret for validating webhook requests
   poll_interval: 300                 # seconds between FreeScout polls when --poll-freescout is enabled
   actions:

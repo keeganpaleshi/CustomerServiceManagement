@@ -85,6 +85,8 @@ so Phase 2C idempotency must remain database-only.
 
 Set the following keys in `config.yaml` under `ticket:`:
 
+- `webhook_enabled` – set to true to use webhook ingestion. When enabled,
+  polling is disabled and webhooks are the primary ingestion path.
 - `webhook_secret` – shared secret to validate webhook calls (header
   `X-Webhook-Secret`).
 - `poll_interval` – how often to poll FreeScout when running with
@@ -114,6 +116,9 @@ python gmail_bot.py --poll-freescout --poll-interval 300
 The bot fetches recent conversations from FreeScout, classifies the newest
 customer thread, updates ticket metadata, and posts notes/suggestions based on
 the configured toggles.
+
+Polling is intended as a fallback when webhook ingestion is disabled (set
+`ticket.webhook_enabled` to `false`).
 
 ### Follow-up drafts for stale conversations
 
@@ -156,3 +161,6 @@ Deploy the webhook with HTTPS and set the URL inside FreeScout's webhook
 settings. The handler validates `X-Webhook-Secret` (when configured) and then
 fetches the conversation from FreeScout before applying the same classification
 and update flow used by the poller.
+
+Webhook ingestion takes precedence over polling, so disable
+`ticket.webhook_enabled` if you need to run the poller instead.
