@@ -29,6 +29,12 @@ openai:
         information.
   # Maximum tokens for the classification model
   classify_max_tokens: 150
+  # Timeout (seconds) for OpenAI API requests
+  timeout: 30
+  # Rate limiter for OpenAI calls (set max_requests or window_seconds to 0 to disable)
+  rate_limit:
+    max_requests: 60
+    window_seconds: 60
 
 thresholds:
   critic_threshold: 8.0
