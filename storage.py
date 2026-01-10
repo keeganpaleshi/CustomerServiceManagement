@@ -43,13 +43,14 @@ class TicketStore:
         self._conn.execute(
             """
             CREATE TABLE IF NOT EXISTS bot_drafts (
-                freescout_conversation_id INTEGER PRIMARY KEY,
-                freescout_thread_id INTEGER NULL,
+                freescout_conversation_id TEXT PRIMARY KEY,
+                freescout_thread_id TEXT NULL,
                 last_hash TEXT,
                 last_generated_at TEXT
             )
             """
         )
+        self._migrate_bot_drafts()
         self._conn.execute(
             """
             CREATE TABLE IF NOT EXISTS webhook_counters (
@@ -120,6 +121,46 @@ class TicketStore:
                 "ALTER TABLE processed_messages "
                 "ADD COLUMN action TEXT CHECK(action IN ('create','append'))"
             )
+        self._conn.commit()
+
+    def _migrate_bot_drafts(self) -> None:
+        cur = self._conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'bot_drafts'"
+        )
+        row = cur.fetchone()
+        if not row or not row[0]:
+            return
+        schema_sql = row[0]
+        if "freescout_conversation_id INTEGER" not in schema_sql:
+            return
+        self._conn.execute("ALTER TABLE bot_drafts RENAME TO bot_drafts_old")
+        self._conn.execute(
+            """
+            CREATE TABLE bot_drafts (
+                freescout_conversation_id TEXT PRIMARY KEY,
+                freescout_thread_id TEXT NULL,
+                last_hash TEXT,
+                last_generated_at TEXT
+            )
+            """
+        )
+        self._conn.execute(
+            """
+            INSERT INTO bot_drafts (
+                freescout_conversation_id,
+                freescout_thread_id,
+                last_hash,
+                last_generated_at
+            )
+            SELECT
+                freescout_conversation_id,
+                freescout_thread_id,
+                last_hash,
+                last_generated_at
+            FROM bot_drafts_old
+            """
+        )
+        self._conn.execute("DROP TABLE bot_drafts_old")
         self._conn.commit()
 
     def mark_processing_if_new(

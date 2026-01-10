@@ -659,8 +659,9 @@ def _extract_conversation_id(ticket: Optional[dict]) -> Optional[str]:
         ((ticket.get("data") or {}).get("conversation") or {}).get("id"),
     ]
     for conv_id in candidates:
-        if conv_id:
-            return str(conv_id)
+        normalized = _normalize_id(conv_id)
+        if normalized:
+            return normalized
     return None
 
 
@@ -672,6 +673,7 @@ def _post_write_draft_reply(
     sender: str,
     body_text: str,
 ) -> bool:
+    conversation_id = _normalize_id(conversation_id)
     if not client or not conversation_id:
         return False
     reply_text = generate_ai_reply(subject, sender, body_text, "customer")
