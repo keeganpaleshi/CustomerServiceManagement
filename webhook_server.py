@@ -22,14 +22,19 @@ COUNTER_KEYS = ("processed", "created", "appended", "drafted", "filtered", "fail
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     yield
+    counter_store = _get_counter_store()
+    try:
+        counters = counter_store.get_webhook_counters()
+    finally:
+        counter_store.close()
     log_event(
         "webhook_ingest_summary",
-        processed=COUNTERS["processed"],
-        created=COUNTERS["created"],
-        appended=COUNTERS["appended"],
-        drafted=COUNTERS["drafted"],
-        filtered=COUNTERS["filtered"],
-        failed=COUNTERS["failed"],
+        processed=counters.get("processed", 0),
+        created=counters.get("created", 0),
+        appended=counters.get("appended", 0),
+        drafted=counters.get("drafted", 0),
+        filtered=counters.get("filtered", 0),
+        failed=counters.get("failed", 0),
     )
 
 
