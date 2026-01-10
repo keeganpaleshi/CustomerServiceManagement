@@ -806,8 +806,10 @@ def generate_ai_reply(subject, sender, snippet_or_body, email_type):
         # Check if response has choices before accessing
         if not response.choices or len(response.choices) == 0:
             raise ValueError("OpenAI response contains no choices")
-        raw_reply = response.choices[0].message.content.strip()
-        return sanitize_draft_reply(raw_reply)
+        raw_reply = response.choices[0].message.content
+        if raw_reply is None:
+            raise ValueError("OpenAI response content is None")
+        return sanitize_draft_reply(raw_reply.strip())
     except Exception as exc:
         log_event(
             "openai_error",
@@ -911,7 +913,10 @@ def classify_email(text):
         # Check if response has choices before accessing
         if not resp.choices or len(resp.choices) == 0:
             raise ValueError("OpenAI response contains no choices")
-        parsed = json.loads(resp.choices[0].message.content)
+        content = resp.choices[0].message.content
+        if content is None:
+            raise ValueError("OpenAI response content is None")
+        parsed = json.loads(content)
         if not is_valid_response(parsed):
             return default_response
         return parsed
