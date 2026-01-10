@@ -50,6 +50,14 @@ class TicketStore:
             )
             """
         )
+        self._conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS webhook_counters (
+                counter TEXT PRIMARY KEY,
+                value INTEGER NOT NULL DEFAULT 0
+            )
+            """
+        )
         self._conn.commit()
 
     def _migrate_processed_messages(self) -> None:
@@ -376,6 +384,22 @@ class TicketStore:
         cur = self._conn.execute("SELECT COUNT(*) FROM bot_drafts")
         row = cur.fetchone()
         return int(row[0]) if row else 0
+
+    def increment_webhook_counter(self, counter: str, amount: int = 1) -> None:
+        self._conn.execute(
+            """
+            INSERT INTO webhook_counters (counter, value)
+            VALUES (?, ?)
+            ON CONFLICT(counter) DO UPDATE SET
+                value = value + excluded.value
+            """,
+            (counter, amount),
+        )
+        self._conn.commit()
+
+    def get_webhook_counters(self) -> dict:
+        cur = self._conn.execute("SELECT counter, value FROM webhook_counters")
+        return {row[0]: int(row[1]) for row in cur.fetchall()}
 
     def close(self) -> None:
         try:
