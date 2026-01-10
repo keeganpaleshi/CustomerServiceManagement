@@ -268,11 +268,7 @@ class FreeScoutClient:
     def add_suggested_reply(
         self, conversation_id: int, text: str, user_id: Optional[int] = None
     ) -> Dict[str, Any]:
-        return self.add_internal_note(
-            conversation_id,
-            f"Suggested reply:\n\n{text}",
-            user_id=user_id,
-        )
+        return self.add_internal_note(conversation_id, text, user_id=user_id)
 
 
 # ----- Gmail helpers -----
@@ -469,7 +465,7 @@ def critic_email(draft, original):
 
 
 def classify_email(text):
-    """Classify an email and return a dict with type and importance."""
+    """Classify an email and return a dict with type, importance, and reasoning."""
     settings = _load_settings()
     client = OpenAI(api_key=require_openai_api_key())
     try:
@@ -479,7 +475,11 @@ def classify_email(text):
                 {
                     "role": "system",
                     "content": (
-                        "Categorize the email as lead, customer, or other. Return ONLY JSON {\"type\":\"lead|customer|other\",\"importance\":1-10}. NO other text."
+                        "Categorize the email as lead, customer, or other. "
+                        "Return ONLY JSON with keys "
+                        "{\"type\":\"lead|customer|other\",\"importance\":1-10,"
+                        "\"reasoning\":\"...\",\"facts\":[\"...\"],\"uncertainty\":[\"...\"]}. "
+                        "Keep reasoning and lists concise. NO other text."
                     ),
                 },
                 {"role": "user", "content": text},

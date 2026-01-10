@@ -523,6 +523,17 @@ def process_freescout_conversation(
     ]
     if high_priority:
         note_lines.append("Marked as high priority")
+    reasoning = cls.get("reasoning")
+    if reasoning:
+        note_lines.append(f"Reasoning: {reasoning}")
+    facts = cls.get("facts") or []
+    if isinstance(facts, list) and facts:
+        note_lines.append("Extracted facts:")
+        note_lines.extend([f"- {fact}" for fact in facts if fact])
+    uncertainty = cls.get("uncertainty") or []
+    if isinstance(uncertainty, list) and uncertainty:
+        note_lines.append("Uncertainty:")
+        note_lines.extend([f"- {item}" for item in uncertainty if item])
 
     result = process_conversation(
         conv_id,
