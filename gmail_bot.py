@@ -87,6 +87,10 @@ ProcessResult.FILTERED = ProcessResult(
     status="filtered",
     reason="already filtered",
 )
+ProcessResult.SKIPPED_ALREADY_CLAIMED = ProcessResult(
+    status="skipped_already_claimed",
+    reason="already claimed by another worker",
+)
 
 
 @dataclass(frozen=True)
@@ -121,27 +125,36 @@ def process_gmail_message(
         )
         return ProcessResult(status="failed_retryable", reason=reason)
 
-    if store.processed_success(message_id) is True:
+    if not store.mark_processing_if_new(message_id, thread_id):
+        if store.processed_success(message_id) is True:
+            log_event(
+                "gmail_ingest",
+                action="skip_message",
+                outcome="already_processed",
+                message_id=message_id,
+                thread_id=thread_id,
+            )
+            return ProcessResult(
+                status="skipped_already_success",
+                reason="already processed",
+            )
+        if store.processed_filtered(message_id) is True:
+            log_event(
+                "gmail_ingest",
+                action="skip_message",
+                outcome="already_filtered",
+                message_id=message_id,
+                thread_id=thread_id,
+            )
+            return ProcessResult.FILTERED
         log_event(
             "gmail_ingest",
             action="skip_message",
-            outcome="already_processed",
+            outcome="already_claimed",
             message_id=message_id,
             thread_id=thread_id,
         )
-        return ProcessResult(
-            status="skipped_already_success",
-            reason="already processed",
-        )
-    if store.processed_filtered(message_id) is True:
-        log_event(
-            "gmail_ingest",
-            action="skip_message",
-            outcome="already_filtered",
-            message_id=message_id,
-            thread_id=thread_id,
-        )
-        return ProcessResult.FILTERED
+        return ProcessResult.SKIPPED_ALREADY_CLAIMED
     try:
         full_message = message
         if "payload" not in message:
@@ -1092,7 +1105,7 @@ def main():
     ]:
         processed += 1
         result = process_gmail_message(ref, ticket_store, client, svc)
-        if result.status == "skipped_already_success":
+        if result.status in {"skipped_already_success", "skipped_already_claimed"}:
             skipped += 1
         elif result.status == "filtered":
             filtered_terminal += 1
