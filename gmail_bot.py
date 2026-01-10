@@ -24,6 +24,7 @@ from utils import (
     log_event,
     require_ticket_settings,
     importance_to_bucket,
+    reload_settings,
     retry_request,
 )
 from storage import TicketStore
@@ -975,29 +976,30 @@ def poll_freescout_updates(
 ):
     """Continuously poll FreeScout and classify new/updated conversations."""
 
-    settings = get_settings()
-    if settings.get("FREESCOUT_WEBHOOK_ENABLED"):
-        log_event(
-            "freescout_poll",
-            action="poll_updates",
-            outcome="skipped",
-            reason="webhook ingestion enabled",
-        )
-        return
-    http_timeout = timeout if timeout is not None else settings["HTTP_TIMEOUT"]
-    client = _build_freescout_client(timeout=http_timeout)
-    if not client:
-        log_event(
-            "freescout_poll",
-            action="poll_updates",
-            outcome="skipped",
-            reason="ticket system not freescout",
-        )
-        return
-
     since = datetime.utcnow() - timedelta(minutes=5)
     while True:
         try:
+            reload_settings()
+            settings = get_settings()
+            if settings.get("FREESCOUT_WEBHOOK_ENABLED"):
+                log_event(
+                    "freescout_poll",
+                    action="poll_updates",
+                    outcome="skipped",
+                    reason="webhook ingestion enabled",
+                )
+                return
+            http_timeout = timeout if timeout is not None else settings["HTTP_TIMEOUT"]
+            client = _build_freescout_client(timeout=http_timeout)
+            if not client:
+                log_event(
+                    "freescout_poll",
+                    action="poll_updates",
+                    outcome="skipped",
+                    reason="ticket system not freescout",
+                )
+                return
+
             convs = fetch_recent_conversations(
                 since.isoformat(), timeout=http_timeout
             )
@@ -1036,6 +1038,7 @@ def freescout_webhook_handler(
 ) -> tuple[str, int, Optional[WebhookOutcome]]:
     """Generic webhook handler usable by Flask or FastAPI routes."""
 
+    reload_settings()
     settings = get_settings()
     secret = settings.get("FREESCOUT_WEBHOOK_SECRET", "")
     if secret and headers.get("X-Webhook-Secret") != secret:
@@ -1057,6 +1060,7 @@ def freescout_webhook_handler(
 
 
 def main():
+    reload_settings()
     settings = get_settings()
     args = parse_args(settings)
 
