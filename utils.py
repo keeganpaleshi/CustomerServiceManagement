@@ -369,18 +369,6 @@ def create_base64_message(sender, to, subject, body):
     return {"raw": base64.urlsafe_b64encode(msg.as_bytes()).decode()}
 
 
-def create_draft(service, user_id, msg_body, thread_id=None):
-    data = {"message": msg_body}
-    if thread_id:
-        data["message"]["threadId"] = thread_id
-    return service.users().drafts().create(userId=user_id, body=data).execute()
-
-
-def thread_has_draft(service, thread_id):
-    data = service.users().threads().get(userId="me", id=thread_id).execute()
-    return any("DRAFT" in (m.get("labelIds") or []) for m in data.get("messages", []))
-
-
 def ensure_label(service, label_name: str) -> Optional[str]:
     """Return an existing label's ID, creating it when missing."""
 
@@ -462,6 +450,45 @@ def critic_email(draft, original):
     except Exception as exc:
         print(f"Error critiquing email draft: {exc}")
         return default_rating
+
+
+def generate_ai_reply(subject, sender, snippet_or_body, email_type):
+    """
+    Generate a draft reply using OpenAI's new library (>=1.0.0).
+    """
+    settings = get_settings()
+    client = OpenAI(api_key=require_openai_api_key())
+
+    instructions = (
+        f"[Email type: {email_type}]\n\n"
+        "You are an AI email assistant. The user received an email.\n"
+        f"Subject: {subject}\n"
+        f"From: {sender}\n"
+        f"Email content/snippet: {snippet_or_body}\n\n"
+        "Please write a friendly and professional draft reply addressing the sender's query."
+    )
+    try:
+        response = client.chat.completions.create(
+            model=settings["DRAFT_MODEL"],
+            messages=[
+                {"role": "system", "content": settings["DRAFT_SYSTEM_MSG"]},
+                {"role": "user", "content": instructions},
+            ],
+            max_tokens=settings["DRAFT_MAX_TOKENS"],
+            temperature=0.7,
+        )
+        return response.choices[0].message.content.strip()
+    except Exception as exc:
+        print(f"Error calling OpenAI API: {exc}")
+        fallback_lines = [
+            "Hello,",
+            "",
+            "I'm sorry, but I couldn't generate a response at this time. Please review this email manually.",
+            "",
+            "Best,",
+            "Automated Script",
+        ]
+        return "\n".join(fallback_lines)
 
 
 def classify_email(text):
