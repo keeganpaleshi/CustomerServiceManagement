@@ -260,8 +260,15 @@ def process_gmail_message(
                         log_context={"thread_id": thread_id, "label_id": _TICKET_LABEL_ID},
                     )
                 except HttpError as exc:
-                    print(f"Failed to apply label to thread {thread_id}: {exc}")
-            drafted = _post_write_draft_reply(
+                    log_event(
+                        "gmail_label",
+                        action="apply_label",
+                        outcome="failed",
+                        reason=str(exc),
+                        thread_id=thread_id,
+                        label_id=_TICKET_LABEL_ID,
+                    )
+            _post_write_draft_reply(
                 freescout,
                 store,
                 conv_id,
@@ -377,8 +384,15 @@ def process_gmail_message(
                     log_context={"thread_id": thread_id, "label_id": _TICKET_LABEL_ID},
                 )
             except HttpError as exc:
-                print(f"Failed to apply label to thread {thread_id}: {exc}")
-        drafted = _post_write_draft_reply(
+                log_event(
+                    "gmail_label",
+                    action="apply_label",
+                    outcome="failed",
+                    reason=str(exc),
+                    thread_id=thread_id,
+                    label_id=_TICKET_LABEL_ID,
+                )
+        _post_write_draft_reply(
             freescout,
             store,
             conv_id,
@@ -987,19 +1001,14 @@ def main():
         status_counts = ticket_store.get_processed_status_counts()
         draft_count = ticket_store.get_bot_draft_count()
         recent_failures = ticket_store.get_recent_failures(limit=10)
-
-        print("Status summary:")
-        for status in ("success", "filtered", "failed"):
-            print(f"  {status}: {status_counts.get(status, 0)}")
-        print(f"  bot_drafts: {draft_count}")
-
-        if recent_failures:
-            print("Recent failures:")
-            for failure in recent_failures:
-                message_id = failure.get("gmail_message_id", "")
-                error = failure.get("error", "")
-                timestamp = failure.get("processed_at", "")
-                print(f"  - {message_id} | {error} | {timestamp}")
+        log_event(
+            "status_summary",
+            success=status_counts.get("success", 0),
+            filtered=status_counts.get("filtered", 0),
+            failed=status_counts.get("failed", 0),
+            bot_drafts=draft_count,
+            recent_failures=recent_failures or [],
+        )
         return
 
     if args.poll_freescout:
@@ -1030,7 +1039,13 @@ def main():
                 log_context={"label_name": TICKET_LABEL_NAME},
             )
         except HttpError as exc:
-            print(f"Error ensuring label '{TICKET_LABEL_NAME}': {exc}")
+            log_event(
+                "gmail_label",
+                action="ensure_label",
+                outcome="failed",
+                reason=str(exc),
+                label_name=TICKET_LABEL_NAME,
+            )
     global _TICKET_LABEL_ID
     _TICKET_LABEL_ID = ticket_label_id
     client = _build_freescout_client(timeout=args.timeout)
