@@ -146,14 +146,18 @@ class FreeScoutClient:
     def update_conversation(
         self,
         conversation_id: int,
-        priority: Optional[str] = None,
+        priority: Optional[object] = None,
         assignee: Optional[int] = None,
         tags: Optional[list[str]] = None,
         custom_fields: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         payload: Dict[str, Any] = {}
         if priority:
-            payload["priority"] = priority
+            bucket_priority = {"P0": 4, "P1": 3, "P2": 2, "P3": 1}
+            if isinstance(priority, str) and priority in bucket_priority:
+                payload["priority"] = bucket_priority[priority]
+            else:
+                payload["priority"] = priority
         if assignee is not None:
             payload["user_id"] = assignee
         if tags is not None:
@@ -264,11 +268,7 @@ class FreeScoutClient:
     def add_suggested_reply(
         self, conversation_id: int, text: str, user_id: Optional[int] = None
     ) -> Dict[str, Any]:
-        return self.add_internal_note(
-            conversation_id,
-            f"Suggested reply:\n\n{text}",
-            user_id=user_id,
-        )
+        return self.add_internal_note(conversation_id, text, user_id=user_id)
 
 
 # ----- Gmail helpers -----
@@ -492,7 +492,7 @@ def generate_ai_reply(subject, sender, snippet_or_body, email_type):
 
 
 def classify_email(text):
-    """Classify an email and return a dict with type and importance."""
+    """Classify an email and return a dict with type, importance, and reasoning."""
     settings = _load_settings()
     client = OpenAI(api_key=require_openai_api_key())
     try:
@@ -502,7 +502,11 @@ def classify_email(text):
                 {
                     "role": "system",
                     "content": (
-                        "Categorize the email as lead, customer, or other. Return ONLY JSON {\"type\":\"lead|customer|other\",\"importance\":1-10}. NO other text."
+                        "Categorize the email as lead, customer, or other. "
+                        "Return ONLY JSON with keys "
+                        "{\"type\":\"lead|customer|other\",\"importance\":1-10,"
+                        "\"reasoning\":\"...\",\"facts\":[\"...\"],\"uncertainty\":[\"...\"]}. "
+                        "Keep reasoning and lists concise. NO other text."
                     ),
                 },
                 {"role": "user", "content": text},
@@ -514,6 +518,23 @@ def classify_email(text):
     except Exception as e:
         print(f"Error classifying email: {e}")
         return {"type": "other", "importance": 0}
+
+
+def importance_to_bucket(importance_score: Optional[float]) -> str:
+    """Map an importance score (1-10) to a P0-P3 bucket."""
+    if importance_score is None:
+        return "P3"
+    try:
+        score = float(importance_score)
+    except (TypeError, ValueError):
+        return "P3"
+    if score >= 9:
+        return "P0"
+    if score >= 7:
+        return "P1"
+    if score >= 4:
+        return "P2"
+    return "P3"
 
 
 def create_ticket(

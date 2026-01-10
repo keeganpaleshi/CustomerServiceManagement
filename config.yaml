@@ -28,7 +28,7 @@ openai:
         know you're checking into it and will respond once you have the
         information.
   # Maximum tokens for the classification model
-  classify_max_tokens: 50
+  classify_max_tokens: 150
 
 thresholds:
   critic_threshold: 8.0
