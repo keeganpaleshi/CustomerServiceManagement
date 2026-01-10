@@ -220,8 +220,19 @@ def _is_p0(conversation: dict, tags: Sequence[str], p0_tags: Sequence[str]) -> b
     return bool(value and str(value).lower() in {"urgent", "high", "p0"})
 
 
-def _send_slack_notification(webhook_url: str, text: str) -> None:
-    requests.post(webhook_url, json={"text": text}, timeout=10).raise_for_status()
+def _send_slack_notification(
+    webhook_url: str, text: str, conversation_id: str
+) -> None:
+    try:
+        requests.post(webhook_url, json={"text": text}, timeout=10).raise_for_status()
+    except requests.RequestException as exc:
+        log_event(
+            "freescout_followup",
+            action="notify_slack",
+            outcome="failed",
+            conversation_id=conversation_id,
+            reason=str(exc),
+        )
 
 
 def _send_email_notification(email_cfg: dict, subject: str, body: str) -> None:
@@ -291,7 +302,7 @@ def _notify_if_configured(
     body = "\n".join(body_lines)
 
     if slack_url:
-        _send_slack_notification(slack_url, body)
+        _send_slack_notification(slack_url, body, conv_id)
     if email_cfg.get("smtp_host") and email_cfg.get("from") and email_cfg.get("to"):
         _send_email_notification(email_cfg, subject, body)
 
