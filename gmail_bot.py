@@ -409,6 +409,17 @@ def process_conversation(
     ]
     if high_priority:
         note_lines.append("Marked as high priority")
+    reasoning = cls.get("reasoning")
+    if reasoning:
+        note_lines.append(f"Reasoning: {reasoning}")
+    facts = cls.get("facts") or []
+    if isinstance(facts, list) and facts:
+        note_lines.append("Extracted facts:")
+        note_lines.extend([f"- {fact}" for fact in facts if fact])
+    uncertainty = cls.get("uncertainty") or []
+    if isinstance(uncertainty, list) and uncertainty:
+        note_lines.append("Uncertainty:")
+        note_lines.extend([f"- {item}" for item in uncertainty if item])
 
     if actions_cfg.get("post_internal_notes", True):
         try:
@@ -631,6 +642,7 @@ def process_freescout_conversation(
     conv_id = conversation.get("id")
     if not conv_id:
         return
+    actions_cfg = settings.get("FREESCOUT_ACTIONS", {})
 
     try:
         details = client.get_conversation(conv_id)
@@ -670,24 +682,6 @@ def process_freescout_conversation(
         )
     except requests.RequestException as exc:
         print(f"Failed to update conversation {conv_id}: {exc}")
-
-    note_lines = [
-        f"AI classification: {cls.get('type', 'unknown')}",
-        f"Importance: {importance}",
-    ]
-    if high_priority:
-        note_lines.append("Marked as high priority")
-    reasoning = cls.get("reasoning")
-    if reasoning:
-        note_lines.append(f"Reasoning: {reasoning}")
-    facts = cls.get("facts") or []
-    if isinstance(facts, list) and facts:
-        note_lines.append("Extracted facts:")
-        note_lines.extend([f"- {fact}" for fact in facts if fact])
-    uncertainty = cls.get("uncertainty") or []
-    if isinstance(uncertainty, list) and uncertainty:
-        note_lines.append("Uncertainty:")
-        note_lines.extend([f"- {item}" for item in uncertainty if item])
 
     result = process_conversation(
         conv_id,
