@@ -234,6 +234,22 @@ class FreeScoutClient:
         self.api_key = api_key
         self.timeout = timeout
 
+    @staticmethod
+    def _normalize_id(value: object) -> str:
+        if value is None:
+            return ""
+        return str(value)
+
+    @staticmethod
+    def _maybe_int(value: Optional[str]) -> Optional[int]:
+        if value is None or value == "":
+            return None
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+
+
     def _headers(self) -> Dict[str, str]:
         return {
             "Accept": "application/json",
@@ -241,7 +257,8 @@ class FreeScoutClient:
             "X-FreeScout-API-Key": self.api_key,
         }
 
-    def get_conversation(self, conversation_id: int) -> Dict[str, Any]:
+    def get_conversation(self, conversation_id: str) -> Dict[str, Any]:
+        conversation_id = self._normalize_id(conversation_id)
         resp = requests.get(
             f"{self.base_url}/api/conversations/{conversation_id}",
             headers=self._headers(),
@@ -271,12 +288,13 @@ class FreeScoutClient:
 
     def update_conversation(
         self,
-        conversation_id: int,
+        conversation_id: str,
         priority: Optional[object] = None,
-        assignee: Optional[int] = None,
+        assignee: Optional[str] = None,
         tags: Optional[list[str]] = None,
         custom_fields: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
+        conversation_id = self._normalize_id(conversation_id)
         payload: Dict[str, Any] = {}
         if priority is not None:
             bucket_priority = {"P0": 4, "P1": 3, "P2": 2, "P3": 1}
@@ -303,7 +321,7 @@ class FreeScoutClient:
                     priority=priority,
                 )
         if assignee is not None:
-            payload["user_id"] = assignee
+            payload["user_id"] = self._maybe_int(assignee) or assignee
         if tags is not None:
             payload["tags"] = tags
         serialized = serialize_custom_fields(custom_fields or {})
@@ -323,8 +341,9 @@ class FreeScoutClient:
         return resp.json()
 
     def add_customer_thread(
-        self, conversation_id: int, text: str, imported: bool = True
+        self, conversation_id: str, text: str, imported: bool = True
     ) -> Dict[str, Any]:
+        conversation_id = self._normalize_id(conversation_id)
         payload: Dict[str, Any] = {"type": "customer", "text": text, "imported": imported}
 
         def _request() -> Dict[str, Any]:
@@ -349,13 +368,14 @@ class FreeScoutClient:
         subject: str,
         sender: str,
         body: str,
-        mailbox_id: int,
+        mailbox_id: str,
         *,
         thread_id: Optional[str] = None,
         message_id: Optional[str] = None,
-        gmail_thread_field: Optional[int] = None,
-        gmail_message_field: Optional[int] = None,
+        gmail_thread_field: Optional[str] = None,
+        gmail_message_field: Optional[str] = None,
     ) -> Dict[str, Any]:
+        mailbox_id = self._normalize_id(mailbox_id)
         custom_fields: Dict[str, Any] = {}
         tags: list[str] = []
 
@@ -379,7 +399,7 @@ class FreeScoutClient:
 
         payload = {
             "type": "email",
-            "mailboxId": mailbox_id,
+            "mailboxId": self._maybe_int(mailbox_id) or mailbox_id,
             "subject": subject or "(no subject)",
             "customerEmail": sender,
             "customerName": sender,
@@ -412,11 +432,12 @@ class FreeScoutClient:
         )
 
     def add_internal_note(
-        self, conversation_id: int, text: str, user_id: Optional[int] = None
+        self, conversation_id: str, text: str, user_id: Optional[str] = None
     ) -> Dict[str, Any]:
+        conversation_id = self._normalize_id(conversation_id)
         payload: Dict[str, Any] = {"type": "note", "text": text}
         if user_id:
-            payload["user_id"] = user_id
+            payload["user_id"] = self._maybe_int(user_id) or user_id
         resp = requests.post(
             f"{self.base_url}/api/conversations/{conversation_id}/threads",
             headers=self._headers(),
@@ -427,26 +448,27 @@ class FreeScoutClient:
         return resp.json()
 
     def add_draft_reply(
-        self, conversation_id: int, text: str, user_id: Optional[int] = None
+        self, conversation_id: str, text: str, user_id: Optional[str] = None
     ) -> Dict[str, Any]:
         draft_text = f"Follow-up draft (not sent):\n\n{text}"
         return self.add_internal_note(conversation_id, draft_text, user_id=user_id)
 
     def add_suggested_reply(
-        self, conversation_id: int, text: str, user_id: Optional[int] = None
+        self, conversation_id: str, text: str, user_id: Optional[str] = None
     ) -> Dict[str, Any]:
         return self.add_internal_note(conversation_id, text, user_id=user_id)
 
     def create_agent_draft_reply(
         self,
-        conversation_id: int,
+        conversation_id: str,
         text: str,
-        user_id: Optional[int] = None,
+        user_id: Optional[str] = None,
         draft: bool = True,
     ) -> Dict[str, Any]:
+        conversation_id = self._normalize_id(conversation_id)
         payload: Dict[str, Any] = {"type": "reply", "text": text}
         if user_id:
-            payload["user_id"] = user_id
+            payload["user_id"] = self._maybe_int(user_id) or user_id
         if draft:
             payload["draft"] = True
         def _request() -> Dict[str, Any]:
@@ -468,11 +490,13 @@ class FreeScoutClient:
 
     def update_thread(
         self,
-        conversation_id: int,
-        thread_id: int,
+        conversation_id: str,
+        thread_id: str,
         text: str,
         draft: bool = True,
     ) -> Dict[str, Any]:
+        conversation_id = self._normalize_id(conversation_id)
+        thread_id = self._normalize_id(thread_id)
         payload: Dict[str, Any] = {"text": text, "draft": draft}
         def _request() -> Dict[str, Any]:
             resp = requests.put(

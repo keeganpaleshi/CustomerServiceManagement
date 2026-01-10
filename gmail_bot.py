@@ -99,6 +99,13 @@ class WebhookOutcome:
     drafted: bool = False
 
 
+def _normalize_id(value: object) -> Optional[str]:
+    if value is None:
+        return None
+    value_str = str(value).strip()
+    return value_str or None
+
+
 def should_filter_message(message: dict) -> Tuple[bool, str]:
     body_text = message.get("body_text", "")
     if is_promotional_or_spam(message, body_text):
@@ -211,7 +218,7 @@ def process_gmail_message(
             return ProcessResult(status="filtered", reason=reason)
 
         settings = get_settings()
-        conv_id = store.get_conversation_id_for_thread(thread_id)
+        conv_id = _normalize_id(store.get_conversation_id_for_thread(thread_id))
         if conv_id:
             if not freescout:
                 reason = "freescout disabled"
@@ -315,7 +322,7 @@ def process_gmail_message(
             )
             return ProcessResult(status="failed_retryable", reason=reason)
 
-        mailbox_id = settings.get("FREESCOUT_MAILBOX_ID")
+        mailbox_id = _normalize_id(settings.get("FREESCOUT_MAILBOX_ID"))
         if not mailbox_id:
             reason = "freescout mailbox missing"
             store.mark_failed(message_id, thread_id, reason)
@@ -329,8 +336,12 @@ def process_gmail_message(
             )
             return ProcessResult(status="failed_permanent", reason=reason)
 
-        gmail_thread_field = settings.get("FREESCOUT_GMAIL_THREAD_FIELD_ID")
-        gmail_message_field = settings.get("FREESCOUT_GMAIL_MESSAGE_FIELD_ID")
+        gmail_thread_field = _normalize_id(
+            settings.get("FREESCOUT_GMAIL_THREAD_FIELD_ID")
+        )
+        gmail_message_field = _normalize_id(
+            settings.get("FREESCOUT_GMAIL_MESSAGE_FIELD_ID")
+        )
 
         try:
             ticket = freescout.create_conversation(
@@ -927,7 +938,7 @@ def process_freescout_conversation(
     conversation: dict,
     settings: dict,
 ):
-    conv_id = conversation.get("id")
+    conv_id = _normalize_id(conversation.get("id"))
     if not conv_id:
         return
 
@@ -1021,7 +1032,7 @@ def freescout_webhook_handler(
     if not payload:
         return "missing payload", 400, None
 
-    conv_id = payload.get("conversation_id") or payload.get("id")
+    conv_id = _normalize_id(payload.get("conversation_id") or payload.get("id"))
     if not conv_id:
         return "missing conversation id", 400, None
 
