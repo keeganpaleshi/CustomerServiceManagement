@@ -11,6 +11,7 @@ from utils import (
     generate_ai_reply,
     get_settings,
     log_event,
+    reload_settings,
     require_ticket_settings,
 )
 
@@ -328,6 +329,7 @@ def _iter_conversations(
 
 
 def main() -> None:
+    reload_settings()
     settings = get_settings()
     args = parse_args(settings)
     if settings["TICKET_SYSTEM"] != "freescout":
