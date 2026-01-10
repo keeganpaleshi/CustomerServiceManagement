@@ -261,7 +261,7 @@ def process_gmail_message(
                     )
                 except HttpError as exc:
                     print(f"Failed to apply label to thread {thread_id}: {exc}")
-            _post_write_draft_reply(
+            drafted = _post_write_draft_reply(
                 freescout,
                 store,
                 conv_id,
@@ -378,7 +378,7 @@ def process_gmail_message(
                 )
             except HttpError as exc:
                 print(f"Failed to apply label to thread {thread_id}: {exc}")
-        _post_write_draft_reply(
+        drafted = _post_write_draft_reply(
             freescout,
             store,
             conv_id,
