@@ -2,6 +2,7 @@ import base64
 import json
 import os
 import pickle
+import re
 import time
 from email.mime.text import MIMEText
 from functools import lru_cache
@@ -491,7 +492,8 @@ def generate_ai_reply(subject, sender, snippet_or_body, email_type):
         f"Subject: {subject}\n"
         f"From: {sender}\n"
         f"Email content/snippet: {snippet_or_body}\n\n"
-        "Please write a friendly and professional draft reply addressing the sender's query."
+        "Please write a friendly and professional draft reply addressing the sender's query. "
+        "Return only the draft reply text without analysis, reasoning, or extra labels."
     )
     try:
         response = client.chat.completions.create(
@@ -503,7 +505,8 @@ def generate_ai_reply(subject, sender, snippet_or_body, email_type):
             max_tokens=settings["DRAFT_MAX_TOKENS"],
             temperature=0.7,
         )
-        return response.choices[0].message.content.strip()
+        raw_reply = response.choices[0].message.content.strip()
+        return sanitize_draft_reply(raw_reply)
     except Exception as exc:
         print(f"Error calling OpenAI API: {exc}")
         fallback_lines = [
@@ -515,6 +518,39 @@ def generate_ai_reply(subject, sender, snippet_or_body, email_type):
             "Automated Script",
         ]
         return "\n".join(fallback_lines)
+
+
+def sanitize_draft_reply(text: str) -> str:
+    if not text:
+        return ""
+
+    cleaned = text.strip()
+    cleaned = re.sub(
+        r"<analysis>.*?</analysis>",
+        "",
+        cleaned,
+        flags=re.DOTALL | re.IGNORECASE,
+    ).strip()
+
+    for label in ("Final:", "Reply:", "Response:", "Draft reply:"):
+        if label in cleaned:
+            cleaned = cleaned.split(label)[-1].strip()
+
+    cleaned_lines = []
+    skip_reasoning = False
+    for line in cleaned.splitlines():
+        marker = line.strip().lower()
+        if marker.startswith(("reasoning:", "analysis:", "thoughts:", "notes:")):
+            skip_reasoning = True
+            continue
+        if skip_reasoning and marker == "":
+            skip_reasoning = False
+            continue
+        if not skip_reasoning:
+            cleaned_lines.append(line)
+
+    cleaned = "\n".join(cleaned_lines).strip()
+    return cleaned or text.strip()
 
 
 def classify_email(text):

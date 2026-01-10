@@ -643,6 +643,7 @@ def process_freescout_conversation(
     conv_id = conversation.get("id")
     if not conv_id:
         return
+    actions_cfg = settings.get("FREESCOUT_ACTIONS", {})
 
     try:
         details = client.get_conversation(conv_id)
@@ -652,6 +653,36 @@ def process_freescout_conversation(
 
     subject = details.get("subject") or conversation.get("subject") or "(no subject)"
     latest_text = _extract_latest_thread_text(details) or conversation.get("last_text", "")
+
+    cls = classify_email(f"Subject:{subject}\n\n{latest_text}")
+    importance = cls.get("importance", 0)
+    high_priority = importance >= actions_cfg.get("priority_high_threshold", 8)
+    bucket = importance_to_bucket(importance)
+
+    tags = None
+    if actions_cfg.get("apply_tags", True):
+        tags = _build_tags(cls, bucket, high_priority)
+
+    custom_fields = _prepare_custom_fields(cls, settings)
+    if not custom_fields:
+        custom_fields = None
+
+    priority_value = None
+    if actions_cfg.get("update_priority", True):
+        priority_value = bucket
+
+    assignee = actions_cfg.get("assign_to_user_id")
+
+    try:
+        client.update_conversation(
+            conv_id,
+            priority=priority_value,
+            assignee=assignee,
+            tags=tags,
+            custom_fields=custom_fields,
+        )
+    except requests.RequestException as exc:
+        print(f"Failed to update conversation {conv_id}: {exc}")
 
     result = process_conversation(
         conv_id,
