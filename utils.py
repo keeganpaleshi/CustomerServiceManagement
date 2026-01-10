@@ -703,6 +703,27 @@ def sanitize_draft_reply(text: str) -> str:
 def classify_email(text):
     """Classify an email and return a dict with type, importance, and reasoning."""
     settings = _load_settings()
+    default_response = {
+        "type": "other",
+        "importance": 0,
+        "reasoning": "",
+        "facts": [],
+        "uncertainty": [],
+    }
+    def is_valid_response(payload: Any) -> bool:
+        if not isinstance(payload, dict):
+            return False
+        if not isinstance(payload.get("type"), str):
+            return False
+        if not isinstance(payload.get("importance"), (int, float)):
+            return False
+        if not isinstance(payload.get("reasoning"), str):
+            return False
+        if not isinstance(payload.get("facts"), list):
+            return False
+        if not isinstance(payload.get("uncertainty"), list):
+            return False
+        return True
     limiter = _get_openai_rate_limiter()
     if limiter and not limiter.allow():
         log_event(
@@ -711,7 +732,7 @@ def classify_email(text):
             action="classify_email",
             reason="rate_limited",
         )
-        return {"type": "other", "importance": 0}
+        return default_response
     client = OpenAI(
         api_key=require_openai_api_key(), timeout=settings["OPENAI_TIMEOUT"]
     )
@@ -734,7 +755,10 @@ def classify_email(text):
             temperature=0,
             max_tokens=settings["CLASSIFY_MAX_TOKENS"],
         )
-        return json.loads(resp.choices[0].message.content)
+        parsed = json.loads(resp.choices[0].message.content)
+        if not is_valid_response(parsed):
+            return default_response
+        return parsed
     except Exception as e:
         log_event(
             "openai_error",
@@ -742,7 +766,7 @@ def classify_email(text):
             action="classify_email",
             reason=str(e),
         )
-        return {"type": "other", "importance": 0}
+        return default_response
 
 
 def importance_to_bucket(importance_score: Optional[float]) -> str:
