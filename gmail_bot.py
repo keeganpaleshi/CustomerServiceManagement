@@ -268,7 +268,7 @@ def process_gmail_message(
                         thread_id=thread_id,
                         label_id=_TICKET_LABEL_ID,
                     )
-            _post_write_draft_reply(
+            drafted = _post_write_draft_reply(
                 freescout,
                 store,
                 conv_id,
@@ -392,7 +392,7 @@ def process_gmail_message(
                     thread_id=thread_id,
                     label_id=_TICKET_LABEL_ID,
                 )
-        _post_write_draft_reply(
+        drafted = _post_write_draft_reply(
             freescout,
             store,
             conv_id,
