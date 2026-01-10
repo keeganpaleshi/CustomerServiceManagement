@@ -81,6 +81,13 @@ def _parse_datetime(value: Optional[str]) -> Optional[datetime]:
     return parsed
 
 
+def _normalize_id(value: object) -> Optional[str]:
+    if value is None:
+        return None
+    value_str = str(value).strip()
+    return value_str or None
+
+
 def _extract_tags(conversation: dict) -> list[str]:
     tags = conversation.get("tags") or []
     if isinstance(tags, dict):
@@ -213,8 +220,19 @@ def _is_p0(conversation: dict, tags: Sequence[str], p0_tags: Sequence[str]) -> b
     return bool(value and str(value).lower() in {"urgent", "high", "p0"})
 
 
-def _send_slack_notification(webhook_url: str, text: str) -> None:
-    requests.post(webhook_url, json={"text": text}, timeout=10).raise_for_status()
+def _send_slack_notification(
+    webhook_url: str, text: str, conversation_id: str
+) -> None:
+    try:
+        requests.post(webhook_url, json={"text": text}, timeout=10).raise_for_status()
+    except requests.RequestException as exc:
+        log_event(
+            "freescout_followup",
+            action="notify_slack",
+            outcome="failed",
+            conversation_id=conversation_id,
+            reason=str(exc),
+        )
 
 
 def _send_email_notification(email_cfg: dict, subject: str, body: str) -> None:
@@ -243,7 +261,10 @@ def _send_email_notification(email_cfg: dict, subject: str, body: str) -> None:
             server.login(username, password)
         server.send_message(message)
     finally:
-        server.quit()
+        try:
+            server.quit()
+        except Exception:
+            pass
 
 
 def _notify_if_configured(
@@ -264,7 +285,9 @@ def _notify_if_configured(
     if not _is_p0(conversation, tags, p0_tags):
         return
 
-    conv_id = str(conversation.get("id"))
+    conv_id = _normalize_id(conversation.get("id"))
+    if not conv_id:
+        return
     base_url = settings.get("FREESCOUT_URL", "")
     link = _conversation_link(base_url, conv_id) if base_url else ""
 
@@ -279,7 +302,7 @@ def _notify_if_configured(
     body = "\n".join(body_lines)
 
     if slack_url:
-        _send_slack_notification(slack_url, body)
+        _send_slack_notification(slack_url, body, conv_id)
     if email_cfg.get("smtp_host") and email_cfg.get("from") and email_cfg.get("to"):
         _send_email_notification(email_cfg, subject, body)
 
@@ -334,7 +357,7 @@ def main() -> None:
     conversations = _iter_conversations(client, params, args.limit)
     for conversation in conversations:
         processed += 1
-        conv_id = conversation.get("id")
+        conv_id = _normalize_id(conversation.get("id"))
         if not conv_id:
             filtered += 1
             continue

@@ -22,7 +22,7 @@ class TicketStore:
                 gmail_message_id TEXT PRIMARY KEY,
                 gmail_thread_id TEXT,
                 freescout_conversation_id TEXT,
-                status TEXT NOT NULL CHECK(status IN ('success', 'filtered', 'failed')),
+                status TEXT NOT NULL CHECK(status IN ('success', 'filtered', 'failed', 'processing')),
                 action TEXT CHECK(action IN ('create','append')),
                 error TEXT,
                 processed_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -50,6 +50,14 @@ class TicketStore:
             )
             """
         )
+        self._conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS webhook_counters (
+                counter TEXT PRIMARY KEY,
+                value INTEGER NOT NULL DEFAULT 0
+            )
+            """
+        )
         self._conn.commit()
 
     def _migrate_processed_messages(self) -> None:
@@ -61,10 +69,14 @@ class TicketStore:
             return
         schema_sql = row[0]
         needs_filtered = "filtered" not in schema_sql
-        needs_action = "action" not in schema_sql
-        if not needs_filtered and not needs_action:
+        needs_processing = "processing" not in schema_sql
+        cur = self._conn.execute("PRAGMA table_info(processed_messages)")
+        columns = [col[1] for col in cur.fetchall()]
+        needs_action = "action" not in columns
+        if not needs_filtered and not needs_processing and not needs_action:
             return
-        if needs_filtered:
+        if needs_filtered or needs_processing:
+            has_action = "action" in columns
             self._conn.execute("ALTER TABLE processed_messages RENAME TO processed_messages_old")
             self._conn.execute(
                 """
@@ -72,15 +84,16 @@ class TicketStore:
                     gmail_message_id TEXT PRIMARY KEY,
                     gmail_thread_id TEXT,
                     freescout_conversation_id TEXT,
-                    status TEXT NOT NULL CHECK(status IN ('success', 'filtered', 'failed')),
+                    status TEXT NOT NULL CHECK(status IN ('success', 'filtered', 'failed', 'processing')),
                     action TEXT CHECK(action IN ('create','append')),
                     error TEXT,
                     processed_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
                 )
                 """
             )
+            action_column = "action" if has_action else "NULL"
             self._conn.execute(
-                """
+                f"""
                 INSERT INTO processed_messages (
                     gmail_message_id,
                     gmail_thread_id,
@@ -95,7 +108,7 @@ class TicketStore:
                     gmail_thread_id,
                     freescout_conversation_id,
                     status,
-                    NULL,
+                    {action_column},
                     error,
                     processed_at
                 FROM processed_messages_old
@@ -108,6 +121,28 @@ class TicketStore:
                 "ADD COLUMN action TEXT CHECK(action IN ('create','append'))"
             )
         self._conn.commit()
+
+    def mark_processing_if_new(
+        self, gmail_message_id: str, gmail_thread_id: Optional[str]
+    ) -> bool:
+        cur = self._conn.execute(
+            """
+            INSERT INTO processed_messages (
+                gmail_message_id,
+                gmail_thread_id,
+                freescout_conversation_id,
+                status,
+                action,
+                error,
+                processed_at
+            )
+            VALUES (?, ?, NULL, 'processing', NULL, NULL, CURRENT_TIMESTAMP)
+            ON CONFLICT(gmail_message_id) DO NOTHING
+            """,
+            (gmail_message_id, gmail_thread_id),
+        )
+        self._conn.commit()
+        return cur.rowcount == 1
 
     def processed_success(self, gmail_message_id: str) -> bool:
         cur = self._conn.execute(
@@ -236,7 +271,11 @@ class TicketStore:
         self._conn.commit()
 
     def mark_failed(
-        self, gmail_message_id: str, gmail_thread_id: str, error: str, conv_id: Optional[str] = None
+        self,
+        gmail_message_id: str,
+        gmail_thread_id: Optional[str],
+        error: str,
+        conv_id: Optional[str] = None,
     ) -> None:
         self._conn.execute(
             """
@@ -345,6 +384,22 @@ class TicketStore:
         cur = self._conn.execute("SELECT COUNT(*) FROM bot_drafts")
         row = cur.fetchone()
         return int(row[0]) if row else 0
+
+    def increment_webhook_counter(self, counter: str, amount: int = 1) -> None:
+        self._conn.execute(
+            """
+            INSERT INTO webhook_counters (counter, value)
+            VALUES (?, ?)
+            ON CONFLICT(counter) DO UPDATE SET
+                value = value + excluded.value
+            """,
+            (counter, amount),
+        )
+        self._conn.commit()
+
+    def get_webhook_counters(self) -> dict:
+        cur = self._conn.execute("SELECT counter, value FROM webhook_counters")
+        return {row[0]: int(row[1]) for row in cur.fetchall()}
 
     def close(self) -> None:
         try:

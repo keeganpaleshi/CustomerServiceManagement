@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -10,19 +11,29 @@ from fastapi import FastAPI, Header, Request
 from fastapi.responses import JSONResponse
 
 from gmail_bot import freescout_webhook_handler
-from utils import log_event
+from storage import TicketStore
+from utils import get_settings, log_event
 
-app = FastAPI()
 LOG_DIR = Path(__file__).resolve().parent / "logs" / "webhooks"
 SAFE_FILENAME_RE = re.compile(r"[^A-Za-z0-9_.-]+")
-COUNTERS = {
-    "processed": 0,
-    "created": 0,
-    "appended": 0,
-    "drafted": 0,
-    "filtered": 0,
-    "failed": 0,
-}
+COUNTER_KEYS = ("processed", "created", "appended", "drafted", "filtered", "failed")
+
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    yield
+    log_event(
+        "webhook_ingest_summary",
+        processed=COUNTERS["processed"],
+        created=COUNTERS["created"],
+        appended=COUNTERS["appended"],
+        drafted=COUNTERS["drafted"],
+        filtered=COUNTERS["filtered"],
+        failed=COUNTERS["failed"],
+    )
+
+
+app = FastAPI(lifespan=lifespan)
 
 
 def _safe_filename(value: str) -> str:
@@ -48,6 +59,12 @@ def log_webhook_payload(payload: Any) -> Path:
     return logfile
 
 
+def _get_counter_store() -> TicketStore:
+    settings = get_settings()
+    sqlite_path = settings.get("TICKET_SQLITE_PATH") or "./csm.sqlite"
+    return TicketStore(sqlite_path)
+
+
 @app.post("/freescout")
 async def freescout(payload: Request, x_webhook_secret: str | None = Header(None)):
     raw_body = await payload.body()
@@ -71,40 +88,47 @@ async def freescout(payload: Request, x_webhook_secret: str | None = Header(None
     message, status, outcome = freescout_webhook_handler(
         body, {"X-Webhook-Secret": x_webhook_secret}
     )
-    if status >= 400:
-        COUNTERS["failed"] += 1
-        log_event(
-            "webhook_ingest",
-            action="handle_payload",
-            outcome="failed",
-            conversation_id=conversation_id,
-            reason=message,
-        )
-    else:
-        COUNTERS["processed"] += 1
-        if outcome:
-            action = outcome.action
-            if action in COUNTERS:
-                COUNTERS[action] += 1
-            if outcome.drafted:
-                COUNTERS["drafted"] += 1
-        log_event(
-            "webhook_ingest",
-            action="handle_payload",
-            outcome="success",
-            conversation_id=conversation_id,
-        )
+    counter_store = _get_counter_store()
+    try:
+        if status >= 400:
+            counter_store.increment_webhook_counter("failed")
+            log_event(
+                "webhook_ingest",
+                action="handle_payload",
+                outcome="failed",
+                conversation_id=conversation_id,
+                reason=message,
+            )
+        else:
+            counter_store.increment_webhook_counter("processed")
+            if outcome:
+                action = outcome.action
+                if action in COUNTER_KEYS:
+                    counter_store.increment_webhook_counter(action)
+                if outcome.drafted:
+                    counter_store.increment_webhook_counter("drafted")
+            log_event(
+                "webhook_ingest",
+                action="handle_payload",
+                outcome="success",
+                conversation_id=conversation_id,
+            )
+    finally:
+        counter_store.close()
     return JSONResponse({"message": message}, status_code=status)
 
 
 @app.on_event("shutdown")
 def log_summary() -> None:
+    counter_store = _get_counter_store()
+    counters = counter_store.get_webhook_counters()
+    counter_store.close()
     log_event(
         "webhook_ingest_summary",
-        processed=COUNTERS["processed"],
-        created=COUNTERS["created"],
-        appended=COUNTERS["appended"],
-        drafted=COUNTERS["drafted"],
-        filtered=COUNTERS["filtered"],
-        failed=COUNTERS["failed"],
+        processed=counters.get("processed", 0),
+        created=counters.get("created", 0),
+        appended=counters.get("appended", 0),
+        drafted=counters.get("drafted", 0),
+        filtered=counters.get("filtered", 0),
+        failed=counters.get("failed", 0),
     )
