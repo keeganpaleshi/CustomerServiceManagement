@@ -74,12 +74,10 @@ latest customer message, classifies it with OpenAI, and then updates the ticket
 in place: priority, assignment, tags, custom fields, and internal notes with an
 optional suggested reply.
 
-### Draft reply guidance and deprecation notice
+### Legacy Code
 
-Draft replies now live inside FreeScout as internal notes. The legacy
-`Draft_Replies.py` script is deprecated and retained only for historical
-reference; new reply suggestions should be generated through the FreeScout
-ticket flow in `gmail_bot.py` or the follow-up tooling.
+`Draft_Replies.py` is deprecated, not imported, not executed, and retained only
+for historical reference. It may be removed in a future cleanup.
 
 ### Configure actions
 
