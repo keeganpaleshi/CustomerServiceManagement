@@ -36,13 +36,13 @@ message until it reaches a terminal DB state.
 ## Quick start
 
 ```bash
-pip install google-api-python-client google-auth-oauthlib openai requests
+pip install -r requirements.txt
 export OPENAI_API_KEY="sk-…"
 export FREESCOUT_URL="https://desk.example.com"   # or set in config.yaml
 export FREESCOUT_KEY="your-freescout-api-key"      # or set in config.yaml
 python gmail_bot.py
 
-OAuth – the first run opens a browser window; token is cached in token.pickle.
+OAuth – the first run opens a browser window; token is cached in token.json.
 Pass `--console-auth` or set `gmail.use_console_oauth: true` in `config.yaml`
 to use the copy/paste console flow when no browser is available.
 ```
