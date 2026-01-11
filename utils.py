@@ -959,6 +959,44 @@ def importance_to_bucket(importance_score: Optional[float]) -> str:
     return "P3"
 
 
+def parse_datetime(value: Optional[str]) -> Optional["datetime"]:
+    """Parse ISO datetime string to datetime object with timezone support."""
+    from datetime import datetime, timezone
+    if not value:
+        return None
+    if isinstance(value, datetime):
+        return value
+    if value.endswith("Z"):
+        value = value.replace("Z", "+00:00")
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
+def normalize_id(value: object) -> Optional[str]:
+    """Normalize an ID value to a string, returning None for empty/null values."""
+    if value is None:
+        return None
+    value_str = str(value).strip()
+    return value_str or None
+
+
+def is_customer_thread(thread: dict) -> bool:
+    """Check if a FreeScout thread is from a customer."""
+    if thread.get("type") == "customer":
+        return True
+    return bool(thread.get("customer_id") and not thread.get("user_id"))
+
+
+def thread_timestamp(thread: dict) -> Optional["datetime"]:
+    """Extract timestamp from a FreeScout thread."""
+    return parse_datetime(thread.get("created_at") or thread.get("updated_at"))
+
+
 def create_ticket(
     subject: str,
     sender: str,

@@ -10,9 +10,13 @@ from utils import (
     FreeScoutClient,
     generate_ai_reply,
     get_settings,
+    is_customer_thread,
     log_event,
+    normalize_id,
+    parse_datetime,
     reload_settings,
     require_ticket_settings,
+    thread_timestamp,
 )
 
 
@@ -64,29 +68,6 @@ def parse_args(settings: Optional[Dict] = None):
         help="Log qualifying conversations without updating FreeScout",
     )
     return parser.parse_args()
-
-
-def _parse_datetime(value: Optional[str]) -> Optional[datetime]:
-    if not value:
-        return None
-    if isinstance(value, datetime):
-        return value
-    if value.endswith("Z"):
-        value = value.replace("Z", "+00:00")
-    try:
-        parsed = datetime.fromisoformat(value)
-    except ValueError:
-        return None
-    if parsed.tzinfo is None:
-        return parsed.replace(tzinfo=timezone.utc)
-    return parsed
-
-
-def _normalize_id(value: object) -> Optional[str]:
-    if value is None:
-        return None
-    value_str = str(value).strip()
-    return value_str or None
 
 
 def _extract_tags(conversation: dict) -> list[str]:
@@ -142,16 +123,6 @@ def _has_excluded(values: Iterable[str], excluded: Sequence[str]) -> bool:
     return any(excluded_tag.lower() in available for excluded_tag in excluded)
 
 
-def _thread_timestamp(thread: dict) -> Optional[datetime]:
-    return _parse_datetime(thread.get("created_at") or thread.get("updated_at"))
-
-
-def _is_customer_thread(thread: dict) -> bool:
-    if thread.get("type") == "customer":
-        return True
-    return bool(thread.get("customer_id") and not thread.get("user_id"))
-
-
 def _is_agent_thread(thread: dict) -> bool:
     if thread.get("type") in {"reply", "message"}:
         return True
@@ -162,9 +133,9 @@ def _extract_latest_customer_thread(threads: Sequence[dict]) -> Optional[dict]:
     latest: Optional[dict] = None
     latest_time: Optional[datetime] = None
     for thread in threads:
-        if not _is_customer_thread(thread):
+        if not is_customer_thread(thread):
             continue
-        ts = _thread_timestamp(thread)
+        ts = thread_timestamp(thread)
         if ts and (latest_time is None or ts > latest_time):
             latest_time = ts
             latest = thread
@@ -176,7 +147,7 @@ def _latest_timestamp(threads: Sequence[dict], predicate) -> Optional[datetime]:
     for thread in threads:
         if not predicate(thread):
             continue
-        ts = _thread_timestamp(thread)
+        ts = thread_timestamp(thread)
         if ts and (latest is None or ts > latest):
             latest = ts
     return latest
@@ -297,7 +268,7 @@ def _notify_if_configured(
     if not _is_p0(conversation, tags, p0_tags):
         return
 
-    conv_id = _normalize_id(conversation.get("id"))
+    conv_id = normalize_id(conversation.get("id"))
     if not conv_id:
         return
     base_url = settings.get("FREESCOUT_URL", "")
@@ -392,7 +363,7 @@ def main() -> None:
     conversations = _iter_conversations(client, params, args.limit)
     for conversation in conversations:
         processed += 1
-        conv_id = _normalize_id(conversation.get("id"))
+        conv_id = normalize_id(conversation.get("id"))
         if not conv_id:
             filtered += 1
             continue
@@ -430,7 +401,7 @@ def main() -> None:
             filtered += 1
             continue
 
-        last_customer_time = _thread_timestamp(latest_customer)
+        last_customer_time = thread_timestamp(latest_customer)
         if not last_customer_time or now - last_customer_time < min_age:
             filtered += 1
             continue

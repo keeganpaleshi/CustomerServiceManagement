@@ -20,13 +20,17 @@ from utils import (
     get_settings,
     FreeScoutClient,
     is_promotional_or_spam,
+    is_customer_thread,
     extract_plain_text,
     generate_ai_reply,
     log_event,
+    normalize_id,
+    parse_datetime,
     require_ticket_settings,
     importance_to_bucket,
     reload_settings,
     retry_request,
+    thread_timestamp,
 )
 from storage import TicketStore
 
@@ -101,13 +105,6 @@ ProcessResult.SKIPPED_ALREADY_CLAIMED = ProcessResult(
 class WebhookOutcome:
     action: str
     drafted: bool = False
-
-
-def _normalize_id(value: object) -> Optional[str]:
-    if value is None:
-        return None
-    value_str = str(value).strip()
-    return value_str or None
 
 
 def should_filter_message(message: dict) -> Tuple[bool, str]:
@@ -223,7 +220,7 @@ def process_gmail_message(
             return ProcessResult(status="filtered", reason=reason)
 
         settings = get_settings()
-        conv_id = _normalize_id(store.get_conversation_id_for_thread(thread_id))
+        conv_id = normalize_id(store.get_conversation_id_for_thread(thread_id))
         if conv_id:
             if not freescout:
                 reason = "freescout disabled"
@@ -338,7 +335,7 @@ def process_gmail_message(
             )
             return ProcessResult(status="failed_retryable", reason=reason)
 
-        mailbox_id = _normalize_id(settings.get("FREESCOUT_MAILBOX_ID"))
+        mailbox_id = normalize_id(settings.get("FREESCOUT_MAILBOX_ID"))
         if not mailbox_id:
             reason = "freescout mailbox missing"
             store.mark_failed(message_id, thread_id, reason)
@@ -352,10 +349,10 @@ def process_gmail_message(
             )
             return ProcessResult(status="failed_permanent", reason=reason)
 
-        gmail_thread_field = _normalize_id(
+        gmail_thread_field = normalize_id(
             settings.get("FREESCOUT_GMAIL_THREAD_FIELD_ID")
         )
-        gmail_message_field = _normalize_id(
+        gmail_message_field = normalize_id(
             settings.get("FREESCOUT_GMAIL_MESSAGE_FIELD_ID")
         )
 
@@ -528,39 +525,13 @@ def _build_freescout_client(timeout: Optional[int] = None) -> Optional[FreeScout
     return FreeScoutClient(url, key, timeout=http_timeout)
 
 
-def _is_customer_thread(thread: dict) -> bool:
-    if thread.get("type") == "customer":
-        return True
-    return bool(thread.get("customer_id") and not thread.get("user_id"))
-
-
-def _parse_datetime(value: Optional[str]) -> Optional[datetime]:
-    if not value:
-        return None
-    if isinstance(value, datetime):
-        return value
-    if value.endswith("Z"):
-        value = value.replace("Z", "+00:00")
-    try:
-        parsed = datetime.fromisoformat(value)
-    except ValueError:
-        return None
-    if parsed.tzinfo is None:
-        return parsed.replace(tzinfo=timezone.utc)
-    return parsed
-
-
-def _thread_timestamp(thread: dict) -> Optional[datetime]:
-    return _parse_datetime(thread.get("created_at") or thread.get("updated_at"))
-
-
 def _extract_latest_thread_text(conversation: dict) -> str:
     threads = conversation.get("threads") or conversation.get("data") or []
     if isinstance(threads, dict):
         threads = threads.get("threads", [])
 
     customer_threads = [
-        t for t in threads if isinstance(t, dict) and _is_customer_thread(t)
+        t for t in threads if isinstance(t, dict) and is_customer_thread(t)
     ]
     if not customer_threads:
         return conversation.get("last_text", "") or conversation.get("text", "")
@@ -568,7 +539,7 @@ def _extract_latest_thread_text(conversation: dict) -> str:
     latest: Optional[dict] = None
     latest_time: Optional[datetime] = None
     for thread in customer_threads:
-        ts = _thread_timestamp(thread)
+        ts = thread_timestamp(thread)
         if ts and (latest_time is None or ts > latest_time):
             latest_time = ts
             latest = thread
@@ -725,7 +696,7 @@ def _extract_id(response: Optional[dict], id_type: str = "conversation") -> Opti
     ]
 
     for candidate in candidates:
-        normalized = _normalize_id(candidate)
+        normalized = normalize_id(candidate)
         if normalized:
             return normalized
     return None
@@ -744,7 +715,7 @@ def _post_write_draft_reply(
     sender: str,
     body_text: str,
 ) -> bool:
-    conversation_id = _normalize_id(conversation_id)
+    conversation_id = normalize_id(conversation_id)
     if not client or not conversation_id:
         return False
     reply_text = generate_ai_reply(subject, sender, body_text, "customer")
@@ -1000,7 +971,7 @@ def process_freescout_conversation(
     conversation: dict,
     settings: dict,
 ):
-    conv_id = _normalize_id(conversation.get("id"))
+    conv_id = normalize_id(conversation.get("id"))
     if not conv_id:
         return
 
@@ -1130,7 +1101,7 @@ def freescout_webhook_handler(
     if not payload:
         return "missing payload", 400, None
 
-    conv_id = _normalize_id(payload.get("conversation_id") or payload.get("id"))
+    conv_id = normalize_id(payload.get("conversation_id") or payload.get("id"))
     if not conv_id:
         return "missing conversation id", 400, None
 
