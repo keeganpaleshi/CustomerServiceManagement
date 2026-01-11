@@ -81,12 +81,23 @@ flake8 Draft_Replies.py gmail_bot.py utils.py
 
 Edit `config.yaml` to adjust limits and model settings. Key options include:
 
+#### Core settings (required)
+
+- `gmail.query` – default Gmail search query.
+- `ticket.mailbox_id` – FreeScout mailbox ID used when creating conversations.
+- `http.timeout` – HTTP request timeout in seconds.
+- `limits.max_drafts` – maximum number of drafts created per run.
+- `openai.classify_max_tokens` – token limit for the classification step.
+
+#### AI drafting settings (optional)
+
 - `openai.draft_system_message` – system prompt used for draft replies.
 - `openai.draft_max_tokens` – token limit for reply generation.
-- `openai.classify_max_tokens` – token limit for the classification step.
-- `limits.max_drafts` – maximum number of drafts created per run.
-- `gmail.query` – default Gmail search query.
-- `http.timeout` – HTTP request timeout in seconds.
+- `actions.post_suggested_reply` – add an internal note containing a suggested AI reply.
+
+#### Follow-up drafting settings (optional)
+
+- `ticket.followup.*` – controls follow-up draft behavior and scheduling.
 
 ## Working fully inside FreeScout
 
