@@ -16,6 +16,29 @@
 
 ---
 
+## Execution Model (Authoritative)
+
+One core pipeline always runs. AI drafting is optional and never auto-sends.
+Legacy Gmail draft code is historical only and is not executed.
+
+## Core Pipeline (Always Enabled)
+
+These steps always run and do **not** generate replies:
+
+1. Read unread Gmail messages.
+2. Classify messages (lead/customer/other) and score importance.
+3. Filter out `other`, promotional, and newsletter messages.
+4. Create or update FreeScout tickets based on importance.
+5. Log each processed email and poll FreeScout for updates.
+
+## AI Drafting (Optional, Never Auto-Send)
+
+When enabled, draft replies are generated as internal FreeScout notes so agents
+can review and send manually. Drafts are never sent automatically, and no Gmail
+drafts are created.
+
+---
+
 ## Processing gates and terminal states
 
 The database is the **only** skip gate for Gmail message processing and is the
