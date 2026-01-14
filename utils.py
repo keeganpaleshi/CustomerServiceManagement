@@ -792,20 +792,19 @@ def generate_ai_reply(subject, sender, snippet_or_body, email_type):
         fallback_body = "Hello,\n\nI'm sorry, but I couldn't generate a response at this time. Please review this email manually.\n\n"
         fallback_signature = settings.get("FALLBACK_SIGNATURE", "Best,\nSupport Team")
         return fallback_body + fallback_signature
-    client = OpenAI(
-        api_key=require_openai_api_key(), timeout=settings["OPENAI_TIMEOUT"]
-    )
-
-    instructions = (
-        f"[Email type: {email_type}]\n\n"
-        "You are an AI email assistant. The user received an email.\n"
-        f"Subject: {subject}\n"
-        f"From: {sender}\n"
-        f"Email content/snippet: {snippet_or_body}\n\n"
-        "Please write a friendly and professional draft reply addressing the sender's query. "
-        "Return only the draft reply text without analysis, reasoning, or extra labels."
-    )
     try:
+        client = OpenAI(
+            api_key=require_openai_api_key(), timeout=settings["OPENAI_TIMEOUT"]
+        )
+        instructions = (
+            f"[Email type: {email_type}]\n\n"
+            "You are an AI email assistant. The user received an email.\n"
+            f"Subject: {subject}\n"
+            f"From: {sender}\n"
+            f"Email content/snippet: {snippet_or_body}\n\n"
+            "Please write a friendly and professional draft reply addressing the sender's query. "
+            "Return only the draft reply text without analysis, reasoning, or extra labels."
+        )
         response = client.chat.completions.create(
             model=settings["DRAFT_MODEL"],
             messages=[
@@ -822,12 +821,24 @@ def generate_ai_reply(subject, sender, snippet_or_body, email_type):
         if raw_reply is None:
             raise ValueError("OpenAI response content is None")
         return sanitize_draft_reply(raw_reply.strip())
+    except RuntimeError as exc:
+        log_event(
+            "openai_error",
+            level=logging.ERROR,
+            action="generate_ai_reply",
+            reason=str(exc),
+            error_type=type(exc).__name__,
+        )
+        fallback_body = "Hello,\n\nI'm sorry, but I couldn't generate a response at this time. Please review this email manually.\n\n"
+        fallback_signature = settings.get("FALLBACK_SIGNATURE", "Best,\nSupport Team")
+        return fallback_body + fallback_signature
     except Exception as exc:
         log_event(
             "openai_error",
             level=logging.ERROR,
             action="generate_ai_reply",
             reason=str(exc),
+            error_type=type(exc).__name__,
         )
         fallback_body = "Hello,\n\nI'm sorry, but I couldn't generate a response at this time. Please review this email manually.\n\n"
         fallback_signature = settings.get("FALLBACK_SIGNATURE", "Best,\nSupport Team")
@@ -900,10 +911,10 @@ def classify_email(text):
             reason="rate_limited",
         )
         return default_response
-    client = OpenAI(
-        api_key=require_openai_api_key(), timeout=settings["OPENAI_TIMEOUT"]
-    )
     try:
+        client = OpenAI(
+            api_key=require_openai_api_key(), timeout=settings["OPENAI_TIMEOUT"]
+        )
         resp = client.chat.completions.create(
             model=settings["CLASSIFY_MODEL"],
             messages=[
@@ -932,12 +943,22 @@ def classify_email(text):
         if not is_valid_response(parsed):
             return default_response
         return parsed
+    except RuntimeError as exc:
+        log_event(
+            "openai_error",
+            level=logging.ERROR,
+            action="classify_email",
+            reason=str(exc),
+            error_type=type(exc).__name__,
+        )
+        return default_response
     except Exception as e:
         log_event(
             "openai_error",
             level=logging.ERROR,
             action="classify_email",
             reason=str(e),
+            error_type=type(e).__name__,
         )
         return default_response
 
