@@ -307,13 +307,16 @@ def process_gmail_message(
                         thread_id=thread_id,
                         label_id=ticket_label_id,
                     )
-            drafted = _post_write_draft_reply(
+            drafted = _maybe_write_draft_reply(
                 freescout,
                 store,
                 conv_id,
                 subject,
                 sender,
                 body_text,
+                settings,
+                message_id,
+                thread_id,
             )
             return ProcessResult(
                 status="freescout_appended",
@@ -446,13 +449,16 @@ def process_gmail_message(
                     thread_id=thread_id,
                     label_id=ticket_label_id,
                 )
-        drafted = _post_write_draft_reply(
+        drafted = _maybe_write_draft_reply(
             freescout,
             store,
             conv_id,
             subject,
             sender,
             body_text,
+            settings,
+            message_id,
+            thread_id,
         )
         return ProcessResult(
             status="freescout_created",
@@ -854,6 +860,43 @@ def _post_write_draft_reply(
         thread_id=stored_thread_id,
     )
     return True
+
+
+def _maybe_write_draft_reply(
+    client: Optional[FreeScoutClient],
+    store: TicketStore,
+    conversation_id: Optional[str],
+    subject: str,
+    sender: str,
+    body_text: str,
+    settings: dict,
+    message_id: Optional[str],
+    thread_id: Optional[str],
+) -> bool:
+    max_drafts = settings.get("MAX_DRAFTS")
+    if max_drafts is not None:
+        draft_count = store.get_bot_draft_count()
+        if draft_count >= max_drafts:
+            log_event(
+                "freescout_draft",
+                action="create_draft",
+                outcome="skipped",
+                reason="draft_limit_reached",
+                max_drafts=max_drafts,
+                draft_count=draft_count,
+                conversation_id=conversation_id,
+                thread_id=thread_id,
+                message_id=message_id,
+            )
+            return False
+    return _post_write_draft_reply(
+        client,
+        store,
+        conversation_id,
+        subject,
+        sender,
+        body_text,
+    )
 
 
 def _hash_draft_text(text: str) -> str:
