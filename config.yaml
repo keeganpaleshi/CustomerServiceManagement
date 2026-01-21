@@ -53,9 +53,12 @@ limits:
 
 ticket:
   system:         "freescout"        # or "helpscout", "freshdesk", etc.
-  freescout_url:  ""                 # fill in your desk URL or set FREESCOUT_URL env var
-  freescout_key:  ""                 # fill in your API key or set FREESCOUT_KEY env var
-  mailbox_id:     null                # numeric FreeScout mailbox ID used when creating conversations
+  # REQUIRED: FreeScout URL - set via FREESCOUT_URL env var or here
+  freescout_url:  ""                 # e.g., "https://your-freescout-instance.com"
+  # REQUIRED: FreeScout API key - set via FREESCOUT_KEY env var or here
+  freescout_key:  ""                 # API key from FreeScout settings
+  # REQUIRED: Numeric FreeScout mailbox ID used when creating conversations
+  mailbox_id:     null                # e.g., 1
   gmail_thread_field_id: null         # custom field ID to store the Gmail threadId (optional)
   gmail_message_field_id: null        # custom field ID to store the Gmail messageId (optional)
   sqlite_path: "./csm.sqlite"        # durable store for processed messages and thread mapping
@@ -93,6 +96,7 @@ ticket:
         to: ""
         use_tls: true
         use_ssl: false
+        timeout: 30             # SMTP connection timeout in seconds
 
 gmail:
   scopes:
@@ -107,3 +111,9 @@ gmail:
 http:
   # Timeout (seconds) for external HTTP requests
   timeout: 15
+
+# Webhook server configuration
+webhook:
+  # Directory for webhook payload logs (relative or absolute path)
+  # Default: ./logs/webhooks
+  log_dir: ""

@@ -14,9 +14,11 @@ from gmail_bot import freescout_webhook_handler
 from storage import TicketStore
 from utils import get_settings, log_event, reload_settings
 
-LOG_DIR = Path(__file__).resolve().parent / "logs" / "webhooks"
+_DEFAULT_LOG_DIR = Path(__file__).resolve().parent / "logs" / "webhooks"
 SAFE_FILENAME_RE = re.compile(r"[^A-Za-z0-9_.-]+")
 COUNTER_KEYS = ("processed", "created", "appended", "drafted", "filtered", "failed")
+# Fields that may contain sensitive data and should be redacted in logs
+SENSITIVE_FIELDS = {"email", "customer_email", "customerEmail", "body", "text", "content", "password", "secret", "token", "api_key"}
 
 # Maximum allowed webhook payload size (1MB)
 MAX_PAYLOAD_SIZE = 1 * 1024 * 1024  # 1MB
@@ -46,9 +48,36 @@ async def lifespan(_: FastAPI):
 app = FastAPI(lifespan=lifespan)
 
 
+def _get_log_dir() -> Path:
+    """Get log directory from settings or use default."""
+    settings = get_settings()
+    log_dir = settings.get("WEBHOOK_LOG_DIR")
+    if log_dir:
+        return Path(log_dir)
+    return _DEFAULT_LOG_DIR
+
+
 def _safe_filename(value: str) -> str:
     cleaned = SAFE_FILENAME_RE.sub("-", value.strip())
     return cleaned or "unknown"
+
+
+def _sanitize_payload(payload: Any) -> Any:
+    """Redact sensitive fields from payload for logging."""
+    if isinstance(payload, dict):
+        sanitized = {}
+        for key, value in payload.items():
+            if key.lower() in {f.lower() for f in SENSITIVE_FIELDS}:
+                if isinstance(value, str) and len(value) > 0:
+                    sanitized[key] = f"[REDACTED:{len(value)} chars]"
+                else:
+                    sanitized[key] = "[REDACTED]"
+            else:
+                sanitized[key] = _sanitize_payload(value)
+        return sanitized
+    elif isinstance(payload, list):
+        return [_sanitize_payload(item) for item in payload]
+    return payload
 
 
 def _select_event_id(payload: Any) -> str:
@@ -60,13 +89,17 @@ def _select_event_id(payload: Any) -> str:
 
 
 def log_webhook_payload(payload: Any) -> Path:
-    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    log_dir = _get_log_dir()
+    log_dir.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H-%M-%S.%fZ")
     event_id = _safe_filename(_select_event_id(payload))
-    logfile = LOG_DIR / f"{timestamp}-{event_id}.json"
+    logfile = log_dir / f"{timestamp}-{event_id}.json"
+
+    # Sanitize sensitive data before logging
+    sanitized_payload = _sanitize_payload(payload)
 
     # Serialize and check size before writing
-    serialized = json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True)
+    serialized = json.dumps(sanitized_payload, ensure_ascii=False, indent=2, sort_keys=True)
     if len(serialized) > MAX_LOG_SIZE:
         # Truncate large payloads
         truncated_payload = {

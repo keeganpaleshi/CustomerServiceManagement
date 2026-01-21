@@ -1,4 +1,5 @@
 import base64
+import binascii
 import copy
 import json
 import logging
@@ -95,6 +96,7 @@ def _load_settings() -> Dict[str, Any]:
         "FREESCOUT_ACTIONS": cfg["ticket"].get("actions", {}),
         "FREESCOUT_FOLLOWUP": cfg["ticket"].get("followup", {}),
         "TICKET_SQLITE_PATH": cfg["ticket"].get("sqlite_path", "./csm.sqlite"),
+        "WEBHOOK_LOG_DIR": cfg.get("webhook", {}).get("log_dir", ""),
     }
 
 
@@ -259,15 +261,33 @@ class SimpleRateLimiter:
             return True
 
 
-@lru_cache(maxsize=1)
+_cached_rate_limiter: Optional[SimpleRateLimiter] = None
+_rate_limiter_config: Optional[tuple] = None
+
+
 def _get_openai_rate_limiter() -> Optional[SimpleRateLimiter]:
+    """Get or create rate limiter, recreating if config changed."""
+    global _cached_rate_limiter, _rate_limiter_config
     settings = _load_settings()
     rate_limit = settings.get("OPENAI_RATE_LIMIT", {}) or {}
     max_requests = rate_limit.get("max_requests", 0)
     window_seconds = rate_limit.get("window_seconds", 0)
+    current_config = (max_requests, window_seconds)
+
     if not max_requests or not window_seconds:
+        _cached_rate_limiter = None
+        _rate_limiter_config = current_config
         return None
-    return SimpleRateLimiter(int(max_requests), int(window_seconds))
+
+    if _rate_limiter_config != current_config:
+        _cached_rate_limiter = SimpleRateLimiter(int(max_requests), int(window_seconds))
+        _rate_limiter_config = current_config
+
+    if _cached_rate_limiter is None:
+        _cached_rate_limiter = SimpleRateLimiter(int(max_requests), int(window_seconds))
+        _rate_limiter_config = current_config
+
+    return _cached_rate_limiter
 
 
 class FreeScoutClient:
@@ -674,7 +694,7 @@ def decode_base64url(data: str) -> str:
         return base64.urlsafe_b64decode((data + padding).encode("utf-8")).decode(
             "utf-8", "ignore"
         )
-    except (base64.binascii.Error, ValueError):
+    except (binascii.Error, ValueError):
         return ""
 
 
@@ -990,6 +1010,10 @@ def classify_email(text):
         parsed = json.loads(content)
         if not is_valid_response(parsed):
             return default_response
+        # Clamp importance to valid 1-10 range
+        importance = parsed.get("importance", 0)
+        if isinstance(importance, (int, float)):
+            parsed["importance"] = max(1, min(10, int(importance)))
         return parsed
     except Exception as exc:
         log_event(

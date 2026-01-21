@@ -233,11 +233,13 @@ def _send_email_notification(email_cfg: dict, subject: str, body: str) -> None:
         )
 
     server = None
+    # Default SMTP timeout of 30 seconds to prevent indefinite hangs
+    smtp_timeout = int(email_cfg.get("timeout", 30))
     try:
         if use_ssl:
-            server = smtplib.SMTP_SSL(host, port)
+            server = smtplib.SMTP_SSL(host, port, timeout=smtp_timeout)
         else:
-            server = smtplib.SMTP(host, port)
+            server = smtplib.SMTP(host, port, timeout=smtp_timeout)
 
         if use_tls and not use_ssl:
             server.starttls()
