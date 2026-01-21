@@ -566,6 +566,15 @@ class TicketStore:
         row = cur.fetchone()
         return int(row[0]) if row else 0
 
+    def get_message_action(self, gmail_message_id: str) -> Optional[str]:
+        """Get the action recorded for a processed message (for testing/debugging)."""
+        cur = self._conn.execute(
+            "SELECT action FROM processed_messages WHERE gmail_message_id = ?",
+            (gmail_message_id,),
+        )
+        row = cur.fetchone()
+        return row[0] if row else None
+
     def increment_webhook_counter(self, counter: str, amount: int = 1) -> None:
         self._conn.execute(
             """

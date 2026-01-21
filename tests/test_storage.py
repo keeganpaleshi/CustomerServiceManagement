@@ -21,11 +21,8 @@ class TicketStoreTests(unittest.TestCase):
 
         self.store.mark_success("msg-success", "thread-success", "conv-123", action="create")
         self.assertTrue(self.store.processed_success("msg-success"))
-        cur = self.store._conn.execute(
-            "SELECT action FROM processed_messages WHERE gmail_message_id = ?",
-            ("msg-success",),
-        )
-        self.assertEqual(cur.fetchone()[0], "create")
+        # Use the public get_message_action method instead of accessing private _conn
+        self.assertEqual(self.store.get_message_action("msg-success"), "create")
 
     def test_filtered_message(self):
         self.store.mark_filtered("msg-filter", "thread-filter", "filtered: promotional/spam")
