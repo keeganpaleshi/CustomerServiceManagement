@@ -864,7 +864,7 @@ def _maybe_write_draft_reply(
     body_text: str,
     settings: dict,
     message_id: Optional[str],
-    thread_id: Optional[str],
+    gmail_thread_id: Optional[str],
 ) -> bool:
     # Note: This check is not atomic with draft creation - concurrent processes
     # may exceed the limit. For strict enforcement, use database-level locking.
@@ -880,7 +880,7 @@ def _maybe_write_draft_reply(
                 max_drafts=max_drafts,
                 draft_count=draft_count,
                 conversation_id=conversation_id,
-                thread_id=thread_id,
+                gmail_thread_id=gmail_thread_id,
                 message_id=message_id,
             )
             return False

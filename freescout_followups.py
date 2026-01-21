@@ -456,7 +456,8 @@ def main() -> None:
             )
             continue
 
-        updated_tags = tags + [args.followup_tag]
+        # Avoid duplicate tags if followup_tag is somehow already present
+        updated_tags = tags if args.followup_tag in tags else tags + [args.followup_tag]
         try:
             client.update_conversation(conv_id, tags=updated_tags)
         except requests.RequestException as exc:

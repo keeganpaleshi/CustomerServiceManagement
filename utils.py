@@ -790,8 +790,11 @@ def is_promotional_or_spam(message, body_text):
         return True
 
     scl_header = headers.get("x-ms-exchange-organization-scl", "").strip()
-    if scl_header.isdigit() and int(scl_header) >= 5:
-        return True
+    try:
+        if scl_header and int(scl_header) >= 5:
+            return True
+    except ValueError:
+        pass
 
     precedence = headers.get("precedence", "").strip().lower()
     bulk_header = precedence in {"bulk", "list", "junk"}
@@ -948,7 +951,7 @@ def sanitize_draft_reply(text: str) -> str:
 
 def classify_email(text):
     """Classify an email and return a dict with type, importance, and reasoning."""
-    settings = _load_settings()
+    settings = get_settings()
     default_response = {
         "type": "other",
         "importance": 0,

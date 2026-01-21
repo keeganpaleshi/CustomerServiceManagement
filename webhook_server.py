@@ -19,6 +19,8 @@ SAFE_FILENAME_RE = re.compile(r"[^A-Za-z0-9_.-]+")
 COUNTER_KEYS = ("processed", "created", "appended", "drafted", "filtered", "failed")
 # Fields that may contain sensitive data and should be redacted in logs
 SENSITIVE_FIELDS = {"email", "customer_email", "customerEmail", "body", "text", "content", "password", "secret", "token", "api_key"}
+# Pre-computed lowercase version for efficient case-insensitive comparison
+SENSITIVE_FIELDS_LOWER = {f.lower() for f in SENSITIVE_FIELDS}
 
 # Maximum allowed webhook payload size (1MB)
 MAX_PAYLOAD_SIZE = 1 * 1024 * 1024  # 1MB
@@ -67,7 +69,7 @@ def _sanitize_payload(payload: Any) -> Any:
     if isinstance(payload, dict):
         sanitized = {}
         for key, value in payload.items():
-            if key.lower() in {f.lower() for f in SENSITIVE_FIELDS}:
+            if key.lower() in SENSITIVE_FIELDS_LOWER:
                 if isinstance(value, str) and len(value) > 0:
                     sanitized[key] = f"[REDACTED:{len(value)} chars]"
                 else:
@@ -123,9 +125,9 @@ def _get_counter_store() -> TicketStore:
 
 
 @app.post("/freescout")
-async def freescout(payload: Request, x_webhook_secret: Optional[str] = Header(None)):
+async def freescout(request: Request, x_webhook_secret: Optional[str] = Header(None)):
     # Check content-length header first to reject oversized payloads quickly
-    content_length = payload.headers.get("content-length")
+    content_length = request.headers.get("content-length")
     if content_length:
         try:
             content_length_int = int(content_length)
@@ -150,7 +152,7 @@ async def freescout(payload: Request, x_webhook_secret: Optional[str] = Header(N
             )
             raise HTTPException(status_code=413, detail="Payload too large")
 
-    raw_body = await payload.body()
+    raw_body = await request.body()
 
     # Validate actual body size
     if len(raw_body) > MAX_PAYLOAD_SIZE:
