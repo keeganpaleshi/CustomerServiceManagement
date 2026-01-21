@@ -1,8 +1,10 @@
+from __future__ import annotations
+
 import argparse
 from datetime import datetime, timedelta, timezone
 from email.message import EmailMessage
 import smtplib
-from typing import Dict, Iterable, Optional, Sequence
+from typing import Dict, Iterable, List, Optional, Sequence
 
 import requests
 
@@ -483,7 +485,8 @@ def main() -> None:
                 args.followup_tag,
             )
         except Exception as exc:
-            failed += 1
+            # Don't increment failed counter here - the draft was created successfully,
+            # only the optional notification failed. Log the error but don't affect stats.
             log_event(
                 "freescout_followup",
                 action="notify_followup",
