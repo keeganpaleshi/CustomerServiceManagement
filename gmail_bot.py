@@ -150,7 +150,7 @@ def process_gmail_message(
         return ProcessResult(status="failed_retryable", reason=reason)
 
     if not store.mark_processing_if_new(message_id, thread_id):
-        if store.processed_success(message_id) is True:
+        if store.processed_success(message_id):
             log_event(
                 "gmail_ingest",
                 action="skip_message",
@@ -162,7 +162,7 @@ def process_gmail_message(
                 status="skipped_already_success",
                 reason="already processed",
             )
-        if store.processed_filtered(message_id) is True:
+        if store.processed_filtered(message_id):
             log_event(
                 "gmail_ingest",
                 action="skip_message",
@@ -1161,7 +1161,7 @@ def _infer_webhook_outcome(payload: dict) -> WebhookOutcome:
 
 def freescout_webhook_handler(
     payload: dict, headers: dict
-) -> tuple[str, int, Optional[WebhookOutcome]]:
+) -> Tuple[str, int, Optional[WebhookOutcome]]:
     """Generic webhook handler usable by Flask or FastAPI routes."""
 
     reload_settings()

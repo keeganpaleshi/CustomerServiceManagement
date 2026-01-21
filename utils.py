@@ -876,7 +876,7 @@ def generate_ai_reply(subject, sender, snippet_or_body, email_type):
             temperature=0.7,
         )
         # Check if response has choices before accessing
-        if not response.choices or len(response.choices) == 0:
+        if not response.choices:
             raise ValueError("OpenAI response contains no choices")
         raw_reply = response.choices[0].message.content
         if raw_reply is None:
@@ -982,7 +982,7 @@ def classify_email(text):
             max_tokens=settings["CLASSIFY_MAX_TOKENS"],
         )
         # Check if response has choices before accessing
-        if not resp.choices or len(resp.choices) == 0:
+        if not resp.choices:
             raise ValueError("OpenAI response contains no choices")
         content = resp.choices[0].message.content
         if content is None:
