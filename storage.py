@@ -1,6 +1,9 @@
+import logging
 import sqlite3
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
+
+LOGGER = logging.getLogger("csm.storage")
 
 
 class TicketStore:
@@ -8,12 +11,19 @@ class TicketStore:
 
     def __init__(self, sqlite_path: str) -> None:
         self.sqlite_path = sqlite_path
-        Path(self.sqlite_path).parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(self.sqlite_path)
-        self._conn.execute("PRAGMA journal_mode=WAL")
-        self._conn.execute("PRAGMA busy_timeout = 5000")
-        self._conn.execute("PRAGMA foreign_keys = ON")
-        self._init_schema()
+        try:
+            Path(self.sqlite_path).parent.mkdir(parents=True, exist_ok=True)
+            self._conn = sqlite3.connect(self.sqlite_path)
+            self._conn.execute("PRAGMA journal_mode=WAL")
+            self._conn.execute("PRAGMA busy_timeout = 5000")
+            self._conn.execute("PRAGMA foreign_keys = ON")
+            self._init_schema()
+        except sqlite3.Error as e:
+            LOGGER.error("Failed to initialize SQLite database at %s: %s", sqlite_path, e)
+            raise RuntimeError(f"Database initialization failed: {e}") from e
+        except OSError as e:
+            LOGGER.error("Failed to create database directory for %s: %s", sqlite_path, e)
+            raise RuntimeError(f"Database directory creation failed: {e}") from e
 
     def _init_schema(self) -> None:
         self._conn.execute(
@@ -57,6 +67,13 @@ class TicketStore:
                 counter TEXT PRIMARY KEY,
                 value INTEGER NOT NULL DEFAULT 0
             )
+            """
+        )
+        # Add index on status column for faster queries by status
+        self._conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_processed_messages_status
+            ON processed_messages(status)
             """
         )
         self._conn.commit()
@@ -346,7 +363,7 @@ class TicketStore:
         )
         return {row[0]: row[1] for row in cur.fetchall()}
 
-    def get_recent_failures(self, limit: int = 10) -> list[dict]:
+    def get_recent_failures(self, limit: int = 10) -> List[dict]:
         cur = self._conn.execute(
             """
             SELECT gmail_message_id, error, processed_at

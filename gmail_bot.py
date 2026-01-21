@@ -1,11 +1,12 @@
 import argparse
 import hashlib
 import hmac
+import signal
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from email.utils import parseaddr
-from typing import Dict, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import requests
 from googleapiclient.errors import HttpError
@@ -33,6 +34,20 @@ from utils import (
     thread_timestamp,
 )
 from storage import TicketStore
+
+# Flag for graceful shutdown in polling loops
+_shutdown_requested = False
+
+
+def _signal_handler(signum, frame):
+    """Handle shutdown signals gracefully."""
+    global _shutdown_requested
+    _shutdown_requested = True
+    log_event(
+        "shutdown",
+        action="signal_received",
+        signal=signal.Signals(signum).name,
+    )
 
 
 def parse_args(settings: Optional[Dict] = None):
@@ -273,6 +288,7 @@ def process_gmail_message(
                     conv_id,
                     {
                         "subject": subject,
+                        "sender": sender,
                         "latest_text": body_text,
                     },
                     settings,
@@ -289,24 +305,7 @@ def process_gmail_message(
                     conversation_id=conv_id,
                 )
             if ticket_label_id:
-                try:
-                    retry_request(
-                        lambda: apply_label_to_thread(
-                            gmail, thread_id, ticket_label_id
-                        ),
-                        action_name="gmail.apply_label",
-                        exceptions=(HttpError,),
-                        log_context={"thread_id": thread_id, "label_id": ticket_label_id},
-                    )
-                except HttpError as exc:
-                    log_event(
-                        "gmail_label",
-                        action="apply_label",
-                        outcome="failed",
-                        reason=str(exc),
-                        thread_id=thread_id,
-                        label_id=ticket_label_id,
-                    )
+                _apply_ticket_label(gmail, thread_id, ticket_label_id)
             drafted = _maybe_write_draft_reply(
                 freescout,
                 store,
@@ -417,6 +416,7 @@ def process_gmail_message(
                 conv_id,
                 {
                     "subject": subject,
+                    "sender": sender,
                     "latest_text": body_text,
                 },
                 settings,
@@ -433,22 +433,7 @@ def process_gmail_message(
                 conversation_id=conv_id,
             )
         if ticket_label_id:
-            try:
-                retry_request(
-                    lambda: apply_label_to_thread(gmail, thread_id, ticket_label_id),
-                    action_name="gmail.apply_label",
-                    exceptions=(HttpError,),
-                    log_context={"thread_id": thread_id, "label_id": ticket_label_id},
-                )
-            except HttpError as exc:
-                log_event(
-                    "gmail_label",
-                    action="apply_label",
-                    outcome="failed",
-                    reason=str(exc),
-                    thread_id=thread_id,
-                    label_id=ticket_label_id,
-                )
+            _apply_ticket_label(gmail, thread_id, ticket_label_id)
         drafted = _maybe_write_draft_reply(
             freescout,
             store,
@@ -509,17 +494,24 @@ def poll_ticket_updates(limit: int = 10, timeout: Optional[int] = None):
         return []
 
 
-def process_gmail_message_freescout(
-    ref: dict,
-    ticket_store: TicketStore,
-    client: Optional[FreeScoutClient],
-    svc,
-    ticket_label_id: Optional[str],
-    timeout: int,
-) -> Optional[ProcessResult]:
-    """Deprecated: use process_gmail_message for single-message ingestion."""
-    _ = timeout
-    return process_gmail_message(ref, ticket_store, client, svc, ticket_label_id)
+def _apply_ticket_label(gmail, thread_id: str, ticket_label_id: str) -> None:
+    """Apply the ticket label to a Gmail thread with retry and error logging."""
+    try:
+        retry_request(
+            lambda: apply_label_to_thread(gmail, thread_id, ticket_label_id),
+            action_name="gmail.apply_label",
+            exceptions=(HttpError,),
+            log_context={"thread_id": thread_id, "label_id": ticket_label_id},
+        )
+    except HttpError as exc:
+        log_event(
+            "gmail_label",
+            action="apply_label",
+            outcome="failed",
+            reason=str(exc),
+            thread_id=thread_id,
+            label_id=ticket_label_id,
+        )
 
 
 def _build_freescout_client(timeout: Optional[int] = None) -> Optional[FreeScoutClient]:
@@ -556,7 +548,7 @@ def _extract_latest_thread_text(conversation: dict) -> str:
     return latest.get("text", "") or latest.get("body", "")
 
 
-def _build_tags(cls: dict, bucket: str, high_priority: bool) -> list[str]:
+def _build_tags(cls: dict, bucket: str, high_priority: bool) -> List[str]:
     tags = [cls.get("type", "other"), bucket]
     if high_priority:
         tags.append("high-priority")
@@ -583,6 +575,7 @@ def process_conversation(
 ) -> dict:
     actions_cfg = settings.get("FREESCOUT_ACTIONS", {})
     subject = message_context.get("subject") or "(no subject)"
+    sender = message_context.get("sender") or "customer"
     latest_text = message_context.get("latest_text") or ""
 
     cls = classify_email(f"Subject:{subject}\n\n{latest_text}")
@@ -655,7 +648,7 @@ def process_conversation(
         try:
             suggestion = generate_ai_reply(
                 subject,
-                "customer",
+                sender,
                 latest_text,
                 cls.get("type", "other"),
             )
@@ -903,7 +896,7 @@ def _hash_draft_text(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
-def _extract_conversation_threads(conversation: dict) -> list[dict]:
+def _extract_conversation_threads(conversation: dict) -> List[dict]:
     threads = conversation.get("threads") or conversation.get("data") or []
     if isinstance(threads, dict):
         threads = threads.get("threads", [])
@@ -912,7 +905,7 @@ def _extract_conversation_threads(conversation: dict) -> list[dict]:
     return [thread for thread in threads if isinstance(thread, dict)]
 
 
-def _find_thread_by_id(threads: list[dict], thread_id: Optional[object]) -> Optional[dict]:
+def _find_thread_by_id(threads: List[dict], thread_id: Optional[object]) -> Optional[dict]:
     if not thread_id:
         return None
     thread_id_str = str(thread_id)
@@ -1032,11 +1025,20 @@ def process_freescout_conversation(
 
     subject = details.get("subject") or conversation.get("subject") or "(no subject)"
     latest_text = _extract_latest_thread_text(details) or conversation.get("last_text", "")
+    # Extract sender from FreeScout conversation customer info
+    customer = details.get("customer") or conversation.get("customer") or {}
+    sender = (
+        details.get("customerEmail")
+        or customer.get("email")
+        or customer.get("name")
+        or "customer"
+    )
 
     process_conversation(
         conv_id,
         {
             "subject": subject,
+            "sender": sender,
             "latest_text": latest_text,
         },
         settings,
@@ -1047,7 +1049,15 @@ def process_freescout_conversation(
 def poll_freescout_updates(
     interval: int = 300, timeout: Optional[int] = None
 ):
-    """Continuously poll FreeScout and classify new/updated conversations."""
+    """Continuously poll FreeScout and classify new/updated conversations.
+
+    Supports graceful shutdown via SIGINT/SIGTERM signals.
+    """
+    global _shutdown_requested
+
+    # Register signal handlers for graceful shutdown
+    signal.signal(signal.SIGINT, _signal_handler)
+    signal.signal(signal.SIGTERM, _signal_handler)
 
     settings = get_settings()
     if settings.get("FREESCOUT_WEBHOOK_ENABLED"):
@@ -1070,7 +1080,7 @@ def poll_freescout_updates(
         return
 
     since = datetime.now(timezone.utc) - timedelta(minutes=5)
-    while True:
+    while not _shutdown_requested:
         try:
             reload_settings()
             settings = get_settings()
@@ -1093,12 +1103,16 @@ def poll_freescout_updates(
                 )
                 return
 
+            # Record poll start time BEFORE fetching to avoid missing updates
+            poll_start = datetime.now(timezone.utc)
             convs = fetch_recent_conversations(
                 since.isoformat(), timeout=http_timeout
             )
             for conv in convs:
+                if _shutdown_requested:
+                    break
                 process_freescout_conversation(client, conv, settings)
-            since = datetime.now(timezone.utc)
+            since = poll_start  # Use poll start time to avoid gaps
             time.sleep(interval)
         except Exception as exc:
             log_event(
@@ -1109,6 +1123,13 @@ def poll_freescout_updates(
             )
             # Sleep before retry to avoid busy-wait loop on persistent errors
             time.sleep(min(interval, 60))
+
+    log_event(
+        "freescout_poll",
+        action="poll_updates",
+        outcome="shutdown",
+        reason="graceful shutdown requested",
+    )
 
 
 def _infer_webhook_outcome(payload: dict) -> WebhookOutcome:

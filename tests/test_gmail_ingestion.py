@@ -43,7 +43,7 @@ class GmailIngestionTests(unittest.TestCase):
         freescout = Mock()
         message = _make_message("msg-1", "thread-1")
 
-        with patch.object(gmail_bot, "_TICKET_LABEL_ID", None):
+        with patch.object(gmail_bot, "get_settings", return_value=_base_settings()):
             result = gmail_bot.process_gmail_message(message, store, freescout, Mock())
 
         self.assertEqual(result.status, "skipped_already_success")
@@ -60,7 +60,7 @@ class GmailIngestionTests(unittest.TestCase):
         freescout = Mock()
         message = _make_message("msg-2", "thread-2")
 
-        with patch.object(gmail_bot, "_TICKET_LABEL_ID", None), \
+        with patch.object(gmail_bot, "get_settings", return_value=_base_settings()), \
             patch.object(gmail_bot, "extract_plain_text", return_value="hello"), \
             patch.object(gmail_bot, "is_promotional_or_spam", return_value=True):
             result = gmail_bot.process_gmail_message(message, store, freescout, Mock())
@@ -87,7 +87,7 @@ class GmailIngestionTests(unittest.TestCase):
         freescout = Mock()
         message = _make_message("msg-3", "thread-3")
 
-        with patch.object(gmail_bot, "_TICKET_LABEL_ID", None), \
+        with patch.object(gmail_bot, "get_settings", return_value=_base_settings()), \
             patch.object(gmail_bot, "extract_plain_text", return_value="hello"), \
             patch.object(gmail_bot, "is_promotional_or_spam", return_value=False):
             result = gmail_bot.process_gmail_message(message, store, freescout, Mock())
@@ -115,10 +115,9 @@ class GmailIngestionTests(unittest.TestCase):
         freescout.create_conversation.return_value = {"id": "conv-456"}
         message = _make_message("msg-4", "thread-4")
 
-        with patch.object(gmail_bot, "_TICKET_LABEL_ID", None), \
+        with patch.object(gmail_bot, "get_settings", return_value=_base_settings()), \
             patch.object(gmail_bot, "extract_plain_text", return_value="hello"), \
-            patch.object(gmail_bot, "is_promotional_or_spam", return_value=False), \
-            patch.object(gmail_bot, "get_settings", return_value=_base_settings()):
+            patch.object(gmail_bot, "is_promotional_or_spam", return_value=False):
             result = gmail_bot.process_gmail_message(message, store, freescout, Mock())
 
         self.assertEqual(result.status, "freescout_created")
@@ -152,7 +151,7 @@ class GmailIngestionTests(unittest.TestCase):
         freescout = Mock()
         message = _make_message("msg-7", "thread-7")
 
-        with patch.object(gmail_bot, "_TICKET_LABEL_ID", None), \
+        with patch.object(gmail_bot, "get_settings", return_value=_base_settings()), \
             patch.object(gmail_bot, "extract_plain_text", return_value="hello"), \
             patch.object(gmail_bot, "is_promotional_or_spam", return_value=False):
             result = gmail_bot.process_gmail_message(message, store, freescout, Mock())
@@ -172,7 +171,7 @@ class GmailIngestionTests(unittest.TestCase):
         freescout.add_customer_thread.side_effect = requests.RequestException("boom")
         message = _make_message("msg-5", "thread-5")
 
-        with patch.object(gmail_bot, "_TICKET_LABEL_ID", None), \
+        with patch.object(gmail_bot, "get_settings", return_value=_base_settings()), \
             patch.object(gmail_bot, "extract_plain_text", return_value="hello"), \
             patch.object(gmail_bot, "is_promotional_or_spam", return_value=False):
             result = gmail_bot.process_gmail_message(message, store, freescout, Mock())
@@ -193,7 +192,7 @@ class GmailIngestionTests(unittest.TestCase):
         freescout = Mock()
         message = _make_message("msg-8", "thread-8")
 
-        with patch.object(gmail_bot, "_TICKET_LABEL_ID", None):
+        with patch.object(gmail_bot, "get_settings", return_value=_base_settings()):
             result = gmail_bot.process_gmail_message(message, store, freescout, Mock())
 
         self.assertEqual(result.status, "skipped_already_success")
@@ -208,7 +207,7 @@ class GmailIngestionTests(unittest.TestCase):
         freescout = Mock()
         message = _make_message("msg-9", "thread-9")
 
-        with patch.object(gmail_bot, "_TICKET_LABEL_ID", None), \
+        with patch.object(gmail_bot, "get_settings", return_value=_base_settings()), \
             patch.object(gmail_bot, "extract_plain_text", return_value="hello"), \
             patch.object(gmail_bot, "is_promotional_or_spam", return_value=True):
             result = gmail_bot.process_gmail_message(message, store, freescout, Mock())
@@ -230,7 +229,7 @@ class GmailIngestionTests(unittest.TestCase):
         store.get_conversation_id_for_thread.return_value = "conv-111"
         message = _make_message("msg-11", "thread-11")
 
-        with patch.object(gmail_bot, "_TICKET_LABEL_ID", None), \
+        with patch.object(gmail_bot, "get_settings", return_value=_base_settings()), \
             patch.object(gmail_bot, "extract_plain_text", return_value="hello"), \
             patch.object(gmail_bot, "is_promotional_or_spam", return_value=False):
             result = gmail_bot.process_gmail_message(message, store, None, Mock())
@@ -247,7 +246,7 @@ class GmailIngestionTests(unittest.TestCase):
         store.get_conversation_id_for_thread.return_value = None
         message = _make_message("msg-12", "thread-12")
 
-        with patch.object(gmail_bot, "_TICKET_LABEL_ID", None), \
+        with patch.object(gmail_bot, "get_settings", return_value=_base_settings()), \
             patch.object(gmail_bot, "extract_plain_text", return_value="hello"), \
             patch.object(gmail_bot, "is_promotional_or_spam", return_value=False):
             result = gmail_bot.process_gmail_message(message, store, None, Mock())
@@ -266,10 +265,9 @@ class GmailIngestionTests(unittest.TestCase):
         freescout.create_conversation.side_effect = requests.RequestException("boom")
         message = _make_message("msg-6", "thread-6")
 
-        with patch.object(gmail_bot, "_TICKET_LABEL_ID", None), \
+        with patch.object(gmail_bot, "get_settings", return_value=_base_settings()), \
             patch.object(gmail_bot, "extract_plain_text", return_value="hello"), \
-            patch.object(gmail_bot, "is_promotional_or_spam", return_value=False), \
-            patch.object(gmail_bot, "get_settings", return_value=_base_settings()):
+            patch.object(gmail_bot, "is_promotional_or_spam", return_value=False):
             result = gmail_bot.process_gmail_message(message, store, freescout, Mock())
 
         self.assertEqual(result.status, "failed_retryable")
@@ -291,10 +289,9 @@ class GmailIngestionTests(unittest.TestCase):
         freescout.create_conversation.return_value = {}
         message = _make_message("msg-10", "thread-10")
 
-        with patch.object(gmail_bot, "_TICKET_LABEL_ID", None), \
+        with patch.object(gmail_bot, "get_settings", return_value=_base_settings()), \
             patch.object(gmail_bot, "extract_plain_text", return_value="hello"), \
-            patch.object(gmail_bot, "is_promotional_or_spam", return_value=False), \
-            patch.object(gmail_bot, "get_settings", return_value=_base_settings()):
+            patch.object(gmail_bot, "is_promotional_or_spam", return_value=False):
             result = gmail_bot.process_gmail_message(message, store, freescout, Mock())
 
         self.assertEqual(result.status, "failed_retryable")
@@ -315,7 +312,7 @@ class GmailIngestionTests(unittest.TestCase):
             "thread-13",
         )
 
-        with patch.object(gmail_bot, "_TICKET_LABEL_ID", None), \
+        with patch.object(gmail_bot, "get_settings", return_value=_base_settings()), \
             patch.object(gmail_bot, "extract_plain_text", return_value="hello"), \
             patch.object(gmail_bot, "is_promotional_or_spam", return_value=True):
             result = gmail_bot.process_gmail_message(message, store, freescout, gmail)
