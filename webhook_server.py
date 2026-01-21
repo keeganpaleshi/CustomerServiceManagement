@@ -5,7 +5,7 @@ import re
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 from fastapi import FastAPI, Header, Request, HTTPException
 from fastapi.responses import JSONResponse
@@ -90,7 +90,7 @@ def _get_counter_store() -> TicketStore:
 
 
 @app.post("/freescout")
-async def freescout(payload: Request, x_webhook_secret: str | None = Header(None)):
+async def freescout(payload: Request, x_webhook_secret: Optional[str] = Header(None)):
     # Check content-length header first to reject oversized payloads quickly
     content_length = payload.headers.get("content-length")
     if content_length:

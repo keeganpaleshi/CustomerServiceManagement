@@ -232,6 +232,7 @@ def retry_request(
             time.sleep(delay)
     raise RuntimeError(f"Retry loop failed for {action_name}")
 
+
 class SimpleRateLimiter:
     """Thread-safe rolling-window rate limiter."""
 
@@ -514,6 +515,7 @@ class FreeScoutClient:
             payload["user_id"] = self._maybe_int(user_id) or user_id
         if draft:
             payload["draft"] = True
+
         def _request() -> Dict[str, Any]:
             resp = requests.post(
                 f"{self.base_url}/api/conversations/{conversation_id}/threads",
@@ -541,6 +543,7 @@ class FreeScoutClient:
         conversation_id = self._normalize_id(conversation_id)
         thread_id = self._normalize_id(thread_id)
         payload: Dict[str, Any] = {"text": text, "draft": draft}
+
         def _request() -> Dict[str, Any]:
             resp = requests.put(
                 f"{self.base_url}/api/conversations/{conversation_id}/threads/{thread_id}",
@@ -694,7 +697,7 @@ def extract_plain_text(payload: Optional[dict], max_depth: int = 50) -> str:
     if mime_type == "text/plain" and body_data:
         return decode_base64url(body_data)
 
-    for part in payload.get("parts", []) or []:
+    for part in payload.get("parts", []):
         text = extract_plain_text(part, max_depth - 1)
         if text:
             return text

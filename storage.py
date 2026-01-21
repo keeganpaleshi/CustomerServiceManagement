@@ -316,8 +316,13 @@ class TicketStore:
             self._conn.commit()
             return True
 
-        except Exception:
+        except Exception as e:
             self._conn.rollback()
+            LOGGER.error(
+                "Error in mark_processing_if_new for message %s: %s",
+                gmail_message_id,
+                e,
+            )
             raise
 
     def processed_success(self, gmail_message_id: str) -> bool:
