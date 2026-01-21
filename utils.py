@@ -1,17 +1,21 @@
 import base64
+import copy
 import json
 import logging
 import os
 import re
+import threading
 import time
 from collections import deque
+from datetime import datetime, timezone
 from email.mime.text import MIMEText
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Callable, Dict, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import requests
 import yaml
+from google.auth.exceptions import RefreshError
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
@@ -95,9 +99,42 @@ def _load_settings() -> Dict[str, Any]:
 
 
 def get_settings() -> Dict[str, Any]:
-    """Public accessor for cached settings."""
+    """Public accessor for cached settings.
 
-    return _load_settings().copy()
+    Returns a deep copy to prevent accidental mutation of cached values,
+    especially nested dictionaries like FREESCOUT_ACTIONS.
+    """
+
+    return copy.deepcopy(_load_settings())
+
+
+def validate_settings() -> List[str]:
+    """Validate required configuration values.
+
+    Returns a list of validation error messages. Empty list means valid.
+    """
+    errors = []
+    settings = _load_settings()
+
+    # Check FreeScout settings if it's the configured ticket system
+    if settings.get("TICKET_SYSTEM") == "freescout":
+        if not settings.get("FREESCOUT_URL"):
+            errors.append(
+                "FREESCOUT_URL is required when ticket.system is 'freescout'. "
+                "Set via environment variable or config.yaml ticket.freescout_url"
+            )
+        if not settings.get("FREESCOUT_KEY"):
+            errors.append(
+                "FREESCOUT_KEY is required when ticket.system is 'freescout'. "
+                "Set via environment variable or config.yaml ticket.freescout_key"
+            )
+        if not settings.get("FREESCOUT_MAILBOX_ID"):
+            errors.append(
+                "FREESCOUT_MAILBOX_ID is required when ticket.system is 'freescout'. "
+                "Set in config.yaml ticket.mailbox_id"
+            )
+
+    return errors
 
 
 def reload_settings() -> None:
@@ -134,7 +171,7 @@ def require_ticket_settings() -> tuple[str, str]:
     return url, key
 
 
-def serialize_custom_fields(field_map: Dict[Any, Any]) -> list[dict]:
+def serialize_custom_fields(field_map: Dict[Any, Any]) -> List[Dict[str, Any]]:
     """Serialize FreeScout custom fields to the expected list-of-dicts format."""
 
     serialized = []
@@ -196,27 +233,29 @@ def retry_request(
     raise RuntimeError(f"Retry loop failed for {action_name}")
 
 class SimpleRateLimiter:
-    """Simple rolling-window rate limiter."""
+    """Thread-safe rolling-window rate limiter."""
 
     def __init__(self, max_requests: int, window_seconds: int) -> None:
         self.max_requests = max_requests
         self.window_seconds = window_seconds
-        self.timestamps: deque[float] = deque()
+        self.timestamps: deque = deque()
+        self._lock = threading.Lock()
 
     def allow(self) -> bool:
         if self.max_requests <= 0 or self.window_seconds <= 0:
             return True
-        now = time.monotonic()
-        window_start = now - self.window_seconds
-        # Remove timestamps that fall outside the sliding window.
-        # Using < (not <=) keeps timestamps at exactly window_start,
-        # making the window [window_start, now] inclusive on both ends.
-        while self.timestamps and self.timestamps[0] < window_start:
-            self.timestamps.popleft()
-        if len(self.timestamps) >= self.max_requests:
-            return False
-        self.timestamps.append(now)
-        return True
+        with self._lock:
+            now = time.monotonic()
+            window_start = now - self.window_seconds
+            # Remove timestamps that fall outside the sliding window.
+            # Using < (not <=) keeps timestamps at exactly window_start,
+            # making the window [window_start, now] inclusive on both ends.
+            while self.timestamps and self.timestamps[0] < window_start:
+                self.timestamps.popleft()
+            if len(self.timestamps) >= self.max_requests:
+                return False
+            self.timestamps.append(now)
+            return True
 
 
 @lru_cache(maxsize=1)
@@ -274,7 +313,7 @@ class FreeScoutClient:
             return data.get("conversation") or data.get("data") or data
         return {}
 
-    def list_conversations(self, params: Optional[Dict[str, Any]] = None) -> list[dict]:
+    def list_conversations(self, params: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
         resp = requests.get(
             f"{self.base_url}/api/conversations",
             headers=self._headers(),
@@ -295,7 +334,7 @@ class FreeScoutClient:
         conversation_id: str,
         priority: Optional[object] = None,
         assignee: Optional[str] = None,
-        tags: Optional[list[str]] = None,
+        tags: Optional[List[str]] = None,
         custom_fields: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         conversation_id = self._normalize_id(conversation_id)
@@ -381,7 +420,7 @@ class FreeScoutClient:
     ) -> Dict[str, Any]:
         mailbox_id = self._normalize_id(mailbox_id)
         custom_fields: Dict[str, Any] = {}
-        tags: list[str] = []
+        tags: List[str] = []
 
         if thread_id:
             if gmail_thread_field:
@@ -559,8 +598,18 @@ def get_gmail_service(
             creds = None
     if not creds or not creds.valid:
         if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
-        else:
+            try:
+                creds.refresh(Request())
+            except RefreshError as e:
+                log_event(
+                    "gmail_auth",
+                    level=logging.WARNING,
+                    action="refresh_credentials",
+                    outcome="failed",
+                    reason=f"Token refresh failed, will re-authenticate: {e}",
+                )
+                creds = None
+        if not creds or not creds.valid:
             flow = InstalledAppFlow.from_client_secrets_file(
                 creds_filename, settings["SCOPES"]
             )
@@ -776,6 +825,17 @@ def is_promotional_or_spam(message, body_text):
     return score >= 5
 
 
+def _get_fallback_reply(settings: Dict[str, Any]) -> str:
+    """Return a fallback reply when AI generation fails or is rate-limited."""
+    fallback_body = (
+        "Hello,\n\n"
+        "I'm sorry, but I couldn't generate a response at this time. "
+        "Please review this email manually.\n\n"
+    )
+    fallback_signature = settings.get("FALLBACK_SIGNATURE", "Best,\nSupport Team")
+    return fallback_body + fallback_signature
+
+
 def generate_ai_reply(subject, sender, snippet_or_body, email_type):
     """
     Generate a draft reply using OpenAI's new library (>=1.0.0).
@@ -789,9 +849,7 @@ def generate_ai_reply(subject, sender, snippet_or_body, email_type):
             action="generate_ai_reply",
             reason="rate_limited",
         )
-        fallback_body = "Hello,\n\nI'm sorry, but I couldn't generate a response at this time. Please review this email manually.\n\n"
-        fallback_signature = settings.get("FALLBACK_SIGNATURE", "Best,\nSupport Team")
-        return fallback_body + fallback_signature
+        return _get_fallback_reply(settings)
     try:
         client = OpenAI(
             api_key=require_openai_api_key(), timeout=settings["OPENAI_TIMEOUT"]
@@ -821,17 +879,6 @@ def generate_ai_reply(subject, sender, snippet_or_body, email_type):
         if raw_reply is None:
             raise ValueError("OpenAI response content is None")
         return sanitize_draft_reply(raw_reply.strip())
-    except RuntimeError as exc:
-        log_event(
-            "openai_error",
-            level=logging.ERROR,
-            action="generate_ai_reply",
-            reason=str(exc),
-            error_type=type(exc).__name__,
-        )
-        fallback_body = "Hello,\n\nI'm sorry, but I couldn't generate a response at this time. Please review this email manually.\n\n"
-        fallback_signature = settings.get("FALLBACK_SIGNATURE", "Best,\nSupport Team")
-        return fallback_body + fallback_signature
     except Exception as exc:
         log_event(
             "openai_error",
@@ -840,9 +887,7 @@ def generate_ai_reply(subject, sender, snippet_or_body, email_type):
             reason=str(exc),
             error_type=type(exc).__name__,
         )
-        fallback_body = "Hello,\n\nI'm sorry, but I couldn't generate a response at this time. Please review this email manually.\n\n"
-        fallback_signature = settings.get("FALLBACK_SIGNATURE", "Best,\nSupport Team")
-        return fallback_body + fallback_signature
+        return _get_fallback_reply(settings)
 
 
 def sanitize_draft_reply(text: str) -> str:
@@ -943,22 +988,13 @@ def classify_email(text):
         if not is_valid_response(parsed):
             return default_response
         return parsed
-    except RuntimeError as exc:
+    except Exception as exc:
         log_event(
             "openai_error",
             level=logging.ERROR,
             action="classify_email",
             reason=str(exc),
             error_type=type(exc).__name__,
-        )
-        return default_response
-    except Exception as e:
-        log_event(
-            "openai_error",
-            level=logging.ERROR,
-            action="classify_email",
-            reason=str(e),
-            error_type=type(e).__name__,
         )
         return default_response
 
@@ -980,9 +1016,8 @@ def importance_to_bucket(importance_score: Optional[float]) -> str:
     return "P3"
 
 
-def parse_datetime(value: Optional[str]) -> Optional["datetime"]:
+def parse_datetime(value: Optional[str]) -> Optional[datetime]:
     """Parse ISO datetime string to datetime object with timezone support."""
-    from datetime import datetime, timezone
     if not value:
         return None
     if isinstance(value, datetime):
@@ -1013,114 +1048,8 @@ def is_customer_thread(thread: dict) -> bool:
     return bool(thread.get("customer_id") and not thread.get("user_id"))
 
 
-def thread_timestamp(thread: dict) -> Optional["datetime"]:
+def thread_timestamp(thread: dict) -> Optional[datetime]:
     """Extract timestamp from a FreeScout thread."""
     return parse_datetime(thread.get("created_at") or thread.get("updated_at"))
 
 
-def create_ticket(
-    subject: str,
-    sender: str,
-    body: str,
-    *,
-    thread_id: Optional[str] = None,
-    message_id: Optional[str] = None,
-    timeout: Optional[int] = None,
-    retries: int = 3,
-):
-    """Create a FreeScout conversation using a text-only thread payload.
-
-    .. deprecated::
-        This function is deprecated and no longer used in the codebase.
-        Use FreeScoutClient.create_conversation() instead.
-
-    Threads are sent using text-only payloads (text), not body.
-    """
-    import warnings
-    warnings.warn(
-        "create_ticket() is deprecated. Use FreeScoutClient.create_conversation() instead.",
-        DeprecationWarning,
-        stacklevel=2,
-    )
-    settings = _load_settings()
-    if settings["TICKET_SYSTEM"] != "freescout":
-        return None
-
-    url, key = require_ticket_settings()
-    mailbox_id = settings.get("FREESCOUT_MAILBOX_ID")
-    if not mailbox_id:
-        raise RuntimeError("ticket.mailbox_id must be configured for FreeScout")
-
-    custom_fields: Dict[str, Any] = {}
-    tags: list[str] = []
-    gmail_thread_field = settings.get("FREESCOUT_GMAIL_THREAD_FIELD_ID")
-    gmail_message_field = settings.get("FREESCOUT_GMAIL_MESSAGE_FIELD_ID")
-
-    if thread_id:
-        if gmail_thread_field:
-            custom_fields[str(gmail_thread_field)] = thread_id
-        else:
-            tags.append(f"gmail_thread:{thread_id}")
-
-    if message_id:
-        if gmail_message_field:
-            custom_fields[str(gmail_message_field)] = message_id
-        else:
-            tags.append(f"gmail_message:{message_id}")
-
-    thread_payload = {
-        "type": "customer",
-        "text": body or "(no body)",
-        "imported": True,
-    }
-
-    payload = {
-        "type": "email",
-        "mailboxId": mailbox_id,
-        "subject": subject or "(no subject)",
-        "customerEmail": sender,
-        "customerName": sender,
-        "imported": True,
-        "threads": [thread_payload],
-    }
-
-    if tags:
-        payload["tags"] = tags
-
-    serialized = serialize_custom_fields(custom_fields)
-    if serialized:
-        payload["customFields"] = serialized
-
-    http_timeout = timeout if timeout is not None else settings["HTTP_TIMEOUT"]
-    for attempt in range(1, retries + 1):
-        try:
-            resp = requests.post(
-                f"{url.rstrip('/')}/api/conversations",
-                headers={
-                    "Accept": "application/json",
-                    "Content-Type": "application/json",
-                    "X-FreeScout-API-Key": key,
-                },
-                json=payload,
-                timeout=http_timeout,
-            )
-            resp.raise_for_status()
-            return resp.json()
-        except requests.RequestException as exc:
-            if attempt == retries:
-                log_event(
-                    "ticket_create_failed",
-                    level=logging.ERROR,
-                    attempts=retries,
-                    reason=str(exc),
-                )
-                return None
-            delay = 2 ** (attempt - 1)
-            log_event(
-                "ticket_create_retry",
-                level=logging.WARNING,
-                attempt=attempt,
-                reason=str(exc),
-                delay_seconds=delay,
-            )
-            time.sleep(delay)
