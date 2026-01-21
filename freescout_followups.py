@@ -215,9 +215,11 @@ def _send_email_notification(email_cfg: dict, subject: str, body: str) -> None:
     message.set_content(body)
 
     host = email_cfg["smtp_host"]
-    port = int(email_cfg.get("smtp_port", 25))
+    # Default to port 587 for TLS, 465 for SSL, 25 for plain
     use_tls = email_cfg.get("use_tls", True)
     use_ssl = email_cfg.get("use_ssl", False)
+    default_port = 465 if use_ssl else (587 if use_tls else 25)
+    port = int(email_cfg.get("smtp_port", default_port))
 
     # Validate mutually exclusive TLS/SSL settings
     if use_tls and use_ssl:
@@ -242,11 +244,19 @@ def _send_email_notification(email_cfg: dict, subject: str, body: str) -> None:
         if username and password:
             server.login(username, password)
         server.send_message(message)
+    except smtplib.SMTPException as exc:
+        log_event(
+            "freescout_followup",
+            action="email_notification",
+            outcome="failed",
+            reason=str(exc),
+        )
+        raise
     finally:
         if server is not None:
             try:
                 server.quit()
-            except Exception:
+            except smtplib.SMTPException:
                 pass
 
 
@@ -485,6 +495,7 @@ def main() -> None:
     log_event(
         "freescout_followup_summary",
         processed=processed,
+        qualified=qualified,
         created=0,
         appended=0,
         drafted=drafted,

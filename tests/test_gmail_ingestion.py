@@ -38,6 +38,7 @@ def _make_message(message_id: str, thread_id: str) -> dict:
 class GmailIngestionTests(unittest.TestCase):
     def test_skip_already_processed_skips_freescout(self):
         store = Mock()
+        store.mark_processing_if_new.return_value = False
         store.processed_success.return_value = True
         store.processed_filtered.return_value = False
         freescout = Mock()
@@ -55,6 +56,7 @@ class GmailIngestionTests(unittest.TestCase):
 
     def test_filtered_terminal_marks_filtered(self):
         store = Mock()
+        store.mark_processing_if_new.return_value = True
         store.processed_success.return_value = False
         store.processed_filtered.return_value = False
         freescout = Mock()
@@ -81,6 +83,7 @@ class GmailIngestionTests(unittest.TestCase):
 
     def test_append_existing_thread_marks_success_after_append(self):
         store = Mock()
+        store.mark_processing_if_new.return_value = True
         store.processed_success.return_value = False
         store.processed_filtered.return_value = False
         store.get_conversation_id_for_thread.return_value = "conv-123"
@@ -108,6 +111,7 @@ class GmailIngestionTests(unittest.TestCase):
 
     def test_create_new_thread_marks_success_after_upsert(self):
         store = Mock()
+        store.mark_processing_if_new.return_value = True
         store.processed_success.return_value = False
         store.processed_filtered.return_value = False
         store.get_conversation_id_for_thread.return_value = None
@@ -145,6 +149,7 @@ class GmailIngestionTests(unittest.TestCase):
 
     def test_non_filtered_message_makes_single_freescout_call(self):
         store = Mock()
+        store.mark_processing_if_new.return_value = True
         store.processed_success.return_value = False
         store.processed_filtered.return_value = False
         store.get_conversation_id_for_thread.return_value = "conv-321"
@@ -164,6 +169,7 @@ class GmailIngestionTests(unittest.TestCase):
 
     def test_append_failure_marks_failed(self):
         store = Mock()
+        store.mark_processing_if_new.return_value = True
         store.processed_success.return_value = False
         store.processed_filtered.return_value = False
         store.get_conversation_id_for_thread.return_value = "conv-789"
@@ -187,6 +193,7 @@ class GmailIngestionTests(unittest.TestCase):
 
     def test_processed_success_skips_before_other_processing(self):
         store = Mock()
+        store.mark_processing_if_new.return_value = False
         store.processed_success.return_value = True
         store.processed_filtered.return_value = False
         freescout = Mock()
@@ -201,6 +208,7 @@ class GmailIngestionTests(unittest.TestCase):
 
     def test_processed_filtered_store_value_still_filters_message(self):
         store = Mock()
+        store.mark_processing_if_new.return_value = True
         store.processed_success.return_value = False
         store.processed_filtered.return_value = True
         store.get_conversation_id_for_thread.return_value = "conv-901"
@@ -224,6 +232,7 @@ class GmailIngestionTests(unittest.TestCase):
 
     def test_append_without_freescout_does_not_mark_success(self):
         store = Mock()
+        store.mark_processing_if_new.return_value = True
         store.processed_success.return_value = False
         store.processed_filtered.return_value = False
         store.get_conversation_id_for_thread.return_value = "conv-111"
@@ -241,6 +250,7 @@ class GmailIngestionTests(unittest.TestCase):
 
     def test_create_without_freescout_does_not_mark_success(self):
         store = Mock()
+        store.mark_processing_if_new.return_value = True
         store.processed_success.return_value = False
         store.processed_filtered.return_value = False
         store.get_conversation_id_for_thread.return_value = None
@@ -258,6 +268,7 @@ class GmailIngestionTests(unittest.TestCase):
 
     def test_create_failure_marks_failed(self):
         store = Mock()
+        store.mark_processing_if_new.return_value = True
         store.processed_success.return_value = False
         store.processed_filtered.return_value = False
         store.get_conversation_id_for_thread.return_value = None
@@ -282,6 +293,7 @@ class GmailIngestionTests(unittest.TestCase):
 
     def test_create_failure_without_conversation_id_skips_thread_map_write(self):
         store = Mock()
+        store.mark_processing_if_new.return_value = True
         store.processed_success.return_value = False
         store.processed_filtered.return_value = False
         store.get_conversation_id_for_thread.return_value = None
@@ -302,6 +314,7 @@ class GmailIngestionTests(unittest.TestCase):
 
     def test_filtered_message_skips_fetch_and_freescout_on_rerun(self):
         store = Mock()
+        store.mark_processing_if_new.return_value = True
         store.processed_success.return_value = False
         store.processed_filtered.return_value = True
         freescout = Mock()

@@ -866,6 +866,8 @@ def _maybe_write_draft_reply(
     message_id: Optional[str],
     thread_id: Optional[str],
 ) -> bool:
+    # Note: This check is not atomic with draft creation - concurrent processes
+    # may exceed the limit. For strict enforcement, use database-level locking.
     max_drafts = settings.get("MAX_DRAFTS")
     if max_drafts is not None:
         draft_count = store.get_bot_draft_count()
@@ -999,7 +1001,15 @@ def send_update_email(service, summary: str, label_id: Optional[str] = None):
     msg = create_base64_message("me", "me", "FreeScout Updates", summary)
     if label_id:
         msg["labelIds"] = [label_id]
-    service.users().messages().send(userId="me", body=msg).execute()
+    try:
+        service.users().messages().send(userId="me", body=msg).execute()
+    except HttpError as exc:
+        log_event(
+            "gmail_send",
+            action="send_update_email",
+            outcome="failed",
+            reason=str(exc),
+        )
 
 
 def process_freescout_conversation(
