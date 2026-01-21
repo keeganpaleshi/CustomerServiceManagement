@@ -585,8 +585,8 @@ class TicketStore:
     def close(self) -> None:
         try:
             self._conn.close()
-        except Exception:
-            pass
+        except sqlite3.Error as e:
+            LOGGER.warning("Error closing database connection: %s", e)
 
     def __enter__(self) -> "TicketStore":
         return self
@@ -596,7 +596,10 @@ class TicketStore:
         return False
 
     def __del__(self) -> None:  # pragma: no cover - best-effort cleanup
+        # Best-effort cleanup during garbage collection. Prefer using context manager.
         try:
-            self.close()
-        except Exception:
+            if hasattr(self, "_conn") and self._conn:
+                self._conn.close()
+        except (sqlite3.Error, TypeError, AttributeError):
+            # Suppress errors during interpreter shutdown when modules may be None
             pass
