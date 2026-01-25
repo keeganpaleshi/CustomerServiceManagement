@@ -4,7 +4,7 @@ import argparse
 from datetime import datetime, timedelta, timezone
 from email.message import EmailMessage
 import smtplib
-from typing import Dict, Iterable, List, Optional, Sequence
+from typing import Dict, Iterable, List, Optional, Sequence, Set
 
 import requests
 
@@ -72,7 +72,7 @@ def parse_args(settings: Optional[Dict] = None):
     return parser.parse_args()
 
 
-def _extract_tags(conversation: dict) -> list[str]:
+def _extract_tags(conversation: dict) -> List[str]:
     tags = conversation.get("tags") or []
     if isinstance(tags, dict):
         tags = tags.get("data") or tags.get("tags") or []
@@ -89,7 +89,7 @@ def _extract_tags(conversation: dict) -> list[str]:
     return normalized
 
 
-def _status_values(conversation: dict) -> set[str]:
+def _status_values(conversation: Dict) -> Set[str]:
     status = conversation.get("status") or conversation.get("state")
     status_id = conversation.get("status_id")
     values = set()
@@ -137,7 +137,7 @@ def _is_agent_thread(thread: dict) -> bool:
     return bool(thread.get("user_id"))
 
 
-def _extract_latest_customer_thread(threads: Sequence[dict]) -> Optional[dict]:
+def _extract_latest_customer_thread(threads: Sequence[Dict]) -> Optional[Dict]:
     latest: Optional[dict] = None
     latest_time: Optional[datetime] = None
     for thread in threads:
@@ -150,7 +150,7 @@ def _extract_latest_customer_thread(threads: Sequence[dict]) -> Optional[dict]:
     return latest
 
 
-def _latest_timestamp(threads: Sequence[dict], predicate) -> Optional[datetime]:
+def _latest_timestamp(threads: Sequence[Dict], predicate) -> Optional[datetime]:
     latest: Optional[datetime] = None
     for thread in threads:
         if not predicate(thread):
@@ -161,7 +161,7 @@ def _latest_timestamp(threads: Sequence[dict], predicate) -> Optional[datetime]:
     return latest
 
 
-def _conversation_threads(details: dict) -> list[dict]:
+def _conversation_threads(details: Dict) -> List[Dict]:
     threads = details.get("threads") or details.get("data") or []
     if isinstance(threads, dict):
         return threads.get("threads", [])
@@ -312,7 +312,7 @@ def _notify_if_configured(
 
 def _iter_conversations(
     client: FreeScoutClient, params: dict, limit: int, max_pages: int = 100
-) -> list[dict]:
+) -> List[Dict]:
     """
     Iterate through FreeScout conversations with pagination.
 
@@ -325,7 +325,7 @@ def _iter_conversations(
     Returns:
         List of conversations up to limit
     """
-    conversations: list[dict] = []
+    conversations: List[Dict] = []
     page = 1
     page_size = min(50, limit)
     while len(conversations) < limit and page <= max_pages:
