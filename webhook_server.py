@@ -171,7 +171,12 @@ async def freescout(request: Request, x_webhook_secret: Optional[str] = Header(N
     try:
         body = json.loads(raw_body)
     except json.JSONDecodeError:
-        body = {"raw": raw_body.decode("utf-8", errors="replace")}
+        # Decode raw body but limit length to prevent logging excessive data
+        # and redact common sensitive patterns
+        decoded = raw_body.decode("utf-8", errors="replace")
+        if len(decoded) > MAX_LOG_SIZE:
+            decoded = decoded[:MAX_LOG_SIZE] + "...[truncated]"
+        body = {"raw": "[NON-JSON PAYLOAD - content not logged for security]", "raw_length": len(raw_body)}
 
     logfile = log_webhook_payload(body)
     if isinstance(body, dict):

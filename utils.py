@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from email.mime.text import MIMEText
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple, Type
 
 import requests
 import yaml
@@ -161,7 +161,7 @@ def require_openai_api_key() -> str:
     return api_key
 
 
-def require_ticket_settings() -> tuple[str, str]:
+def require_ticket_settings() -> Tuple[str, str]:
     """Return ticket URL/key or raise when configuration is incomplete."""
 
     settings = _load_settings()
@@ -196,7 +196,7 @@ def retry_request(
     max_attempts: Optional[int] = None,
     base_delay: float = 1.0,
     max_delay: float = 30.0,
-    exceptions: Tuple[type[BaseException], ...] = (Exception,),
+    exceptions: Tuple[Type[BaseException], ...] = (Exception,),
     log_context: Optional[Dict[str, Any]] = None,
 ) -> Any:
     """Retry an action with exponential backoff and structured logging."""
@@ -951,7 +951,7 @@ def classify_email(text):
     settings = get_settings()
     default_response = {
         "type": "other",
-        "importance": 0,
+        "importance": 1,
         "reasoning": "",
         "facts": [],
         "uncertainty": [],
