@@ -103,12 +103,14 @@ def log_webhook_payload(payload: Any) -> Path:
     # Serialize and check size before writing
     serialized = json.dumps(sanitized_payload, ensure_ascii=False, indent=2, sort_keys=True)
     if len(serialized) > MAX_LOG_SIZE:
-        # Truncate large payloads
+        # Truncate large payloads - use the already-serialized JSON for partial data
+        # to preserve valid JSON format in the truncated portion
+        partial_json = serialized[:MAX_LOG_SIZE // 2]
         truncated_payload = {
             "_truncated": True,
             "_original_size": len(serialized),
             "_max_size": MAX_LOG_SIZE,
-            "partial_data": str(payload)[:MAX_LOG_SIZE // 2]
+            "partial_data": partial_json
         }
         serialized = json.dumps(truncated_payload, ensure_ascii=False, indent=2)
 
