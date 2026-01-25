@@ -1,0 +1,59 @@
+# Git
+.git
+.gitignore
+
+# Credentials and secrets
+token.pickle
+token.json
+client_secret.json
+*.pem
+*.key
+.env
+.env.*
+
+# Database
+*.sqlite
+*.sqlite3
+*.db
+csm.sqlite
+data/
+
+# Logs
+logs/
+*.log
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+.venv/
+*.egg-info/
+.eggs/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+
+# Docker
+Dockerfile
+docker-compose.yml
+.dockerignore
+
+# Documentation
+*.md
+LICENSE

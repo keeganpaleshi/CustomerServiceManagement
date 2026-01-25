@@ -1,0 +1,82 @@
+version: "3.8"
+
+services:
+  # Gmail ingestion service - runs once and exits
+  gmail-bot:
+    build: .
+    container_name: csm-gmail-bot
+    command: ["python", "gmail_bot.py"]
+    environment:
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - FREESCOUT_URL=${FREESCOUT_URL}
+      - FREESCOUT_KEY=${FREESCOUT_KEY}
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+      - ./config.yaml:/app/config.yaml:ro
+      # Mount token.json for Gmail OAuth (created after first auth)
+      - ./token.json:/app/token.json
+    restart: "no"
+
+  # FreeScout polling service - runs continuously
+  freescout-poller:
+    build: .
+    container_name: csm-freescout-poller
+    command: ["python", "gmail_bot.py", "--poll-freescout", "--poll-interval", "300"]
+    environment:
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - FREESCOUT_URL=${FREESCOUT_URL}
+      - FREESCOUT_KEY=${FREESCOUT_KEY}
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+      - ./config.yaml:/app/config.yaml:ro
+    restart: unless-stopped
+    profiles:
+      - polling
+
+  # Webhook server - receives FreeScout webhooks
+  webhook-server:
+    build: .
+    container_name: csm-webhook-server
+    command: ["uvicorn", "webhook_server:app", "--host", "0.0.0.0", "--port", "8000"]
+    ports:
+      - "8000:8000"
+    environment:
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - FREESCOUT_URL=${FREESCOUT_URL}
+      - FREESCOUT_KEY=${FREESCOUT_KEY}
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+      - ./config.yaml:/app/config.yaml:ro
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 5s
+    profiles:
+      - webhook
+
+  # Follow-up drafts service - runs on schedule
+  followups:
+    build: .
+    container_name: csm-followups
+    command: ["python", "freescout_followups.py"]
+    environment:
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - FREESCOUT_URL=${FREESCOUT_URL}
+      - FREESCOUT_KEY=${FREESCOUT_KEY}
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+      - ./config.yaml:/app/config.yaml:ro
+    restart: "no"
+    profiles:
+      - followups
+
+volumes:
+  data:
+  logs:
