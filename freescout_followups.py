@@ -125,6 +125,12 @@ def _has_excluded(values: Iterable[str], excluded: Sequence[str]) -> bool:
     return any(excluded_tag.lower() in available for excluded_tag in excluded)
 
 
+def _contains_tag(tags: Sequence[str], tag: str) -> bool:
+    """Case-insensitive check if a tag is present in a list of tags."""
+    tag_lower = tag.lower()
+    return any(t.lower() == tag_lower for t in tags)
+
+
 def _is_agent_thread(thread: dict) -> bool:
     if thread.get("type") in {"reply", "message"}:
         return True
@@ -405,7 +411,7 @@ def main() -> None:
         if not _matches_any(_status_values(details or conversation), args.states):
             filtered += 1
             continue
-        if args.followup_tag in tags:
+        if _contains_tag(tags, args.followup_tag):
             filtered += 1
             continue
 
@@ -457,7 +463,7 @@ def main() -> None:
             continue
 
         # Avoid duplicate tags if followup_tag is somehow already present
-        updated_tags = tags if args.followup_tag in tags else tags + [args.followup_tag]
+        updated_tags = tags if _contains_tag(tags, args.followup_tag) else tags + [args.followup_tag]
         try:
             client.update_conversation(conv_id, tags=updated_tags)
         except requests.RequestException as exc:

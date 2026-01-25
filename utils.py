@@ -279,11 +279,8 @@ def _get_openai_rate_limiter() -> Optional[SimpleRateLimiter]:
         _rate_limiter_config = current_config
         return None
 
-    if _rate_limiter_config != current_config:
-        _cached_rate_limiter = SimpleRateLimiter(int(max_requests), int(window_seconds))
-        _rate_limiter_config = current_config
-
-    if _cached_rate_limiter is None:
+    # Create or recreate limiter if config changed or limiter doesn't exist
+    if _rate_limiter_config != current_config or _cached_rate_limiter is None:
         _cached_rate_limiter = SimpleRateLimiter(int(max_requests), int(window_seconds))
         _rate_limiter_config = current_config
 
