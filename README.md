@@ -58,22 +58,58 @@ message until it reaches a terminal DB state.
 
 ## Quick start
 
+### Local Installation
+
 ```bash
 pip install -r requirements.txt
 export OPENAI_API_KEY="sk-…"
 export FREESCOUT_URL="https://desk.example.com"   # or set in config.yaml
 export FREESCOUT_KEY="your-freescout-api-key"      # or set in config.yaml
 python gmail_bot.py
+```
 
 OAuth – the first run opens a browser window; token is cached in token.json.
 Pass `--console-auth` or set `gmail.use_console_oauth: true` in `config.yaml`
 to use the copy/paste console flow when no browser is available.
-```
+
+### Docker Deployment
+
+1. Copy the example environment file and configure it:
+   ```bash
+   cp .env.example .env
+   # Edit .env with your API keys
+   ```
+
+2. Build and run the Gmail bot:
+   ```bash
+   docker compose up gmail-bot
+   ```
+
+3. For webhook-based ingestion (recommended for production):
+   ```bash
+   docker compose --profile webhook up -d webhook-server
+   ```
+
+4. For polling-based ingestion:
+   ```bash
+   docker compose --profile polling up -d freescout-poller
+   ```
+
+5. Run follow-up drafts on demand:
+   ```bash
+   docker compose --profile followups run followups
+   ```
+
+**Available services:**
+- `gmail-bot` – One-time Gmail ingestion (default)
+- `webhook-server` – FastAPI webhook receiver (profile: webhook)
+- `freescout-poller` – Continuous FreeScout polling (profile: polling)
+- `followups` – Generate follow-up drafts for stale conversations (profile: followups)
 ### Development
 
 Run `flake8` before committing:
 ```bash
-flake8 Draft_Replies.py gmail_bot.py utils.py
+flake8 gmail_bot.py utils.py storage.py webhook_server.py freescout_followups.py
 ```
 
 
@@ -107,11 +143,6 @@ webhook handler. The bot uses the FreeScout API to fetch the conversation's
 latest customer message, classifies it with OpenAI, and then updates the ticket
 in place: priority, assignment, tags, custom fields, and internal notes with an
 optional suggested reply.
-
-### Legacy Code
-
-`Draft_Replies.py` is deprecated, not imported, not executed, and retained only
-for historical reference. It may be removed in a future cleanup.
 
 ### Configure actions
 

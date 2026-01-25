@@ -126,6 +126,12 @@ def _get_counter_store() -> TicketStore:
     return TicketStore(sqlite_path)
 
 
+@app.get("/health")
+async def health():
+    """Health check endpoint for container orchestration."""
+    return {"status": "ok"}
+
+
 @app.post("/freescout")
 async def freescout(request: Request, x_webhook_secret: Optional[str] = Header(None)):
     # Check content-length header first to reject oversized payloads quickly
