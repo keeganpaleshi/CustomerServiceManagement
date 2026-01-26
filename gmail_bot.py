@@ -2,6 +2,8 @@ import argparse
 import hashlib
 import hmac
 import json
+import os
+import re
 import signal
 import threading
 import time
@@ -103,6 +105,10 @@ TICKET_LABEL_NAME = "Ticketed"
 
 # Default thresholds
 DEFAULT_PRIORITY_HIGH_THRESHOLD = 8  # Default importance score that marks a message as high priority
+
+# Webhook validation constants
+MAX_WEBHOOK_ID_LENGTH = 256
+VALID_WEBHOOK_ID_PATTERN = re.compile(r"^[a-zA-Z0-9_-]+$")
 
 
 @dataclass(frozen=True)
@@ -499,7 +505,6 @@ def process_gmail_message(
             level="error",
         )
         # Re-raise programming errors in debug mode
-        import os
         if os.getenv("DEBUG", "").lower() in ("1", "true", "yes"):
             raise
         return ProcessResult(status="failed_retryable", reason=reason)
@@ -1206,12 +1211,6 @@ def _validate_webhook_conversation_id(value: object) -> Tuple[bool, Optional[str
     Returns:
         Tuple of (is_valid, normalized_id_or_none, error_message)
     """
-    # Maximum allowed length for conversation IDs
-    max_id_length = 256
-    # Pattern for valid conversation IDs (alphanumeric, hyphens, underscores)
-    import re
-    valid_id_pattern = re.compile(r"^[a-zA-Z0-9_-]+$")
-
     if value is None:
         return False, None, "missing conversation id"
 
@@ -1225,11 +1224,11 @@ def _validate_webhook_conversation_id(value: object) -> Tuple[bool, Optional[str
         return False, None, "conversation id is empty"
 
     # Check length to prevent memory exhaustion
-    if len(id_str) > max_id_length:
-        return False, None, f"conversation id exceeds maximum length ({max_id_length})"
+    if len(id_str) > MAX_WEBHOOK_ID_LENGTH:
+        return False, None, f"conversation id exceeds maximum length ({MAX_WEBHOOK_ID_LENGTH})"
 
     # Validate format - only allow safe characters
-    if not valid_id_pattern.match(id_str):
+    if not VALID_WEBHOOK_ID_PATTERN.match(id_str):
         return False, None, "conversation id contains invalid characters"
 
     return True, id_str, ""

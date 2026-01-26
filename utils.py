@@ -340,18 +340,37 @@ def _get_openai_rate_limiter() -> Optional[SimpleRateLimiter]:
 
 
 class FreeScoutClient:
-    """Minimal FreeScout API helper for conversations."""
+    """Minimal FreeScout API helper for conversations.
+
+    Uses a requests.Session for connection pooling and improved performance.
+    """
 
     def __init__(self, base_url: str, api_key: str, timeout: int = 15):
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
         self.timeout = timeout
+        # Use session for connection pooling
+        self._session = requests.Session()
+        self._session.headers.update({
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+            "X-FreeScout-API-Key": self.api_key,
+        })
+
+    def close(self) -> None:
+        """Close the underlying session."""
+        self._session.close()
+
+    def __enter__(self) -> "FreeScoutClient":
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        self.close()
 
     @staticmethod
     def _normalize_id(value: object) -> str:
-        if value is None:
-            return ""
-        return str(value)
+        """Normalize ID to string, returning empty string for None/empty values."""
+        return normalize_id(value) or ""
 
     @staticmethod
     def _maybe_int(value: Optional[str]) -> Optional[int]:
@@ -362,19 +381,10 @@ class FreeScoutClient:
         except (TypeError, ValueError):
             return None
 
-
-    def _headers(self) -> Dict[str, str]:
-        return {
-            "Accept": "application/json",
-            "Content-Type": "application/json",
-            "X-FreeScout-API-Key": self.api_key,
-        }
-
     def get_conversation(self, conversation_id: str) -> Dict[str, Any]:
         conversation_id = self._normalize_id(conversation_id)
-        resp = requests.get(
+        resp = self._session.get(
             f"{self.base_url}/api/conversations/{conversation_id}",
-            headers=self._headers(),
             timeout=self.timeout,
         )
         resp.raise_for_status()
@@ -384,9 +394,8 @@ class FreeScoutClient:
         return {}
 
     def list_conversations(self, params: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
-        resp = requests.get(
+        resp = self._session.get(
             f"{self.base_url}/api/conversations",
-            headers=self._headers(),
             params=params,
             timeout=self.timeout,
         )
@@ -444,9 +453,8 @@ class FreeScoutClient:
         if not payload:
             return {}
 
-        resp = requests.put(
+        resp = self._session.put(
             f"{self.base_url}/api/conversations/{conversation_id}",
-            headers=self._headers(),
             json=payload,
             timeout=self.timeout,
         )
@@ -460,9 +468,8 @@ class FreeScoutClient:
         payload: Dict[str, Any] = {"type": "customer", "text": text, "imported": imported}
 
         def _request() -> Dict[str, Any]:
-            resp = requests.post(
+            resp = self._session.post(
                 f"{self.base_url}/api/conversations/{conversation_id}/threads",
-                headers=self._headers(),
                 json=payload,
                 timeout=self.timeout,
             )
@@ -528,9 +535,8 @@ class FreeScoutClient:
             payload["customFields"] = serialized
 
         def _request() -> Dict[str, Any]:
-            resp = requests.post(
+            resp = self._session.post(
                 f"{self.base_url}/api/conversations",
-                headers=self._headers(),
                 json=payload,
                 timeout=self.timeout,
             )
@@ -551,9 +557,8 @@ class FreeScoutClient:
         payload: Dict[str, Any] = {"type": "note", "text": text}
         if user_id:
             payload["user_id"] = self._maybe_int(user_id) or user_id
-        resp = requests.post(
+        resp = self._session.post(
             f"{self.base_url}/api/conversations/{conversation_id}/threads",
-            headers=self._headers(),
             json=payload,
             timeout=self.timeout,
         )
@@ -586,9 +591,8 @@ class FreeScoutClient:
             payload["draft"] = True
 
         def _request() -> Dict[str, Any]:
-            resp = requests.post(
+            resp = self._session.post(
                 f"{self.base_url}/api/conversations/{conversation_id}/threads",
-                headers=self._headers(),
                 json=payload,
                 timeout=self.timeout,
             )
@@ -614,9 +618,8 @@ class FreeScoutClient:
         payload: Dict[str, Any] = {"text": text, "draft": draft}
 
         def _request() -> Dict[str, Any]:
-            resp = requests.put(
+            resp = self._session.put(
                 f"{self.base_url}/api/conversations/{conversation_id}/threads/{thread_id}",
-                headers=self._headers(),
                 json=payload,
                 timeout=self.timeout,
             )
@@ -704,8 +707,21 @@ def get_gmail_service(
     return build("gmail", "v1", credentials=creds)
 
 
-def fetch_all_unread_messages(service, query, limit=None):
-    unread, token = [], None
+def fetch_all_unread_messages(
+    service: Any, query: str, limit: Optional[int] = None
+) -> List[Dict[str, Any]]:
+    """Fetch all unread messages matching a query from Gmail.
+
+    Args:
+        service: Gmail API service instance
+        query: Gmail search query string
+        limit: Maximum number of messages to fetch (None for unlimited)
+
+    Returns:
+        List of message dictionaries with 'id' and 'threadId' keys
+    """
+    unread: List[Dict[str, Any]] = []
+    token: Optional[str] = None
     while True:
         # Apply limit to maxResults if specified to avoid over-fetching
         list_params = {"userId": "me", "q": query}
