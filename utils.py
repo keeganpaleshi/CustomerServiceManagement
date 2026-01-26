@@ -1462,12 +1462,19 @@ def apply_label_to_thread(service, thread_id: str, label_id: str) -> bool:
     return True
 
 
+# Maximum length of body text to apply regex patterns to (prevents ReDoS)
+MAX_REGEX_BODY_LENGTH = 100000
+
+
 def is_promotional_or_spam(message, body_text):
     headers = {
         h.get("name", "").lower(): h.get("value", "")
         for h in message.get("payload", {}).get("headers", [])
     }
     body_text = body_text or ""
+    # Limit body text length to prevent ReDoS attacks with crafted input
+    if len(body_text) > MAX_REGEX_BODY_LENGTH:
+        body_text = body_text[:MAX_REGEX_BODY_LENGTH]
     body_lower = body_text.lower()
     subject = headers.get("subject", "").lower()
     from_header = headers.get("from", "").lower()
@@ -1603,6 +1610,9 @@ def generate_ai_reply(subject, sender, snippet_or_body, email_type):
 
         # Sanitize user inputs to mitigate prompt injection attacks
         # Remove or escape control sequences that could manipulate the prompt
+        # Maximum input length to prevent context overflow attacks
+        MAX_AI_INPUT_LENGTH = 50000
+
         def sanitize_input(text: str) -> str:
             if not text:
                 return ""
@@ -1613,9 +1623,8 @@ def generate_ai_reply(subject, sender, snippet_or_body, email_type):
             # Escape markdown-style instruction markers
             sanitized = re.sub(r'^#{1,6}\s*(system|instruction|ignore|override)', r'\1', sanitized, flags=re.MULTILINE | re.IGNORECASE)
             # Limit length to prevent context overflow attacks
-            max_input_len = 50000
-            if len(sanitized) > max_input_len:
-                sanitized = sanitized[:max_input_len] + "...[truncated]"
+            if len(sanitized) > MAX_AI_INPUT_LENGTH:
+                sanitized = sanitized[:MAX_AI_INPUT_LENGTH] + "...[truncated]"
             return sanitized
 
         safe_subject = sanitize_input(subject)

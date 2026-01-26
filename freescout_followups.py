@@ -377,6 +377,25 @@ def main() -> None:
     reload_settings()
     settings = get_settings()
     args = parse_args(settings)
+
+    # Validate hours argument
+    if args.hours < 0:
+        log_event(
+            "freescout_followup",
+            action="start",
+            outcome="failed",
+            reason=f"hours must be non-negative, got {args.hours}",
+        )
+        return
+    if args.limit < 1:
+        log_event(
+            "freescout_followup",
+            action="start",
+            outcome="failed",
+            reason=f"limit must be at least 1, got {args.limit}",
+        )
+        return
+
     if settings["TICKET_SYSTEM"] != "freescout":
         log_event(
             "freescout_followup",
