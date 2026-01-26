@@ -70,7 +70,8 @@ class GmailIngestionTests(unittest.TestCase):
         self.assertEqual(result.status, "filtered")
         self.assertEqual(result.reason, "filtered: promotional/spam")
         self.assertIsNone(result.freescout_conversation_id)
-        store.processed_success.assert_called_once_with("msg-2")
+        # processed_success is only called when mark_processing_if_new returns False
+        store.processed_success.assert_not_called()
         store.mark_filtered.assert_called_once_with(
             "msg-2",
             "thread-2",
@@ -87,7 +88,11 @@ class GmailIngestionTests(unittest.TestCase):
         store.processed_success.return_value = False
         store.processed_filtered.return_value = False
         store.get_conversation_id_for_thread.return_value = "conv-123"
+        store.get_bot_draft.return_value = None
+        store.can_create_new_draft.return_value = True
+        store.atomic_upsert_bot_draft_if_under_limit.return_value = True
         freescout = Mock()
+        freescout.create_agent_draft_reply.return_value = {"id": "draft-1"}
         message = _make_message("msg-3", "thread-3")
 
         with patch.object(gmail_bot, "get_settings", return_value=_base_settings()), \
@@ -98,7 +103,8 @@ class GmailIngestionTests(unittest.TestCase):
         self.assertEqual(result.status, "freescout_appended")
         self.assertEqual(result.reason, "append success")
         self.assertEqual(result.freescout_conversation_id, "conv-123")
-        store.processed_success.assert_called_once_with("msg-3")
+        # processed_success is only called when mark_processing_if_new returns False
+        store.processed_success.assert_not_called()
         freescout.add_customer_thread.assert_called_once_with("conv-123", "hello", imported=True)
         freescout.create_conversation.assert_not_called()
         store.upsert_thread_map.assert_not_called()
@@ -115,8 +121,12 @@ class GmailIngestionTests(unittest.TestCase):
         store.processed_success.return_value = False
         store.processed_filtered.return_value = False
         store.get_conversation_id_for_thread.return_value = None
+        store.get_bot_draft.return_value = None
+        store.can_create_new_draft.return_value = True
+        store.atomic_upsert_bot_draft_if_under_limit.return_value = True
         freescout = Mock()
         freescout.create_conversation.return_value = {"id": "conv-456"}
+        freescout.create_agent_draft_reply.return_value = {"id": "draft-1"}
         message = _make_message("msg-4", "thread-4")
 
         with patch.object(gmail_bot, "get_settings", return_value=_base_settings()), \
@@ -127,7 +137,8 @@ class GmailIngestionTests(unittest.TestCase):
         self.assertEqual(result.status, "freescout_created")
         self.assertEqual(result.reason, "create success")
         self.assertEqual(result.freescout_conversation_id, "conv-456")
-        store.processed_success.assert_called_once_with("msg-4")
+        # processed_success is only called when mark_processing_if_new returns False
+        store.processed_success.assert_not_called()
         freescout.create_conversation.assert_called_once_with(
             "Need help",
             "customer@example.com",
@@ -153,7 +164,11 @@ class GmailIngestionTests(unittest.TestCase):
         store.processed_success.return_value = False
         store.processed_filtered.return_value = False
         store.get_conversation_id_for_thread.return_value = "conv-321"
+        store.get_bot_draft.return_value = None
+        store.can_create_new_draft.return_value = True
+        store.atomic_upsert_bot_draft_if_under_limit.return_value = True
         freescout = Mock()
+        freescout.create_agent_draft_reply.return_value = {"id": "draft-1"}
         message = _make_message("msg-7", "thread-7")
 
         with patch.object(gmail_bot, "get_settings", return_value=_base_settings()), \
@@ -162,9 +177,10 @@ class GmailIngestionTests(unittest.TestCase):
             result = gmail_bot.process_gmail_message(message, store, freescout, Mock())
 
         self.assertEqual(result.status, "freescout_appended")
+        # Verify that add_customer_thread is the first call made
         self.assertEqual(
-            freescout.method_calls,
-            [call.add_customer_thread("conv-321", "hello", imported=True)],
+            freescout.method_calls[0],
+            call.add_customer_thread("conv-321", "hello", imported=True),
         )
 
     def test_append_failure_marks_failed(self):
@@ -185,7 +201,8 @@ class GmailIngestionTests(unittest.TestCase):
         self.assertEqual(result.status, "failed_retryable")
         self.assertEqual(result.reason, "append failed: boom")
         self.assertEqual(result.freescout_conversation_id, "conv-789")
-        store.processed_success.assert_called_once_with("msg-5")
+        # processed_success is only called when mark_processing_if_new returns False
+        store.processed_success.assert_not_called()
         freescout.add_customer_thread.assert_called_once_with("conv-789", "hello", imported=True)
         freescout.create_conversation.assert_not_called()
         store.mark_success.assert_not_called()
@@ -284,7 +301,8 @@ class GmailIngestionTests(unittest.TestCase):
         self.assertEqual(result.status, "failed_retryable")
         self.assertEqual(result.reason, "ticket creation failed: boom")
         self.assertIsNone(result.freescout_conversation_id)
-        store.processed_success.assert_called_once_with("msg-6")
+        # processed_success is only called when mark_processing_if_new returns False
+        store.processed_success.assert_not_called()
         freescout.create_conversation.assert_called_once()
         freescout.add_customer_thread.assert_not_called()
         store.upsert_thread_map.assert_not_called()
@@ -308,7 +326,8 @@ class GmailIngestionTests(unittest.TestCase):
 
         self.assertEqual(result.status, "failed_retryable")
         self.assertEqual(result.reason, "ticket creation failed")
-        store.processed_success.assert_called_once_with("msg-10")
+        # processed_success is only called when mark_processing_if_new returns False
+        store.processed_success.assert_not_called()
         store.upsert_thread_map.assert_not_called()
         store.mark_success.assert_not_called()
 

@@ -581,6 +581,36 @@ class TicketStore:
         row = cur.fetchone()
         return int(row[0]) if row else 0
 
+    def can_create_new_draft(self, conversation_id: str, max_drafts: Optional[int]) -> bool:
+        """Check if a new draft can be created without exceeding the limit.
+
+        This is a pre-check that should be called before creating a draft on
+        the external system (FreeScout) to avoid orphaned drafts.
+
+        Args:
+            conversation_id: The conversation ID to check
+            max_drafts: Maximum number of drafts allowed (None = unlimited)
+
+        Returns:
+            True if a draft can be created (either updating existing or under limit)
+        """
+        if max_drafts is None:
+            return True
+
+        # Check if this conversation already has a draft (update case - always allowed)
+        cur = self._conn.execute(
+            "SELECT 1 FROM bot_drafts WHERE freescout_conversation_id = ?",
+            (conversation_id,),
+        )
+        if cur.fetchone() is not None:
+            return True  # Updating existing draft is always allowed
+
+        # Check if under the limit for new drafts
+        cur = self._conn.execute("SELECT COUNT(*) FROM bot_drafts")
+        row = cur.fetchone()
+        current_count = int(row[0]) if row else 0
+        return current_count < max_drafts
+
     def atomic_upsert_bot_draft_if_under_limit(
         self,
         freescout_conversation_id: str,

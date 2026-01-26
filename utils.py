@@ -150,6 +150,7 @@ def _load_settings() -> Dict[str, Any]:
         "OPENAI_TIMEOUT": cfg["openai"].get("timeout", 30),
         "OPENAI_RATE_LIMIT": cfg["openai"].get("rate_limit", {}),
         "OPENAI_BUDGET": cfg["openai"].get("budget", {}),
+        "OPENAI_PRICING": cfg["openai"].get("pricing", {}),
         "FALLBACK_SIGNATURE": cfg["openai"].get("fallback_signature", "Best,\nSupport Team"),
         "PROMO_LABELS": {
             "SPAM",
@@ -216,17 +217,32 @@ def validate_settings() -> List[str]:
             "OPENAI_API_KEY appears to be invalid (should start with 'sk-')"
         )
 
-    # Validate OpenAI models
+    # Validate OpenAI models - accept gpt-*, o1-*, o3-*, and other known prefixes
+    # This list may need updating as OpenAI releases new model families
+    valid_model_prefixes = ("gpt-", "o1-", "o3-", "text-", "davinci", "curie", "babbage", "ada")
+
     classify_model = settings.get("CLASSIFY_MODEL", "")
-    if classify_model and not classify_model.startswith("gpt-"):
-        errors.append(
-            f"Invalid classify_model: '{classify_model}' (should be a GPT model)"
+    if classify_model and not any(classify_model.startswith(prefix) for prefix in valid_model_prefixes):
+        # Log a warning instead of an error for unknown models to allow new models
+        log_event(
+            "settings_validation",
+            level=logging.WARNING,
+            action="validate_model",
+            model_type="classify",
+            model=classify_model,
+            reason="Model name doesn't match known OpenAI prefixes - may be valid if using a new model",
         )
 
     draft_model = settings.get("DRAFT_MODEL", "")
-    if draft_model and not draft_model.startswith("gpt-"):
-        errors.append(
-            f"Invalid draft_model: '{draft_model}' (should be a GPT model)"
+    if draft_model and not any(draft_model.startswith(prefix) for prefix in valid_model_prefixes):
+        # Log a warning instead of an error for unknown models to allow new models
+        log_event(
+            "settings_validation",
+            level=logging.WARNING,
+            action="validate_model",
+            model_type="draft",
+            model=draft_model,
+            reason="Model name doesn't match known OpenAI prefixes - may be valid if using a new model",
         )
 
     # Validate Gmail OAuth files
@@ -458,23 +474,31 @@ class SimpleRateLimiter:
 class OpenAICostTracker:
     """Thread-safe tracker for OpenAI API costs and usage limits."""
 
-    # Approximate pricing per 1K tokens (as of 2024)
-    # Update these based on current OpenAI pricing
-    PRICING = {
+    # Default pricing per 1K tokens - used when config pricing is not available
+    # Last updated: 2024-01 - check https://openai.com/pricing for current rates
+    DEFAULT_PRICING = {
         "gpt-4o": {"input": 0.005, "output": 0.015},
         "gpt-4": {"input": 0.03, "output": 0.06},
         "gpt-3.5-turbo": {"input": 0.001, "output": 0.002},
+        "default": {"input": 0.005, "output": 0.015},
     }
 
-    def __init__(self, daily_budget_usd: float = 0.0, monthly_budget_usd: float = 0.0):
+    def __init__(
+        self,
+        daily_budget_usd: float = 0.0,
+        monthly_budget_usd: float = 0.0,
+        pricing: Optional[Dict[str, Dict[str, float]]] = None,
+    ):
         """Initialize cost tracker with budget limits.
 
         Args:
             daily_budget_usd: Maximum USD to spend per day (0 = unlimited)
             monthly_budget_usd: Maximum USD to spend per month (0 = unlimited)
+            pricing: Custom pricing dict mapping model names to {"input": x, "output": y}
         """
         self.daily_budget = daily_budget_usd
         self.monthly_budget = monthly_budget_usd
+        self._pricing = pricing if pricing else self.DEFAULT_PRICING
         self._lock = threading.Lock()
         # Track costs by date (YYYY-MM-DD for daily, YYYY-MM for monthly)
         self.daily_costs: Dict[str, float] = {}
@@ -500,9 +524,14 @@ class OpenAICostTracker:
         Returns:
             Estimated cost in USD
         """
-        pricing = self.PRICING.get(model, self.PRICING.get("gpt-4o"))
-        input_cost = (input_tokens / 1000.0) * pricing["input"]
-        output_cost = (output_tokens / 1000.0) * pricing["output"]
+        # Look up model pricing, fall back to default pricing
+        pricing = self._pricing.get(model)
+        if not pricing:
+            pricing = self._pricing.get("default", self.DEFAULT_PRICING.get("default"))
+        if not pricing:
+            pricing = {"input": 0.005, "output": 0.015}  # Ultimate fallback
+        input_cost = (input_tokens / 1000.0) * pricing.get("input", 0.005)
+        output_cost = (output_tokens / 1000.0) * pricing.get("output", 0.015)
         return input_cost + output_cost
 
     def record_usage(self, model: str, input_tokens: int, output_tokens: int) -> bool:
@@ -597,18 +626,25 @@ class OpenAICostTracker:
             }
 
 
+# Thread-safe caching for rate limiters and cost tracker
 _cached_rate_limiter: Optional[SimpleRateLimiter] = None
 _rate_limiter_config: Optional[tuple] = None
+_rate_limiter_lock = threading.Lock()
 
 _cached_cost_tracker: Optional[OpenAICostTracker] = None
 _cost_tracker_config: Optional[tuple] = None
+_cost_tracker_lock = threading.Lock()
 
 _cached_freescout_limiter: Optional[SimpleRateLimiter] = None
 _freescout_limiter_config: Optional[tuple] = None
+_freescout_limiter_lock = threading.Lock()
 
 
 def _get_openai_rate_limiter() -> Optional[SimpleRateLimiter]:
-    """Get or create rate limiter, recreating if config changed."""
+    """Get or create rate limiter, recreating if config changed.
+
+    Thread-safe: Uses a lock to prevent race conditions during recreation.
+    """
     global _cached_rate_limiter, _rate_limiter_config
     settings = _load_settings()
     rate_limit = settings.get("OPENAI_RATE_LIMIT", {}) or {}
@@ -617,37 +653,51 @@ def _get_openai_rate_limiter() -> Optional[SimpleRateLimiter]:
     current_config = (max_requests, window_seconds)
 
     if not max_requests or not window_seconds:
-        _cached_rate_limiter = None
-        _rate_limiter_config = current_config
+        with _rate_limiter_lock:
+            _cached_rate_limiter = None
+            _rate_limiter_config = current_config
         return None
 
-    # Create or recreate limiter if config changed or limiter doesn't exist
-    if _rate_limiter_config != current_config or _cached_rate_limiter is None:
-        _cached_rate_limiter = SimpleRateLimiter(int(max_requests), int(window_seconds))
-        _rate_limiter_config = current_config
-
-    return _cached_rate_limiter
+    # Check if recreation is needed under lock
+    with _rate_limiter_lock:
+        if _rate_limiter_config != current_config or _cached_rate_limiter is None:
+            _cached_rate_limiter = SimpleRateLimiter(int(max_requests), int(window_seconds))
+            _rate_limiter_config = current_config
+        return _cached_rate_limiter
 
 
 def _get_openai_cost_tracker() -> OpenAICostTracker:
-    """Get or create cost tracker, recreating if config changed."""
+    """Get or create cost tracker, recreating if config changed.
+
+    Thread-safe: Uses a lock to prevent race conditions during recreation.
+    """
     global _cached_cost_tracker, _cost_tracker_config
     settings = _load_settings()
     budget = settings.get("OPENAI_BUDGET", {}) or {}
     daily_budget = float(budget.get("daily_usd", 0.0))
     monthly_budget = float(budget.get("monthly_usd", 0.0))
-    current_config = (daily_budget, monthly_budget)
+    pricing = settings.get("OPENAI_PRICING", {}) or {}
+    # Include pricing in config tuple to detect pricing changes
+    pricing_tuple = tuple(sorted(
+        (model, tuple(sorted(rates.items())))
+        for model, rates in pricing.items()
+        if isinstance(rates, dict)
+    ))
+    current_config = (daily_budget, monthly_budget, pricing_tuple)
 
-    # Create or recreate tracker if config changed or doesn't exist
-    if _cost_tracker_config != current_config or _cached_cost_tracker is None:
-        _cached_cost_tracker = OpenAICostTracker(daily_budget, monthly_budget)
-        _cost_tracker_config = current_config
-
-    return _cached_cost_tracker
+    # Check if recreation is needed under lock
+    with _cost_tracker_lock:
+        if _cost_tracker_config != current_config or _cached_cost_tracker is None:
+            _cached_cost_tracker = OpenAICostTracker(daily_budget, monthly_budget, pricing)
+            _cost_tracker_config = current_config
+        return _cached_cost_tracker
 
 
 def _get_freescout_rate_limiter() -> Optional[SimpleRateLimiter]:
-    """Get or create FreeScout rate limiter, recreating if config changed."""
+    """Get or create FreeScout rate limiter, recreating if config changed.
+
+    Thread-safe: Uses a lock to prevent race conditions during recreation.
+    """
     global _cached_freescout_limiter, _freescout_limiter_config
     settings = _load_settings()
     rate_limit = settings.get("FREESCOUT_RATE_LIMIT", {}) or {}
@@ -656,16 +706,17 @@ def _get_freescout_rate_limiter() -> Optional[SimpleRateLimiter]:
     current_config = (max_requests, window_seconds)
 
     if not max_requests or not window_seconds:
-        _cached_freescout_limiter = None
-        _freescout_limiter_config = current_config
+        with _freescout_limiter_lock:
+            _cached_freescout_limiter = None
+            _freescout_limiter_config = current_config
         return None
 
-    # Create or recreate limiter if config changed or limiter doesn't exist
-    if _freescout_limiter_config != current_config or _cached_freescout_limiter is None:
-        _cached_freescout_limiter = SimpleRateLimiter(int(max_requests), int(window_seconds))
-        _freescout_limiter_config = current_config
-
-    return _cached_freescout_limiter
+    # Check if recreation is needed under lock
+    with _freescout_limiter_lock:
+        if _freescout_limiter_config != current_config or _cached_freescout_limiter is None:
+            _cached_freescout_limiter = SimpleRateLimiter(int(max_requests), int(window_seconds))
+            _freescout_limiter_config = current_config
+        return _cached_freescout_limiter
 
 
 class FreeScoutClient:
@@ -794,6 +845,7 @@ class FreeScoutClient:
     def add_customer_thread(
         self, conversation_id: str, text: str, imported: bool = True
     ) -> Dict[str, Any]:
+        self._check_rate_limit()
         conversation_id = self._normalize_id(conversation_id)
         payload: Dict[str, Any] = {"type": "customer", "text": text, "imported": imported}
 
@@ -826,6 +878,7 @@ class FreeScoutClient:
         gmail_thread_field: Optional[str] = None,
         gmail_message_field: Optional[str] = None,
     ) -> Dict[str, Any]:
+        self._check_rate_limit()
         mailbox_id = self._normalize_id(mailbox_id)
         custom_fields: Dict[str, Any] = {}
         tags: List[str] = []
@@ -885,6 +938,7 @@ class FreeScoutClient:
     def add_internal_note(
         self, conversation_id: str, text: str, user_id: Optional[str] = None
     ) -> Dict[str, Any]:
+        self._check_rate_limit()
         conversation_id = self._normalize_id(conversation_id)
         payload: Dict[str, Any] = {"type": "note", "text": text}
         if user_id:
@@ -916,6 +970,7 @@ class FreeScoutClient:
         user_id: Optional[str] = None,
         draft: bool = True,
     ) -> Dict[str, Any]:
+        self._check_rate_limit()
         conversation_id = self._normalize_id(conversation_id)
         payload: Dict[str, Any] = {"type": "reply", "text": text}
         if user_id:
@@ -947,6 +1002,7 @@ class FreeScoutClient:
         text: str,
         draft: bool = True,
     ) -> Dict[str, Any]:
+        self._check_rate_limit()
         conversation_id = self._normalize_id(conversation_id)
         thread_id = self._normalize_id(thread_id)
         payload: Dict[str, Any] = {"text": text, "draft": draft}
@@ -974,55 +1030,77 @@ class FreeScoutClient:
 
 # ----- Token Encryption Helpers -----
 
+# Try to import cryptography for secure encryption, fall back to warning if unavailable
+try:
+    from cryptography.fernet import Fernet, InvalidToken
+    _FERNET_AVAILABLE = True
+except ImportError:
+    _FERNET_AVAILABLE = False
+    InvalidToken = Exception  # type: ignore
+
 
 def _get_token_encryption_key() -> Optional[bytes]:
     """Get encryption key for Gmail tokens from environment.
 
     Returns:
-        32-byte encryption key or None if encryption is disabled
+        URL-safe base64-encoded 32-byte key for Fernet, or None if encryption is disabled
     """
     key_env = os.getenv("GMAIL_TOKEN_ENCRYPTION_KEY", "")
     if not key_env:
         return None
 
-    # Derive a consistent 32-byte key using SHA-256
-    return hashlib.sha256(key_env.encode("utf-8")).digest()
+    if not _FERNET_AVAILABLE:
+        log_event(
+            "token_encryption",
+            level=logging.WARNING,
+            action="get_key",
+            outcome="degraded",
+            reason="cryptography library not installed, token encryption disabled",
+        )
+        return None
+
+    # Derive a URL-safe base64-encoded 32-byte key for Fernet
+    # Fernet requires exactly 32 bytes, URL-safe base64 encoded
+    raw_key = hashlib.sha256(key_env.encode("utf-8")).digest()
+    return base64.urlsafe_b64encode(raw_key)
 
 
 def _encrypt_token_data(data: str, key: bytes) -> str:
-    """Encrypt token data using XOR cipher with the provided key.
+    """Encrypt token data using Fernet (AES-128-CBC with HMAC).
 
     Args:
         data: JSON string to encrypt
-        key: 32-byte encryption key
+        key: URL-safe base64-encoded 32-byte key
 
     Returns:
-        Base64-encoded encrypted data
+        Fernet-encrypted token (URL-safe base64)
     """
-    data_bytes = data.encode("utf-8")
-    # Extend key to match data length by repeating it
-    extended_key = (key * (len(data_bytes) // len(key) + 1))[:len(data_bytes)]
-    # XOR encryption
-    encrypted = bytes(a ^ b for a, b in zip(data_bytes, extended_key))
-    # Base64 encode for safe storage
-    return base64.b64encode(encrypted).decode("ascii")
+    if not _FERNET_AVAILABLE:
+        raise RuntimeError("cryptography library required for token encryption")
+
+    fernet = Fernet(key)
+    encrypted = fernet.encrypt(data.encode("utf-8"))
+    return encrypted.decode("ascii")
 
 
 def _decrypt_token_data(encrypted_data: str, key: bytes) -> str:
-    """Decrypt token data using XOR cipher with the provided key.
+    """Decrypt token data using Fernet (AES-128-CBC with HMAC).
 
     Args:
-        encrypted_data: Base64-encoded encrypted data
-        key: 32-byte encryption key
+        encrypted_data: Fernet-encrypted token
+        key: URL-safe base64-encoded 32-byte key
 
     Returns:
         Decrypted JSON string
+
+    Raises:
+        InvalidToken: If decryption fails (wrong key or tampered data)
     """
-    encrypted_bytes = base64.b64decode(encrypted_data.encode("ascii"))
-    # Extend key to match data length by repeating it
-    extended_key = (key * (len(encrypted_bytes) // len(key) + 1))[:len(encrypted_bytes)]
-    # XOR decryption (same as encryption)
-    decrypted = bytes(a ^ b for a, b in zip(encrypted_bytes, extended_key))
+    if not _FERNET_AVAILABLE:
+        raise RuntimeError("cryptography library required for token decryption")
+
+    fernet = Fernet(key)
+    decrypted = fernet.decrypt(encrypted_data.encode("ascii"))
     return decrypted.decode("utf-8")
 
 
@@ -1056,6 +1134,16 @@ def get_gmail_service(
                 if encryption_key:
                     try:
                         token_content = _decrypt_token_data(token_content, encryption_key)
+                    except InvalidToken as e:
+                        log_event(
+                            "gmail_auth",
+                            level=logging.WARNING,
+                            action="decrypt_token",
+                            outcome="failed",
+                            reason=f"Token decryption failed (invalid key or corrupted data), will re-authenticate: {e}",
+                        )
+                        creds = None
+                        token_content = None
                     except Exception as e:
                         log_event(
                             "gmail_auth",

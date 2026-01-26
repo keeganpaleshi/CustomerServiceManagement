@@ -5,6 +5,7 @@ google-auth-oauthlib>=1.2.0,<2.0
 PyYAML>=6.0,<7.0
 fastapi>=0.111.0,<1.0
 uvicorn>=0.30.0,<1.0
+cryptography>=42.0.0,<44.0
 
 # Development/testing dependencies (optional)
 # pytest>=8.0.0,<9.0

@@ -241,22 +241,26 @@ def _check_and_record_nonce(nonce: Any) -> tuple[bool, str]:
         return False, "nonce exceeds maximum length (256)"
 
     with _nonce_cache_lock:
-        # Clean up old nonces if cache is too large
         now = datetime.now(timezone.utc).timestamp()
-        if len(_nonce_cache) > NONCE_CACHE_SIZE:
-            # Remove oldest entries
-            cutoff_time = now - NONCE_CACHE_TTL_SECONDS
-            keys_to_remove = [
-                k for k, v in list(_nonce_cache.items())
-                if v < cutoff_time
-            ]
+        cutoff_time = now - NONCE_CACHE_TTL_SECONDS
+
+        # Efficiently remove expired entries from the front (oldest first)
+        # Since OrderedDict maintains insertion order and we always append,
+        # expired entries are at the front
+        while _nonce_cache:
+            oldest_key = next(iter(_nonce_cache))
+            if _nonce_cache[oldest_key] < cutoff_time:
+                del _nonce_cache[oldest_key]
+            else:
+                break  # All remaining entries are newer
+
+        # If still over capacity, remove oldest entries until under limit
+        # Use a batched approach to avoid repeated iteration
+        excess = len(_nonce_cache) - NONCE_CACHE_SIZE
+        if excess > 0:
+            keys_to_remove = list(_nonce_cache.keys())[:excess]
             for k in keys_to_remove:
                 del _nonce_cache[k]
-
-            # If still too large, remove oldest
-            if len(_nonce_cache) > NONCE_CACHE_SIZE:
-                for _ in range(len(_nonce_cache) - NONCE_CACHE_SIZE):
-                    _nonce_cache.popitem(last=False)
 
         # Check if nonce has been seen
         if nonce_str in _nonce_cache:
@@ -264,8 +268,6 @@ def _check_and_record_nonce(nonce: Any) -> tuple[bool, str]:
 
         # Record nonce with current timestamp
         _nonce_cache[nonce_str] = now
-        # Move to end to maintain LRU order
-        _nonce_cache.move_to_end(nonce_str)
 
         return True, ""
 
