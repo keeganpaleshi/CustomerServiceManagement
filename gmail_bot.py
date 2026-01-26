@@ -1,7 +1,9 @@
 import argparse
 import hashlib
 import hmac
+import json
 import signal
+import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -35,19 +37,28 @@ from utils import (
 )
 from storage import TicketStore
 
-# Flag for graceful shutdown in polling loops
-_shutdown_requested = False
+# Thread-safe event for graceful shutdown in polling loops
+_shutdown_event = threading.Event()
 
 
 def _signal_handler(signum, frame):
     """Handle shutdown signals gracefully."""
-    global _shutdown_requested
-    _shutdown_requested = True
+    _shutdown_event.set()
     log_event(
         "shutdown",
         action="signal_received",
         signal=signal.Signals(signum).name,
     )
+
+
+def is_shutdown_requested() -> bool:
+    """Check if shutdown has been requested (thread-safe)."""
+    return _shutdown_event.is_set()
+
+
+def reset_shutdown_event() -> None:
+    """Reset shutdown event (for testing purposes)."""
+    _shutdown_event.clear()
 
 
 def parse_args(settings: Optional[Dict] = None):
@@ -451,17 +462,46 @@ def process_gmail_message(
             freescout_conversation_id=conv_id,
             drafted=drafted,
         )
-    except Exception as exc:
-        reason = f"unexpected error: {exc}"
+    except (
+        requests.RequestException,  # Network/HTTP errors
+        HttpError,                  # Gmail API errors
+        json.JSONDecodeError,       # JSON parsing errors
+        KeyError,                   # Missing expected keys in API responses
+        ValueError,                 # Invalid data format
+        OSError,                    # File system / network socket errors
+        TimeoutError,               # Timeout errors
+    ) as exc:
+        reason = f"expected error: {type(exc).__name__}: {exc}"
         store.mark_failed(message_id, thread_id, str(exc))
         log_event(
             "gmail_ingest",
             action="process_message",
             outcome="failed",
             reason=reason,
+            error_type=type(exc).__name__,
             message_id=message_id,
             thread_id=thread_id,
         )
+        return ProcessResult(status="failed_retryable", reason=reason)
+    except Exception as exc:
+        # Catch-all for unexpected errors - log with higher severity
+        # but still mark as failed to prevent infinite retries
+        reason = f"unexpected error: {type(exc).__name__}: {exc}"
+        store.mark_failed(message_id, thread_id, str(exc))
+        log_event(
+            "gmail_ingest",
+            action="process_message",
+            outcome="failed",
+            reason=reason,
+            error_type=type(exc).__name__,
+            message_id=message_id,
+            thread_id=thread_id,
+            level="error",
+        )
+        # Re-raise programming errors in debug mode
+        import os
+        if os.getenv("DEBUG", "").lower() in ("1", "true", "yes"):
+            raise
         return ProcessResult(status="failed_retryable", reason=reason)
 
 
@@ -713,6 +753,7 @@ def _post_write_draft_reply(
     subject: str,
     sender: str,
     body_text: str,
+    max_drafts: Optional[int] = None,
 ) -> bool:
     conversation_id = normalize_id(conversation_id)
     if not client or not conversation_id:
@@ -734,7 +775,18 @@ def _post_write_draft_reply(
             )
             return False
         thread_id = _extract_thread_id(response)
-        store.upsert_bot_draft(conversation_id, thread_id, reply_hash, generated_at)
+        # Use atomic upsert to prevent race conditions with draft limit
+        if not store.atomic_upsert_bot_draft_if_under_limit(
+            conversation_id, thread_id, reply_hash, generated_at, max_drafts
+        ):
+            log_event(
+                "freescout_draft",
+                action="create_draft",
+                outcome="skipped",
+                reason="draft_limit_reached_atomic",
+                conversation_id=conversation_id,
+            )
+            return False
         log_event(
             "freescout_draft",
             action="create_draft",
@@ -771,6 +823,7 @@ def _post_write_draft_reply(
             )
             return False
         thread_id = _extract_thread_id(response)
+        # Use atomic upsert (existing draft means we're updating, so limit doesn't apply)
         store.upsert_bot_draft(conversation_id, thread_id, reply_hash, generated_at)
         log_event(
             "freescout_draft",
@@ -795,6 +848,7 @@ def _post_write_draft_reply(
             )
             return False
         thread_id = _extract_thread_id(response)
+        # Use atomic upsert (existing draft means we're updating, so limit doesn't apply)
         store.upsert_bot_draft(conversation_id, thread_id, reply_hash, generated_at)
         log_event(
             "freescout_draft",
@@ -866,24 +920,9 @@ def _maybe_write_draft_reply(
     message_id: Optional[str],
     gmail_thread_id: Optional[str],
 ) -> bool:
-    # Note: This check is not atomic with draft creation - concurrent processes
-    # may exceed the limit. For strict enforcement, use database-level locking.
+    # Draft limit is now enforced atomically in _post_write_draft_reply
+    # via atomic_upsert_bot_draft_if_under_limit
     max_drafts = settings.get("MAX_DRAFTS")
-    if max_drafts is not None:
-        draft_count = store.get_bot_draft_count()
-        if draft_count >= max_drafts:
-            log_event(
-                "freescout_draft",
-                action="create_draft",
-                outcome="skipped",
-                reason="draft_limit_reached",
-                max_drafts=max_drafts,
-                draft_count=draft_count,
-                conversation_id=conversation_id,
-                gmail_thread_id=gmail_thread_id,
-                message_id=message_id,
-            )
-            return False
     return _post_write_draft_reply(
         client,
         store,
@@ -891,6 +930,7 @@ def _maybe_write_draft_reply(
         subject,
         sender,
         body_text,
+        max_drafts=max_drafts,
     )
 
 
@@ -1063,8 +1103,6 @@ def poll_freescout_updates(
 
     Supports graceful shutdown via SIGINT/SIGTERM signals.
     """
-    global _shutdown_requested
-
     # Register signal handlers for graceful shutdown
     signal.signal(signal.SIGINT, _signal_handler)
     signal.signal(signal.SIGTERM, _signal_handler)
@@ -1090,7 +1128,7 @@ def poll_freescout_updates(
         return
 
     since = datetime.now(timezone.utc) - timedelta(minutes=5)
-    while not _shutdown_requested:
+    while not is_shutdown_requested():
         try:
             reload_settings()
             settings = get_settings()
@@ -1119,7 +1157,7 @@ def poll_freescout_updates(
                 since.isoformat(), timeout=http_timeout
             )
             for conv in convs:
-                if _shutdown_requested:
+                if is_shutdown_requested():
                     break
                 process_freescout_conversation(client, conv, settings)
             since = poll_start  # Use poll start time to avoid gaps
@@ -1159,6 +1197,44 @@ def _infer_webhook_outcome(payload: dict) -> WebhookOutcome:
     return WebhookOutcome(action="processed", drafted=is_draft)
 
 
+def _validate_webhook_conversation_id(value: object) -> Tuple[bool, Optional[str], str]:
+    """Validate a conversation ID from webhook payload.
+
+    Args:
+        value: The raw value to validate
+
+    Returns:
+        Tuple of (is_valid, normalized_id_or_none, error_message)
+    """
+    # Maximum allowed length for conversation IDs
+    max_id_length = 256
+    # Pattern for valid conversation IDs (alphanumeric, hyphens, underscores)
+    import re
+    valid_id_pattern = re.compile(r"^[a-zA-Z0-9_-]+$")
+
+    if value is None:
+        return False, None, "missing conversation id"
+
+    # Convert to string and strip whitespace
+    try:
+        id_str = str(value).strip()
+    except (TypeError, ValueError):
+        return False, None, "conversation id must be convertible to string"
+
+    if not id_str:
+        return False, None, "conversation id is empty"
+
+    # Check length to prevent memory exhaustion
+    if len(id_str) > max_id_length:
+        return False, None, f"conversation id exceeds maximum length ({max_id_length})"
+
+    # Validate format - only allow safe characters
+    if not valid_id_pattern.match(id_str):
+        return False, None, "conversation id contains invalid characters"
+
+    return True, id_str, ""
+
+
 def freescout_webhook_handler(
     payload: dict, headers: dict
 ) -> Tuple[str, int, Optional[WebhookOutcome]]:
@@ -1175,9 +1251,10 @@ def freescout_webhook_handler(
     if not payload:
         return "missing payload", 400, None
 
-    conv_id = normalize_id(payload.get("conversation_id") or payload.get("id"))
-    if not conv_id:
-        return "missing conversation id", 400, None
+    raw_id = payload.get("conversation_id") or payload.get("id")
+    is_valid, conv_id, validation_error = _validate_webhook_conversation_id(raw_id)
+    if not is_valid:
+        return validation_error, 400, None
 
     client = _build_freescout_client(timeout=settings["HTTP_TIMEOUT"])
     if not client:

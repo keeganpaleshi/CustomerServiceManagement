@@ -79,18 +79,32 @@ class TicketStore:
         self._conn.commit()
 
     def _migrate_processed_messages(self) -> None:
+        # Use PRAGMA table_info for reliable column checking instead of parsing SQL schema
+        cur = self._conn.execute("PRAGMA table_info(processed_messages)")
+        table_info = cur.fetchall()
+        if not table_info:
+            return  # Table doesn't exist yet, will be created by _init_schema
+
+        columns = [col[1] for col in table_info]
+        needs_action = "action" not in columns
+
+        # Check if status constraint needs updating by querying sqlite_master
+        # and looking for the specific constraint values we need
         cur = self._conn.execute(
             "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'processed_messages'"
         )
         row = cur.fetchone()
         if not row or not row[0]:
             return
+
         schema_sql = row[0]
-        needs_filtered = "filtered" not in schema_sql
-        needs_processing = "processing" not in schema_sql
-        cur = self._conn.execute("PRAGMA table_info(processed_messages)")
-        columns = [col[1] for col in cur.fetchall()]
-        needs_action = "action" not in columns
+        # Check for the presence of status values in the CHECK constraint
+        # We look for the exact constraint pattern to avoid false matches
+        has_filtered_status = "'filtered'" in schema_sql or '"filtered"' in schema_sql
+        has_processing_status = "'processing'" in schema_sql or '"processing"' in schema_sql
+        needs_filtered = not has_filtered_status
+        needs_processing = not has_processing_status
+
         if not needs_filtered and not needs_processing and not needs_action:
             return
         if needs_filtered or needs_processing:
@@ -565,6 +579,92 @@ class TicketStore:
         cur = self._conn.execute("SELECT COUNT(*) FROM bot_drafts")
         row = cur.fetchone()
         return int(row[0]) if row else 0
+
+    def atomic_upsert_bot_draft_if_under_limit(
+        self,
+        freescout_conversation_id: str,
+        freescout_thread_id: Optional[str],
+        last_hash: str,
+        last_generated_at: str,
+        max_drafts: Optional[int],
+    ) -> bool:
+        """Atomically upsert a bot draft only if under the max draft limit.
+
+        Uses database-level locking to prevent race conditions where concurrent
+        processes could exceed the limit.
+
+        Args:
+            freescout_conversation_id: The conversation ID
+            freescout_thread_id: The thread ID (optional)
+            last_hash: Hash of the draft content
+            last_generated_at: ISO timestamp of generation
+            max_drafts: Maximum number of drafts allowed (None = unlimited)
+
+        Returns:
+            True if the draft was upserted, False if limit was reached
+        """
+        if max_drafts is None:
+            # No limit, just upsert
+            self.upsert_bot_draft(
+                freescout_conversation_id,
+                freescout_thread_id,
+                last_hash,
+                last_generated_at,
+            )
+            return True
+
+        # Use IMMEDIATE transaction to acquire write lock before checking count
+        self._conn.execute("BEGIN IMMEDIATE")
+        try:
+            # Check if this conversation already has a draft (update case)
+            cur = self._conn.execute(
+                "SELECT 1 FROM bot_drafts WHERE freescout_conversation_id = ?",
+                (freescout_conversation_id,),
+            )
+            already_exists = cur.fetchone() is not None
+
+            if not already_exists:
+                # For new drafts, check the count limit
+                cur = self._conn.execute("SELECT COUNT(*) FROM bot_drafts")
+                row = cur.fetchone()
+                current_count = int(row[0]) if row else 0
+
+                if current_count >= max_drafts:
+                    self._conn.rollback()
+                    return False
+
+            # Either updating existing or inserting within limit
+            self._conn.execute(
+                """
+                INSERT INTO bot_drafts (
+                    freescout_conversation_id,
+                    freescout_thread_id,
+                    last_hash,
+                    last_generated_at
+                )
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(freescout_conversation_id) DO UPDATE SET
+                    freescout_thread_id = excluded.freescout_thread_id,
+                    last_hash = excluded.last_hash,
+                    last_generated_at = excluded.last_generated_at
+                """,
+                (
+                    freescout_conversation_id,
+                    freescout_thread_id,
+                    last_hash,
+                    last_generated_at,
+                ),
+            )
+            self._conn.commit()
+            return True
+        except Exception as e:
+            self._conn.rollback()
+            LOGGER.error(
+                "Error in atomic_upsert_bot_draft_if_under_limit for conversation %s: %s",
+                freescout_conversation_id,
+                e,
+            )
+            raise
 
     def get_message_action(self, gmail_message_id: str) -> Optional[str]:
         """Get the action recorded for a processed message (for testing/debugging)."""
