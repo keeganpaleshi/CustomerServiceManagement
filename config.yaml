@@ -39,6 +39,22 @@ openai:
   budget:
     daily_usd: 10.0      # Maximum USD to spend per day (0 = unlimited)
     monthly_usd: 200.0   # Maximum USD to spend per month (0 = unlimited)
+  # Pricing per 1K tokens (update when OpenAI changes prices)
+  # Last updated: 2024-01 - check https://openai.com/pricing for current rates
+  pricing:
+    gpt-4o:
+      input: 0.005       # USD per 1K input tokens
+      output: 0.015      # USD per 1K output tokens
+    gpt-4:
+      input: 0.03
+      output: 0.06
+    gpt-3.5-turbo:
+      input: 0.001
+      output: 0.002
+    # Default pricing for unknown models (uses gpt-4o rates)
+    default:
+      input: 0.005
+      output: 0.015
   # Fallback email signature when OpenAI API fails or is rate limited
   fallback_signature: |
     Best,

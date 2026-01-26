@@ -2,6 +2,9 @@ import argparse
 import hashlib
 import hmac
 import json
+import logging
+import os
+import re
 import signal
 import threading
 import time
@@ -104,6 +107,12 @@ TICKET_LABEL_NAME = "Ticketed"
 
 # Default thresholds
 DEFAULT_PRIORITY_HIGH_THRESHOLD = 8  # Default importance score that marks a message as high priority
+
+# Maximum allowed length for conversation IDs (prevents memory exhaustion attacks)
+MAX_CONVERSATION_ID_LENGTH = 256
+
+# Pattern for valid conversation IDs (alphanumeric, hyphens, underscores)
+VALID_CONVERSATION_ID_PATTERN = re.compile(r"^[a-zA-Z0-9_-]+$")
 
 
 @dataclass(frozen=True)
@@ -498,7 +507,6 @@ def process_gmail_message(
             level=logging.ERROR,
         )
         # Re-raise in debug mode to catch programming errors during development
-        import os
         if os.getenv("DEBUG", "").lower() in ("1", "true", "yes"):
             raise
         return ProcessResult(status="failed_permanent", reason=reason)
@@ -637,6 +645,11 @@ def process_conversation(
 
     assignee = actions_cfg.get("assign_to_user_id")
 
+    # Track success/failure of each operation for reporting
+    update_succeeded = True
+    note_succeeded = True
+    reply_succeeded = True
+
     try:
         freescout_client.update_conversation(
             conversation_id,
@@ -646,6 +659,7 @@ def process_conversation(
             custom_fields=custom_fields,
         )
     except requests.RequestException as exc:
+        update_succeeded = False
         log_event(
             "freescout_update",
             action="update_conversation",
@@ -676,6 +690,7 @@ def process_conversation(
         try:
             freescout_client.add_internal_note(conversation_id, "\n".join(note_lines))
         except requests.RequestException as exc:
+            note_succeeded = False
             log_event(
                 "freescout_update",
                 action="add_internal_note",
@@ -694,6 +709,7 @@ def process_conversation(
             )
             freescout_client.add_suggested_reply(conversation_id, suggestion)
         except requests.RequestException as exc:
+            reply_succeeded = False
             log_event(
                 "freescout_update",
                 action="add_suggested_reply",
@@ -708,6 +724,9 @@ def process_conversation(
         "high_priority": high_priority,
         "subject": subject,
         "latest_text": latest_text,
+        "update_succeeded": update_succeeded,
+        "note_succeeded": note_succeeded,
+        "reply_succeeded": reply_succeeded,
     }
 
 
@@ -758,6 +777,19 @@ def _post_write_draft_reply(
     conversation_id = normalize_id(conversation_id)
     if not client or not conversation_id:
         return False
+
+    # Pre-check if we can create a draft before calling the external API
+    # This prevents orphaned drafts on FreeScout when the limit is reached
+    if not store.can_create_new_draft(conversation_id, max_drafts):
+        log_event(
+            "freescout_draft",
+            action="create_draft",
+            outcome="skipped",
+            reason="draft_limit_reached_precheck",
+            conversation_id=conversation_id,
+        )
+        return False
+
     reply_text = generate_ai_reply(subject, sender, body_text, "customer")
     reply_hash = _hash_draft_text(reply_text)
     generated_at = datetime.now(timezone.utc).isoformat()
@@ -776,6 +808,8 @@ def _post_write_draft_reply(
             return False
         thread_id = _extract_thread_id(response)
         # Use atomic upsert to prevent race conditions with draft limit
+        # The pre-check above reduces the chance of this failing, but the atomic
+        # check is still needed for concurrent requests
         if not store.atomic_upsert_bot_draft_if_under_limit(
             conversation_id, thread_id, reply_hash, generated_at, max_drafts
         ):
@@ -1206,12 +1240,6 @@ def _validate_webhook_conversation_id(value: object) -> Tuple[bool, Optional[str
     Returns:
         Tuple of (is_valid, normalized_id_or_none, error_message)
     """
-    # Maximum allowed length for conversation IDs
-    max_id_length = 256
-    # Pattern for valid conversation IDs (alphanumeric, hyphens, underscores)
-    import re
-    valid_id_pattern = re.compile(r"^[a-zA-Z0-9_-]+$")
-
     if value is None:
         return False, None, "missing conversation id"
 
@@ -1225,11 +1253,11 @@ def _validate_webhook_conversation_id(value: object) -> Tuple[bool, Optional[str
         return False, None, "conversation id is empty"
 
     # Check length to prevent memory exhaustion
-    if len(id_str) > max_id_length:
-        return False, None, f"conversation id exceeds maximum length ({max_id_length})"
+    if len(id_str) > MAX_CONVERSATION_ID_LENGTH:
+        return False, None, f"conversation id exceeds maximum length ({MAX_CONVERSATION_ID_LENGTH})"
 
     # Validate format - only allow safe characters
-    if not valid_id_pattern.match(id_str):
+    if not VALID_CONVERSATION_ID_PATTERN.match(id_str):
         return False, None, "conversation id contains invalid characters"
 
     return True, id_str, ""
