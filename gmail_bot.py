@@ -34,6 +34,7 @@ from utils import (
     reload_settings,
     retry_request,
     thread_timestamp,
+    _get_freescout_rate_limiter,
 )
 from storage import TicketStore
 
@@ -466,12 +467,10 @@ def process_gmail_message(
         requests.RequestException,  # Network/HTTP errors
         HttpError,                  # Gmail API errors
         json.JSONDecodeError,       # JSON parsing errors
-        KeyError,                   # Missing expected keys in API responses
-        ValueError,                 # Invalid data format
         OSError,                    # File system / network socket errors
         TimeoutError,               # Timeout errors
     ) as exc:
-        reason = f"expected error: {type(exc).__name__}: {exc}"
+        reason = f"transient error: {type(exc).__name__}: {exc}"
         store.mark_failed(message_id, thread_id, str(exc))
         log_event(
             "gmail_ingest",
@@ -483,10 +482,10 @@ def process_gmail_message(
             thread_id=thread_id,
         )
         return ProcessResult(status="failed_retryable", reason=reason)
-    except Exception as exc:
-        # Catch-all for unexpected errors - log with higher severity
-        # but still mark as failed to prevent infinite retries
-        reason = f"unexpected error: {type(exc).__name__}: {exc}"
+    except (KeyError, ValueError, TypeError, AttributeError) as exc:
+        # Data validation errors - these indicate malformed API responses
+        # or programming errors. Log with details and don't retry.
+        reason = f"data validation error: {type(exc).__name__}: {exc}"
         store.mark_failed(message_id, thread_id, str(exc))
         log_event(
             "gmail_ingest",
@@ -496,13 +495,13 @@ def process_gmail_message(
             error_type=type(exc).__name__,
             message_id=message_id,
             thread_id=thread_id,
-            level="error",
+            level=logging.ERROR,
         )
-        # Re-raise programming errors in debug mode
+        # Re-raise in debug mode to catch programming errors during development
         import os
         if os.getenv("DEBUG", "").lower() in ("1", "true", "yes"):
             raise
-        return ProcessResult(status="failed_retryable", reason=reason)
+        return ProcessResult(status="failed_permanent", reason=reason)
 
 
 def poll_ticket_updates(limit: int = 10, timeout: Optional[int] = None):
@@ -560,7 +559,8 @@ def _build_freescout_client(timeout: Optional[int] = None) -> Optional[FreeScout
         return None
     url, key = require_ticket_settings()
     http_timeout = timeout if timeout is not None else settings["HTTP_TIMEOUT"]
-    return FreeScoutClient(url, key, timeout=http_timeout)
+    rate_limiter = _get_freescout_rate_limiter()
+    return FreeScoutClient(url, key, timeout=http_timeout, rate_limiter=rate_limiter)
 
 
 def _extract_latest_thread_text(conversation: dict) -> str:
