@@ -216,7 +216,17 @@ def _send_slack_notification(
         )
 
 
-def _send_email_notification(email_cfg: dict, subject: str, body: str) -> None:
+def _send_email_notification(email_cfg: dict, subject: str, body: str) -> bool:
+    """Send email notification for P0 follow-ups.
+
+    Args:
+        email_cfg: Email configuration dict with SMTP settings
+        subject: Email subject
+        body: Email body
+
+    Returns:
+        True if email was sent successfully, False otherwise
+    """
     message = EmailMessage()
     message["From"] = email_cfg["from"]
     message["To"] = email_cfg["to"]
@@ -255,6 +265,7 @@ def _send_email_notification(email_cfg: dict, subject: str, body: str) -> None:
         if username and password:
             server.login(username, password)
         server.send_message(message)
+        return True
     except smtplib.SMTPException as exc:
         log_event(
             "freescout_followup",
@@ -262,7 +273,16 @@ def _send_email_notification(email_cfg: dict, subject: str, body: str) -> None:
             outcome="failed",
             reason=str(exc),
         )
-        raise
+        return False
+    except (OSError, TimeoutError) as exc:
+        # Handle network-level errors (connection refused, DNS failure, timeout)
+        log_event(
+            "freescout_followup",
+            action="email_notification",
+            outcome="failed",
+            reason=f"Network error: {exc}",
+        )
+        return False
     finally:
         if server is not None:
             try:

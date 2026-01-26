@@ -110,14 +110,16 @@ ticket:
     list_params: {}                 # optional raw query params for /api/conversations
     p0_tags: ["p0"]                 # tags that mark a conversation as P0
     notify:
-      slack_webhook_url: ""         # set to enable Slack notifications for P0 follow-ups
+      slack_webhook_url: ""         # set to enable Slack notifications for P0 follow-ups (or use SLACK_WEBHOOK_URL env var)
       email:
-        smtp_host: ""               # set to enable email notifications for P0 follow-ups
-        smtp_port: 587
-        smtp_username: ""
-        smtp_password: ""
-        from: ""
-        to: ""
+        # SMTP settings can be overridden via environment variables:
+        # SMTP_HOST, SMTP_PORT, SMTP_USERNAME, SMTP_PASSWORD, SMTP_FROM, SMTP_TO
+        smtp_host: ""               # set to enable email notifications for P0 follow-ups (or use SMTP_HOST env var)
+        smtp_port: 587              # override with SMTP_PORT env var
+        smtp_username: ""           # override with SMTP_USERNAME env var
+        smtp_password: ""           # override with SMTP_PASSWORD env var (recommended for security)
+        from: ""                    # override with SMTP_FROM env var
+        to: ""                      # override with SMTP_TO env var
         use_tls: true
         use_ssl: false
         timeout: 30             # SMTP connection timeout in seconds
