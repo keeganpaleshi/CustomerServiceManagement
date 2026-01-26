@@ -18,6 +18,14 @@ from storage import TicketStore
 from utils import get_settings, log_event, reload_settings, validate_conversation_id
 
 
+import os
+
+# HSTS configuration from environment variable
+# Set ENABLE_HSTS=1 or ENABLE_HSTS=true to enable Strict-Transport-Security header
+ENABLE_HSTS = os.getenv("ENABLE_HSTS", "").lower() in ("1", "true", "yes")
+HSTS_MAX_AGE = int(os.getenv("HSTS_MAX_AGE", "31536000"))  # Default: 1 year
+
+
 class SecurityHeadersMiddleware(BaseHTTPMiddleware):
     """Middleware to add security headers to all responses."""
 
@@ -33,9 +41,10 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         # Enable XSS protection (legacy browsers)
         response.headers["X-XSS-Protection"] = "1; mode=block"
 
-        # Enforce HTTPS (if behind HTTPS proxy/load balancer)
-        # Comment out if not using HTTPS
-        # response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+        # Enforce HTTPS (configurable via ENABLE_HSTS environment variable)
+        # Enable when running behind HTTPS proxy/load balancer
+        if ENABLE_HSTS:
+            response.headers["Strict-Transport-Security"] = f"max-age={HSTS_MAX_AGE}; includeSubDomains"
 
         # Content Security Policy - very restrictive for API
         response.headers["Content-Security-Policy"] = (
@@ -481,7 +490,7 @@ async def freescout(request: Request, x_webhook_secret: Optional[str] = Header(N
                 conversation_id=conversation_id,
                 reason=message,
             )
-            return JSONResponse({"message": message}, status_code=400)
+            raise HTTPException(status_code=400, detail=message)
 
         message, status, outcome = freescout_webhook_handler(
             body, {"X-Webhook-Secret": x_webhook_secret}

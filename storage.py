@@ -9,11 +9,14 @@ LOGGER = logging.getLogger("csm.storage")
 class TicketStore:
     """Durable SQLite store for message processing and thread mapping."""
 
-    def __init__(self, sqlite_path: str) -> None:
+    # Default timeout for SQLite connection (seconds)
+    DEFAULT_CONNECTION_TIMEOUT = 30.0
+
+    def __init__(self, sqlite_path: str, timeout: float = DEFAULT_CONNECTION_TIMEOUT) -> None:
         self.sqlite_path = sqlite_path
         try:
             Path(self.sqlite_path).parent.mkdir(parents=True, exist_ok=True)
-            self._conn = sqlite3.connect(self.sqlite_path)
+            self._conn = sqlite3.connect(self.sqlite_path, timeout=timeout)
             self._conn.execute("PRAGMA journal_mode=WAL")
             self._conn.execute("PRAGMA busy_timeout = 5000")
             self._conn.execute("PRAGMA foreign_keys = ON")
@@ -218,6 +221,10 @@ class TicketStore:
         self._conn.execute("DROP TABLE bot_drafts_old")
         self._conn.commit()
 
+    # Valid range for processing timeout to prevent unreasonable values
+    MIN_PROCESSING_TIMEOUT_MINUTES = 1
+    MAX_PROCESSING_TIMEOUT_MINUTES = 1440  # 24 hours
+
     def mark_processing_if_new(
         self, gmail_message_id: str, gmail_thread_id: Optional[str], processing_timeout_minutes: int = 30
     ) -> bool:
@@ -231,7 +238,18 @@ class TicketStore:
 
         Returns:
             True if successfully claimed, False if already being processed or completed
+
+        Raises:
+            ValueError: If processing_timeout_minutes is not within valid range
         """
+        # Validate timeout parameter to prevent SQL injection and unreasonable values
+        if not isinstance(processing_timeout_minutes, int):
+            raise ValueError(f"processing_timeout_minutes must be an integer, got {type(processing_timeout_minutes).__name__}")
+        if processing_timeout_minutes < self.MIN_PROCESSING_TIMEOUT_MINUTES:
+            raise ValueError(f"processing_timeout_minutes must be at least {self.MIN_PROCESSING_TIMEOUT_MINUTES}")
+        if processing_timeout_minutes > self.MAX_PROCESSING_TIMEOUT_MINUTES:
+            raise ValueError(f"processing_timeout_minutes must not exceed {self.MAX_PROCESSING_TIMEOUT_MINUTES}")
+
         # Use IMMEDIATE transaction to prevent race conditions
         self._conn.execute("BEGIN IMMEDIATE")
         try:
