@@ -30,14 +30,66 @@ logging.basicConfig(level=LOG_LEVEL)
 LOGGER = logging.getLogger("csm")
 
 
+# Fields that may contain sensitive data and should be redacted in logs
+_SENSITIVE_LOG_FIELDS = frozenset({
+    "password", "secret", "token", "api_key", "apikey", "api-key",
+    "authorization", "auth", "credential", "credentials",
+    "private_key", "privatekey", "access_token", "refresh_token",
+    "client_secret", "clientsecret",
+})
+
+
+def _sanitize_log_value(key: str, value: Any, depth: int = 0) -> Any:
+    """Sanitize a log value, redacting sensitive fields.
+
+    Args:
+        key: The field name
+        value: The field value
+        depth: Current recursion depth (max 5 to prevent infinite loops)
+
+    Returns:
+        Sanitized value with sensitive data redacted
+    """
+    if depth > 5:
+        return value
+
+    key_lower = key.lower()
+
+    # Check if the key itself is sensitive
+    if key_lower in _SENSITIVE_LOG_FIELDS:
+        if isinstance(value, str) and value:
+            return "[REDACTED]"
+        return value
+
+    # Check if key contains sensitive patterns
+    for sensitive in _SENSITIVE_LOG_FIELDS:
+        if sensitive in key_lower:
+            if isinstance(value, str) and value:
+                return "[REDACTED]"
+            return value
+
+    # Recursively sanitize nested dicts
+    if isinstance(value, dict):
+        return {k: _sanitize_log_value(k, v, depth + 1) for k, v in value.items()}
+
+    # Recursively sanitize lists
+    if isinstance(value, list):
+        return [_sanitize_log_value(key, item, depth + 1) for item in value]
+
+    return value
+
+
 def log_event(event: str, level: int = logging.INFO, **fields: Any) -> None:
-    """Emit a structured log line."""
+    """Emit a structured log line with sensitive field sanitization."""
 
     payload = {
         "event": event,
         "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
-    payload.update(fields)
+    # Sanitize all fields before adding to payload
+    for key, value in fields.items():
+        payload[key] = _sanitize_log_value(key, value)
+
     LOGGER.log(level, json.dumps(payload, ensure_ascii=False, default=str))
 
 

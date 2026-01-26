@@ -22,6 +22,11 @@ SENSITIVE_FIELDS = {"email", "customer_email", "customerEmail", "body", "text", 
 # Pre-computed lowercase version for efficient case-insensitive comparison
 SENSITIVE_FIELDS_LOWER = {f.lower() for f in SENSITIVE_FIELDS}
 
+# Maximum allowed length for conversation IDs (prevents memory exhaustion attacks)
+MAX_ID_LENGTH = 256
+# Pattern for valid conversation IDs (alphanumeric, hyphens, underscores)
+VALID_ID_PATTERN = re.compile(r"^[a-zA-Z0-9_-]+$")
+
 # Maximum allowed webhook payload size (1MB)
 MAX_PAYLOAD_SIZE = 1 * 1024 * 1024  # 1MB
 # Maximum size for logged payloads (100KB)
@@ -88,6 +93,38 @@ def _select_event_id(payload: Any) -> str:
             if payload.get(key):
                 return str(payload[key])
     return "unknown"
+
+
+def _validate_conversation_id(value: Any) -> tuple[bool, Optional[str], str]:
+    """Validate a conversation ID from webhook payload.
+
+    Args:
+        value: The raw value to validate
+
+    Returns:
+        Tuple of (is_valid, normalized_id_or_none, error_message)
+    """
+    if value is None:
+        return False, None, "missing conversation id"
+
+    # Convert to string and strip whitespace
+    try:
+        id_str = str(value).strip()
+    except (TypeError, ValueError):
+        return False, None, "conversation id must be convertible to string"
+
+    if not id_str:
+        return False, None, "conversation id is empty"
+
+    # Check length to prevent memory exhaustion
+    if len(id_str) > MAX_ID_LENGTH:
+        return False, None, f"conversation id exceeds maximum length ({MAX_ID_LENGTH})"
+
+    # Validate format - only allow safe characters
+    if not VALID_ID_PATTERN.match(id_str):
+        return False, None, "conversation id contains invalid characters"
+
+    return True, id_str, ""
 
 
 def log_webhook_payload(payload: Any) -> Path:
@@ -185,10 +222,24 @@ async def freescout(request: Request, x_webhook_secret: Optional[str] = Header(N
         body = {"raw": "[NON-JSON PAYLOAD - content not logged for security]", "raw_length": len(raw_body)}
 
     logfile = log_webhook_payload(body)
+
+    # Extract and validate conversation ID
+    conversation_id = None
     if isinstance(body, dict):
-        conversation_id = body.get("conversation_id") or body.get("id")
-    else:
-        conversation_id = None
+        raw_id = body.get("conversation_id") or body.get("id")
+        is_valid, validated_id, validation_error = _validate_conversation_id(raw_id)
+        if is_valid:
+            conversation_id = validated_id
+        elif raw_id is not None:
+            # Log validation failure but continue processing
+            log_event(
+                "webhook_ingest",
+                action="validate_conversation_id",
+                outcome="failed",
+                reason=validation_error,
+                logfile=str(logfile),
+            )
+
     log_event(
         "webhook_ingest",
         action="log_payload",
