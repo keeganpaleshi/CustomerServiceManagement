@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import random
 import re
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
@@ -14,7 +15,7 @@ from starlette.requests import Request as StarletteRequest
 
 from gmail_bot import freescout_webhook_handler
 from storage import TicketStore
-from utils import get_settings, log_event, reload_settings
+from utils import get_settings, log_event, reload_settings, validate_conversation_id
 
 
 class SecurityHeadersMiddleware(BaseHTTPMiddleware):
@@ -63,15 +64,13 @@ SENSITIVE_FIELDS = {"email", "customer_email", "customerEmail", "body", "text", 
 # Pre-computed lowercase version for efficient case-insensitive comparison
 SENSITIVE_FIELDS_LOWER = {f.lower() for f in SENSITIVE_FIELDS}
 
-# Maximum allowed length for conversation IDs (prevents memory exhaustion attacks)
-MAX_ID_LENGTH = 256
-# Pattern for valid conversation IDs (alphanumeric, hyphens, underscores)
-VALID_ID_PATTERN = re.compile(r"^[a-zA-Z0-9_-]+$")
 
 # Maximum allowed webhook payload size (1MB)
 MAX_PAYLOAD_SIZE = 1 * 1024 * 1024  # 1MB
 # Maximum size for logged payloads (100KB)
 MAX_LOG_SIZE = 100 * 1024  # 100KB
+# Maximum size for error log truncation (10KB) - smaller for error messages
+MAX_ERROR_LOG_SIZE = 10 * 1024  # 10KB
 
 # Webhook replay protection settings
 MAX_TIMESTAMP_SKEW_SECONDS = 300  # 5 minutes
@@ -150,38 +149,6 @@ def _select_event_id(payload: Any) -> str:
     return "unknown"
 
 
-def _validate_conversation_id(value: Any) -> tuple[bool, Optional[str], str]:
-    """Validate a conversation ID from webhook payload.
-
-    Args:
-        value: The raw value to validate
-
-    Returns:
-        Tuple of (is_valid, normalized_id_or_none, error_message)
-    """
-    if value is None:
-        return False, None, "missing conversation id"
-
-    # Convert to string and strip whitespace
-    try:
-        id_str = str(value).strip()
-    except (TypeError, ValueError):
-        return False, None, "conversation id must be convertible to string"
-
-    if not id_str:
-        return False, None, "conversation id is empty"
-
-    # Check length to prevent memory exhaustion
-    if len(id_str) > MAX_ID_LENGTH:
-        return False, None, f"conversation id exceeds maximum length ({MAX_ID_LENGTH})"
-
-    # Validate format - only allow safe characters
-    if not VALID_ID_PATTERN.match(id_str):
-        return False, None, "conversation id contains invalid characters"
-
-    return True, id_str, ""
-
-
 def _validate_webhook_timestamp(timestamp: Any) -> tuple[bool, str]:
     """Validate webhook timestamp to prevent replay attacks.
 
@@ -223,6 +190,9 @@ def _validate_webhook_timestamp(timestamp: Any) -> tuple[bool, str]:
 def _check_and_record_nonce(nonce: Any) -> tuple[bool, str]:
     """Check if nonce has been seen before and record it.
 
+    This function implements replay protection by tracking nonces. It enforces
+    memory limits to prevent unbounded growth under sustained attack conditions.
+
     Args:
         nonce: Nonce value from webhook payload
 
@@ -244,6 +214,15 @@ def _check_and_record_nonce(nonce: Any) -> tuple[bool, str]:
         now = datetime.now(timezone.utc).timestamp()
         cutoff_time = now - NONCE_CACHE_TTL_SECONDS
 
+        # Check if nonce has been seen BEFORE cleanup to prevent race conditions
+        if nonce_str in _nonce_cache:
+            return False, "nonce has been used before (replay attack detected)"
+
+        # Enforce hard limit on cache size BEFORE adding new entry
+        # This prevents memory exhaustion under burst attack conditions
+        # by ensuring we always have room for the new entry
+        hard_limit = NONCE_CACHE_SIZE - 1  # Reserve space for the new entry
+
         # Efficiently remove expired entries from the front (oldest first)
         # Since OrderedDict maintains insertion order and we always append,
         # expired entries are at the front
@@ -254,17 +233,12 @@ def _check_and_record_nonce(nonce: Any) -> tuple[bool, str]:
             else:
                 break  # All remaining entries are newer
 
-        # If still over capacity, remove oldest entries until under limit
-        # Use a batched approach to avoid repeated iteration
-        excess = len(_nonce_cache) - NONCE_CACHE_SIZE
-        if excess > 0:
-            keys_to_remove = list(_nonce_cache.keys())[:excess]
-            for k in keys_to_remove:
-                del _nonce_cache[k]
-
-        # Check if nonce has been seen
-        if nonce_str in _nonce_cache:
-            return False, "nonce has been used before (replay attack detected)"
+        # If still over hard limit, remove oldest entries until under limit
+        # This handles burst scenarios where cache grows faster than entries expire
+        while len(_nonce_cache) >= hard_limit:
+            # Remove the oldest entry
+            oldest_key = next(iter(_nonce_cache))
+            del _nonce_cache[oldest_key]
 
         # Record nonce with current timestamp
         _nonce_cache[nonce_str] = now
@@ -344,7 +318,6 @@ def log_webhook_payload(payload: Any) -> Path:
     log_dir.mkdir(parents=True, exist_ok=True)
 
     # Periodically clean up old logs (1% chance per request to avoid overhead)
-    import random
     if random.random() < 0.01:
         settings = get_settings()
         max_age_days = settings.get("WEBHOOK_LOG_MAX_AGE_DAYS", 30)
@@ -436,10 +409,10 @@ async def freescout(request: Request, x_webhook_secret: Optional[str] = Header(N
         body = json.loads(raw_body)
     except json.JSONDecodeError:
         # Decode raw body but limit length to prevent logging excessive data
-        # and redact common sensitive patterns
+        # Use smaller error log size for non-JSON payloads (likely malformed)
         decoded = raw_body.decode("utf-8", errors="replace")
-        if len(decoded) > MAX_LOG_SIZE:
-            decoded = decoded[:MAX_LOG_SIZE] + "...[truncated]"
+        if len(decoded) > MAX_ERROR_LOG_SIZE:
+            decoded = decoded[:MAX_ERROR_LOG_SIZE] + "...[truncated]"
         body = {"raw": "[NON-JSON PAYLOAD - content not logged for security]", "raw_length": len(raw_body)}
 
     logfile = log_webhook_payload(body)
@@ -474,7 +447,7 @@ async def freescout(request: Request, x_webhook_secret: Optional[str] = Header(N
             raise HTTPException(status_code=400, detail=f"Replay attack detected: {nonce_error}")
 
         raw_id = body.get("conversation_id") or body.get("id")
-        is_valid, validated_id, validation_error = _validate_conversation_id(raw_id)
+        is_valid, validated_id, validation_error = validate_conversation_id(raw_id)
         if is_valid:
             conversation_id = validated_id
         elif raw_id is not None:

@@ -37,6 +37,7 @@ from utils import (
     reload_settings,
     retry_request,
     thread_timestamp,
+    validate_conversation_id,
     _get_freescout_rate_limiter,
 )
 from storage import TicketStore
@@ -108,11 +109,6 @@ TICKET_LABEL_NAME = "Ticketed"
 # Default thresholds
 DEFAULT_PRIORITY_HIGH_THRESHOLD = 8  # Default importance score that marks a message as high priority
 
-# Maximum allowed length for conversation IDs (prevents memory exhaustion attacks)
-MAX_CONVERSATION_ID_LENGTH = 256
-
-# Pattern for valid conversation IDs (alphanumeric, hyphens, underscores)
-VALID_CONVERSATION_ID_PATTERN = re.compile(r"^[a-zA-Z0-9_-]+$")
 
 
 @dataclass(frozen=True)
@@ -513,13 +509,14 @@ def process_gmail_message(
 
 
 def poll_ticket_updates(limit: int = 10, timeout: Optional[int] = None):
-    """Fetch recent ticket updates from FreeScout."""
+    """Fetch recent ticket updates from FreeScout with retry logic for transient failures."""
     settings = get_settings()
     if settings["TICKET_SYSTEM"] != "freescout":
         return []
     http_timeout = timeout if timeout is not None else settings["HTTP_TIMEOUT"]
     url = f"{settings['FREESCOUT_URL'].rstrip('/')}/api/conversations"
-    try:
+
+    def _fetch():
         resp = requests.get(
             url,
             headers={
@@ -531,6 +528,14 @@ def poll_ticket_updates(limit: int = 10, timeout: Optional[int] = None):
         )
         resp.raise_for_status()
         return resp.json().get("data", [])
+
+    try:
+        return retry_request(
+            _fetch,
+            action_name="freescout.poll_ticket_updates",
+            exceptions=(requests.RequestException,),
+            log_context={"url": url, "limit": limit},
+        )
     except requests.RequestException as e:
         log_event(
             "freescout_poll",
@@ -1231,38 +1236,6 @@ def _infer_webhook_outcome(payload: dict) -> WebhookOutcome:
     return WebhookOutcome(action="processed", drafted=is_draft)
 
 
-def _validate_webhook_conversation_id(value: object) -> Tuple[bool, Optional[str], str]:
-    """Validate a conversation ID from webhook payload.
-
-    Args:
-        value: The raw value to validate
-
-    Returns:
-        Tuple of (is_valid, normalized_id_or_none, error_message)
-    """
-    if value is None:
-        return False, None, "missing conversation id"
-
-    # Convert to string and strip whitespace
-    try:
-        id_str = str(value).strip()
-    except (TypeError, ValueError):
-        return False, None, "conversation id must be convertible to string"
-
-    if not id_str:
-        return False, None, "conversation id is empty"
-
-    # Check length to prevent memory exhaustion
-    if len(id_str) > MAX_CONVERSATION_ID_LENGTH:
-        return False, None, f"conversation id exceeds maximum length ({MAX_CONVERSATION_ID_LENGTH})"
-
-    # Validate format - only allow safe characters
-    if not VALID_CONVERSATION_ID_PATTERN.match(id_str):
-        return False, None, "conversation id contains invalid characters"
-
-    return True, id_str, ""
-
-
 def freescout_webhook_handler(
     payload: dict, headers: dict
 ) -> Tuple[str, int, Optional[WebhookOutcome]]:
@@ -1280,7 +1253,7 @@ def freescout_webhook_handler(
         return "missing payload", 400, None
 
     raw_id = payload.get("conversation_id") or payload.get("id")
-    is_valid, conv_id, validation_error = _validate_webhook_conversation_id(raw_id)
+    is_valid, conv_id, validation_error = validate_conversation_id(raw_id)
     if not is_valid:
         return validation_error, 400, None
 
