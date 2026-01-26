@@ -3,16 +3,57 @@ from __future__ import annotations
 import json
 import re
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional
 
 from fastapi import FastAPI, Header, Request, HTTPException
 from fastapi.responses import JSONResponse
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.requests import Request as StarletteRequest
 
 from gmail_bot import freescout_webhook_handler
 from storage import TicketStore
 from utils import get_settings, log_event, reload_settings
+
+
+class SecurityHeadersMiddleware(BaseHTTPMiddleware):
+    """Middleware to add security headers to all responses."""
+
+    async def dispatch(self, request: StarletteRequest, call_next):
+        response = await call_next(request)
+
+        # Prevent MIME type sniffing
+        response.headers["X-Content-Type-Options"] = "nosniff"
+
+        # Prevent clickjacking attacks
+        response.headers["X-Frame-Options"] = "DENY"
+
+        # Enable XSS protection (legacy browsers)
+        response.headers["X-XSS-Protection"] = "1; mode=block"
+
+        # Enforce HTTPS (if behind HTTPS proxy/load balancer)
+        # Comment out if not using HTTPS
+        # response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+
+        # Content Security Policy - very restrictive for API
+        response.headers["Content-Security-Policy"] = (
+            "default-src 'none'; "
+            "frame-ancestors 'none'; "
+            "base-uri 'none'; "
+            "form-action 'none'"
+        )
+
+        # Referrer policy
+        response.headers["Referrer-Policy"] = "no-referrer"
+
+        # Permissions policy (disable all features)
+        response.headers["Permissions-Policy"] = (
+            "geolocation=(), microphone=(), camera=(), "
+            "payment=(), usb=(), magnetometer=(), gyroscope=()"
+        )
+
+        return response
 
 _DEFAULT_LOG_DIR = Path(__file__).resolve().parent / "logs" / "webhooks"
 SAFE_FILENAME_RE = re.compile(r"[^A-Za-z0-9_.-]+")
@@ -31,6 +72,17 @@ VALID_ID_PATTERN = re.compile(r"^[a-zA-Z0-9_-]+$")
 MAX_PAYLOAD_SIZE = 1 * 1024 * 1024  # 1MB
 # Maximum size for logged payloads (100KB)
 MAX_LOG_SIZE = 100 * 1024  # 100KB
+
+# Webhook replay protection settings
+MAX_TIMESTAMP_SKEW_SECONDS = 300  # 5 minutes
+NONCE_CACHE_SIZE = 10000  # Maximum nonces to track
+NONCE_CACHE_TTL_SECONDS = 600  # 10 minutes
+
+# In-memory nonce cache for replay protection
+from collections import OrderedDict
+import threading
+_nonce_cache: OrderedDict = OrderedDict()
+_nonce_cache_lock = threading.Lock()
 
 
 @asynccontextmanager
@@ -53,6 +105,9 @@ async def lifespan(_: FastAPI):
 
 
 app = FastAPI(lifespan=lifespan)
+
+# Add security headers middleware
+app.add_middleware(SecurityHeadersMiddleware)
 
 
 def _get_log_dir() -> Path:
@@ -127,9 +182,173 @@ def _validate_conversation_id(value: Any) -> tuple[bool, Optional[str], str]:
     return True, id_str, ""
 
 
+def _validate_webhook_timestamp(timestamp: Any) -> tuple[bool, str]:
+    """Validate webhook timestamp to prevent replay attacks.
+
+    Args:
+        timestamp: Timestamp value from webhook payload (ISO format or Unix timestamp)
+
+    Returns:
+        Tuple of (is_valid, error_message)
+    """
+    if timestamp is None:
+        return True, ""  # Timestamp is optional
+
+    try:
+        # Try parsing as ISO format
+        if isinstance(timestamp, str):
+            if timestamp.endswith("Z"):
+                timestamp = timestamp.replace("Z", "+00:00")
+            webhook_time = datetime.fromisoformat(timestamp)
+            if webhook_time.tzinfo is None:
+                webhook_time = webhook_time.replace(tzinfo=timezone.utc)
+        # Try parsing as Unix timestamp
+        elif isinstance(timestamp, (int, float)):
+            webhook_time = datetime.fromtimestamp(timestamp, tz=timezone.utc)
+        else:
+            return False, "timestamp must be ISO string or Unix timestamp"
+
+        # Check if timestamp is within acceptable range
+        now = datetime.now(timezone.utc)
+        time_diff = abs((now - webhook_time).total_seconds())
+
+        if time_diff > MAX_TIMESTAMP_SKEW_SECONDS:
+            return False, f"timestamp too old or too far in future (max skew: {MAX_TIMESTAMP_SKEW_SECONDS}s)"
+
+        return True, ""
+    except (ValueError, TypeError, OverflowError) as e:
+        return False, f"invalid timestamp format: {e}"
+
+
+def _check_and_record_nonce(nonce: Any) -> tuple[bool, str]:
+    """Check if nonce has been seen before and record it.
+
+    Args:
+        nonce: Nonce value from webhook payload
+
+    Returns:
+        Tuple of (is_new, error_message)
+    """
+    if nonce is None:
+        return True, ""  # Nonce is optional
+
+    try:
+        nonce_str = str(nonce)
+    except (TypeError, ValueError):
+        return False, "nonce must be convertible to string"
+
+    if len(nonce_str) > 256:
+        return False, "nonce exceeds maximum length (256)"
+
+    with _nonce_cache_lock:
+        # Clean up old nonces if cache is too large
+        now = datetime.now(timezone.utc).timestamp()
+        if len(_nonce_cache) > NONCE_CACHE_SIZE:
+            # Remove oldest entries
+            cutoff_time = now - NONCE_CACHE_TTL_SECONDS
+            keys_to_remove = [
+                k for k, v in list(_nonce_cache.items())
+                if v < cutoff_time
+            ]
+            for k in keys_to_remove:
+                del _nonce_cache[k]
+
+            # If still too large, remove oldest
+            if len(_nonce_cache) > NONCE_CACHE_SIZE:
+                for _ in range(len(_nonce_cache) - NONCE_CACHE_SIZE):
+                    _nonce_cache.popitem(last=False)
+
+        # Check if nonce has been seen
+        if nonce_str in _nonce_cache:
+            return False, "nonce has been used before (replay attack detected)"
+
+        # Record nonce with current timestamp
+        _nonce_cache[nonce_str] = now
+        # Move to end to maintain LRU order
+        _nonce_cache.move_to_end(nonce_str)
+
+        return True, ""
+
+
+def _cleanup_old_webhook_logs(log_dir: Path, max_age_days: int = 30, max_files: int = 10000) -> None:
+    """Remove old webhook logs to prevent disk space exhaustion.
+
+    Args:
+        log_dir: Directory containing webhook logs
+        max_age_days: Remove files older than this many days
+        max_files: Maximum number of log files to keep (oldest removed first)
+    """
+    try:
+        if not log_dir.exists():
+            return
+
+        # Get all JSON log files
+        log_files = sorted(log_dir.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
+
+        # Remove files older than max_age_days
+        cutoff_time = datetime.now(timezone.utc) - timedelta(days=max_age_days)
+        removed_count = 0
+
+        for log_file in log_files:
+            try:
+                # Check age
+                mtime = datetime.fromtimestamp(log_file.stat().st_mtime, tz=timezone.utc)
+                if mtime < cutoff_time:
+                    log_file.unlink()
+                    removed_count += 1
+            except (OSError, ValueError) as e:
+                log_event(
+                    "webhook_cleanup",
+                    action="remove_old_log",
+                    outcome="failed",
+                    file=str(log_file),
+                    reason=str(e),
+                )
+
+        # If still too many files, remove oldest
+        log_files = sorted(log_dir.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
+        if len(log_files) > max_files:
+            for log_file in log_files[max_files:]:
+                try:
+                    log_file.unlink()
+                    removed_count += 1
+                except OSError as e:
+                    log_event(
+                        "webhook_cleanup",
+                        action="remove_excess_log",
+                        outcome="failed",
+                        file=str(log_file),
+                        reason=str(e),
+                    )
+
+        if removed_count > 0:
+            log_event(
+                "webhook_cleanup",
+                action="cleanup_logs",
+                outcome="success",
+                removed_count=removed_count,
+            )
+    except Exception as e:
+        log_event(
+            "webhook_cleanup",
+            action="cleanup_logs",
+            outcome="failed",
+            reason=str(e),
+        )
+
+
 def log_webhook_payload(payload: Any) -> Path:
     log_dir = _get_log_dir()
     log_dir.mkdir(parents=True, exist_ok=True)
+
+    # Periodically clean up old logs (1% chance per request to avoid overhead)
+    import random
+    if random.random() < 0.01:
+        settings = get_settings()
+        max_age_days = settings.get("WEBHOOK_LOG_MAX_AGE_DAYS", 30)
+        max_files = settings.get("WEBHOOK_LOG_MAX_FILES", 10000)
+        _cleanup_old_webhook_logs(log_dir, max_age_days, max_files)
+
     timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H-%M-%S.%fZ")
     event_id = _safe_filename(_select_event_id(payload))
     logfile = log_dir / f"{timestamp}-{event_id}.json"
@@ -226,6 +445,32 @@ async def freescout(request: Request, x_webhook_secret: Optional[str] = Header(N
     # Extract and validate conversation ID
     conversation_id = None
     if isinstance(body, dict):
+        # Validate timestamp for replay protection
+        timestamp = body.get("timestamp") or body.get("created_at") or body.get("updated_at")
+        is_valid_ts, ts_error = _validate_webhook_timestamp(timestamp)
+        if not is_valid_ts:
+            log_event(
+                "webhook_ingest",
+                action="validate_timestamp",
+                outcome="failed",
+                reason=ts_error,
+                logfile=str(logfile),
+            )
+            raise HTTPException(status_code=400, detail=f"Invalid timestamp: {ts_error}")
+
+        # Check nonce for replay protection
+        nonce = body.get("nonce") or body.get("event_id") or body.get("id")
+        is_new_nonce, nonce_error = _check_and_record_nonce(nonce)
+        if not is_new_nonce:
+            log_event(
+                "webhook_ingest",
+                action="check_nonce",
+                outcome="failed",
+                reason=nonce_error,
+                logfile=str(logfile),
+            )
+            raise HTTPException(status_code=400, detail=f"Replay attack detected: {nonce_error}")
+
         raw_id = body.get("conversation_id") or body.get("id")
         is_valid, validated_id, validation_error = _validate_conversation_id(raw_id)
         if is_valid:

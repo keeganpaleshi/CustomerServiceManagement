@@ -333,9 +333,10 @@ class TicketStore:
         except Exception as e:
             self._conn.rollback()
             LOGGER.error(
-                "Error in mark_processing_if_new for message %s: %s",
+                "Error in mark_processing_if_new for message %s: %s (type: %s)",
                 gmail_message_id,
                 e,
+                type(e).__name__,
             )
             raise
 
@@ -660,9 +661,10 @@ class TicketStore:
         except Exception as e:
             self._conn.rollback()
             LOGGER.error(
-                "Error in atomic_upsert_bot_draft_if_under_limit for conversation %s: %s",
+                "Error in atomic_upsert_bot_draft_if_under_limit for conversation %s: %s (type: %s)",
                 freescout_conversation_id,
                 e,
+                type(e).__name__,
             )
             raise
 

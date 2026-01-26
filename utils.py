@@ -1,6 +1,7 @@
 import base64
 import binascii
 import copy
+import hashlib
 import json
 import logging
 import os
@@ -93,6 +94,33 @@ def log_event(event: str, level: int = logging.INFO, **fields: Any) -> None:
     LOGGER.log(level, json.dumps(payload, ensure_ascii=False, default=str))
 
 
+def log_error(
+    action: str,
+    error: Exception,
+    level: int = logging.ERROR,
+    **context: Any
+) -> None:
+    """Standardized error logging with exception details and context.
+
+    Args:
+        action: The action being performed when the error occurred
+        error: The exception that was raised
+        level: Logging level (default: ERROR)
+        **context: Additional context fields to include in the log
+    """
+    log_event(
+        "error",
+        level=level,
+        action=action,
+        error_type=type(error).__name__,
+        error_message=str(error),
+        **context
+    )
+
+
+# Thread lock for settings reload to prevent race conditions
+_settings_lock = threading.Lock()
+
 @lru_cache(maxsize=1)
 def _load_settings() -> Dict[str, Any]:
     """Load configuration and environment overrides lazily."""
@@ -121,6 +149,7 @@ def _load_settings() -> Dict[str, Any]:
         "CLASSIFY_MAX_TOKENS": cfg["openai"].get("classify_max_tokens", 50),
         "OPENAI_TIMEOUT": cfg["openai"].get("timeout", 30),
         "OPENAI_RATE_LIMIT": cfg["openai"].get("rate_limit", {}),
+        "OPENAI_BUDGET": cfg["openai"].get("budget", {}),
         "FALLBACK_SIGNATURE": cfg["openai"].get("fallback_signature", "Best,\nSupport Team"),
         "PROMO_LABELS": {
             "SPAM",
@@ -147,8 +176,11 @@ def _load_settings() -> Dict[str, Any]:
         "FREESCOUT_POLL_INTERVAL": cfg["ticket"].get("poll_interval", 300),
         "FREESCOUT_ACTIONS": cfg["ticket"].get("actions", {}),
         "FREESCOUT_FOLLOWUP": cfg["ticket"].get("followup", {}),
+        "FREESCOUT_RATE_LIMIT": cfg["ticket"].get("rate_limit", {}),
         "TICKET_SQLITE_PATH": cfg["ticket"].get("sqlite_path", "./csm.sqlite"),
         "WEBHOOK_LOG_DIR": cfg.get("webhook", {}).get("log_dir", ""),
+        "WEBHOOK_LOG_MAX_AGE_DAYS": cfg.get("webhook", {}).get("max_age_days", 30),
+        "WEBHOOK_LOG_MAX_FILES": cfg.get("webhook", {}).get("max_files", 10000),
     }
 
 
@@ -170,23 +202,131 @@ def validate_settings() -> List[str]:
     errors = []
     settings = _load_settings()
 
+    # Validate OpenAI settings
+    if not settings.get("OPENAI_API_KEY"):
+        api_key_env = settings.get("OPENAI_API_KEY_ENV", "OPENAI_API_KEY")
+        errors.append(
+            f"OpenAI API key is required. Set the {api_key_env} environment variable."
+        )
+
+    # Validate OpenAI API key format
+    api_key = settings.get("OPENAI_API_KEY", "")
+    if api_key and not api_key.startswith("sk-"):
+        errors.append(
+            "OPENAI_API_KEY appears to be invalid (should start with 'sk-')"
+        )
+
+    # Validate OpenAI models
+    classify_model = settings.get("CLASSIFY_MODEL", "")
+    if classify_model and not classify_model.startswith("gpt-"):
+        errors.append(
+            f"Invalid classify_model: '{classify_model}' (should be a GPT model)"
+        )
+
+    draft_model = settings.get("DRAFT_MODEL", "")
+    if draft_model and not draft_model.startswith("gpt-"):
+        errors.append(
+            f"Invalid draft_model: '{draft_model}' (should be a GPT model)"
+        )
+
+    # Validate Gmail OAuth files
+    client_secret_file = settings.get("GMAIL_CLIENT_SECRET", "")
+    if client_secret_file and not Path(client_secret_file).exists():
+        errors.append(
+            f"Gmail client secret file not found: {client_secret_file}. "
+            "Download from Google Cloud Console."
+        )
+
     # Check FreeScout settings if it's the configured ticket system
     if settings.get("TICKET_SYSTEM") == "freescout":
-        if not settings.get("FREESCOUT_URL"):
+        freescout_url = settings.get("FREESCOUT_URL", "")
+        if not freescout_url:
             errors.append(
                 "FREESCOUT_URL is required when ticket.system is 'freescout'. "
                 "Set via environment variable or config.yaml ticket.freescout_url"
             )
+        elif not freescout_url.startswith(("http://", "https://")):
+            errors.append(
+                f"FREESCOUT_URL must start with http:// or https://: {freescout_url}"
+            )
+
         if not settings.get("FREESCOUT_KEY"):
             errors.append(
                 "FREESCOUT_KEY is required when ticket.system is 'freescout'. "
                 "Set via environment variable or config.yaml ticket.freescout_key"
             )
-        if not settings.get("FREESCOUT_MAILBOX_ID"):
+
+        mailbox_id = settings.get("FREESCOUT_MAILBOX_ID")
+        if mailbox_id is None:
             errors.append(
                 "FREESCOUT_MAILBOX_ID is required when ticket.system is 'freescout'. "
                 "Set in config.yaml ticket.mailbox_id"
             )
+        elif not isinstance(mailbox_id, int) or mailbox_id <= 0:
+            errors.append(
+                f"FREESCOUT_MAILBOX_ID must be a positive integer: {mailbox_id}"
+            )
+
+        # Validate webhook secret strength if webhook is enabled
+        if settings.get("FREESCOUT_WEBHOOK_ENABLED"):
+            webhook_secret = settings.get("FREESCOUT_WEBHOOK_SECRET", "")
+            if not webhook_secret:
+                errors.append(
+                    "FREESCOUT_WEBHOOK_SECRET is required when webhook_enabled is true. "
+                    "Set a strong random secret in config.yaml ticket.webhook_secret"
+                )
+            elif len(webhook_secret) < 16:
+                errors.append(
+                    f"FREESCOUT_WEBHOOK_SECRET is too weak (length: {len(webhook_secret)}). "
+                    "Use at least 16 characters."
+                )
+
+    # Validate budget limits
+    budget = settings.get("OPENAI_BUDGET", {}) or {}
+    daily_budget = budget.get("daily_usd", 0.0)
+    monthly_budget = budget.get("monthly_usd", 0.0)
+
+    try:
+        daily_budget = float(daily_budget)
+        if daily_budget < 0:
+            errors.append(f"OPENAI daily budget cannot be negative: {daily_budget}")
+    except (TypeError, ValueError):
+        errors.append(f"OPENAI daily budget must be a number: {daily_budget}")
+
+    try:
+        monthly_budget = float(monthly_budget)
+        if monthly_budget < 0:
+            errors.append(f"OPENAI monthly budget cannot be negative: {monthly_budget}")
+    except (TypeError, ValueError):
+        errors.append(f"OPENAI monthly budget must be a number: {monthly_budget}")
+
+    # Validate rate limits
+    openai_rate_limit = settings.get("OPENAI_RATE_LIMIT", {}) or {}
+    max_requests = openai_rate_limit.get("max_requests", 0)
+    window_seconds = openai_rate_limit.get("window_seconds", 0)
+
+    if max_requests and not isinstance(max_requests, int):
+        errors.append(f"OPENAI rate_limit.max_requests must be an integer: {max_requests}")
+    if window_seconds and not isinstance(window_seconds, int):
+        errors.append(f"OPENAI rate_limit.window_seconds must be an integer: {window_seconds}")
+
+    freescout_rate_limit = settings.get("FREESCOUT_RATE_LIMIT", {}) or {}
+    max_requests_fs = freescout_rate_limit.get("max_requests", 0)
+    window_seconds_fs = freescout_rate_limit.get("window_seconds", 0)
+
+    if max_requests_fs and not isinstance(max_requests_fs, int):
+        errors.append(f"FreeScout rate_limit.max_requests must be an integer: {max_requests_fs}")
+    if window_seconds_fs and not isinstance(window_seconds_fs, int):
+        errors.append(f"FreeScout rate_limit.window_seconds must be an integer: {window_seconds_fs}")
+
+    # Validate timeouts
+    http_timeout = settings.get("HTTP_TIMEOUT", 15)
+    if not isinstance(http_timeout, (int, float)) or http_timeout <= 0:
+        errors.append(f"HTTP timeout must be a positive number: {http_timeout}")
+
+    openai_timeout = settings.get("OPENAI_TIMEOUT", 30)
+    if not isinstance(openai_timeout, (int, float)) or openai_timeout <= 0:
+        errors.append(f"OpenAI timeout must be a positive number: {openai_timeout}")
 
     return errors
 
@@ -196,9 +336,11 @@ def reload_settings() -> None:
 
     Call this in long-running processes (or tests) when config.yaml or
     environment variables are updated and fresh settings are required.
-    """
 
-    _load_settings.cache_clear()
+    Thread-safe: Uses a lock to prevent race conditions during reload.
+    """
+    with _settings_lock:
+        _load_settings.cache_clear()
 
 
 def require_openai_api_key() -> str:
@@ -313,8 +455,156 @@ class SimpleRateLimiter:
             return True
 
 
+class OpenAICostTracker:
+    """Thread-safe tracker for OpenAI API costs and usage limits."""
+
+    # Approximate pricing per 1K tokens (as of 2024)
+    # Update these based on current OpenAI pricing
+    PRICING = {
+        "gpt-4o": {"input": 0.005, "output": 0.015},
+        "gpt-4": {"input": 0.03, "output": 0.06},
+        "gpt-3.5-turbo": {"input": 0.001, "output": 0.002},
+    }
+
+    def __init__(self, daily_budget_usd: float = 0.0, monthly_budget_usd: float = 0.0):
+        """Initialize cost tracker with budget limits.
+
+        Args:
+            daily_budget_usd: Maximum USD to spend per day (0 = unlimited)
+            monthly_budget_usd: Maximum USD to spend per month (0 = unlimited)
+        """
+        self.daily_budget = daily_budget_usd
+        self.monthly_budget = monthly_budget_usd
+        self._lock = threading.Lock()
+        # Track costs by date (YYYY-MM-DD for daily, YYYY-MM for monthly)
+        self.daily_costs: Dict[str, float] = {}
+        self.monthly_costs: Dict[str, float] = {}
+        self.total_calls = 0
+
+    def _get_date_key(self) -> str:
+        """Get current date key for daily tracking."""
+        return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+    def _get_month_key(self) -> str:
+        """Get current month key for monthly tracking."""
+        return datetime.now(timezone.utc).strftime("%Y-%m")
+
+    def estimate_cost(self, model: str, input_tokens: int, output_tokens: int) -> float:
+        """Estimate cost for a given API call.
+
+        Args:
+            model: Model name (e.g., "gpt-4o")
+            input_tokens: Number of input tokens
+            output_tokens: Number of output tokens
+
+        Returns:
+            Estimated cost in USD
+        """
+        pricing = self.PRICING.get(model, self.PRICING.get("gpt-4o"))
+        input_cost = (input_tokens / 1000.0) * pricing["input"]
+        output_cost = (output_tokens / 1000.0) * pricing["output"]
+        return input_cost + output_cost
+
+    def record_usage(self, model: str, input_tokens: int, output_tokens: int) -> bool:
+        """Record API usage and check if within budget.
+
+        Args:
+            model: Model name
+            input_tokens: Number of input tokens used
+            output_tokens: Number of output tokens generated
+
+        Returns:
+            True if usage was recorded and within budget, False if budget exceeded
+        """
+        cost = self.estimate_cost(model, input_tokens, output_tokens)
+        date_key = self._get_date_key()
+        month_key = self._get_month_key()
+
+        with self._lock:
+            # Update costs
+            self.daily_costs[date_key] = self.daily_costs.get(date_key, 0.0) + cost
+            self.monthly_costs[month_key] = self.monthly_costs.get(month_key, 0.0) + cost
+            self.total_calls += 1
+
+            # Check budgets
+            if self.daily_budget > 0 and self.daily_costs[date_key] > self.daily_budget:
+                log_event(
+                    "openai_budget_exceeded",
+                    level=logging.ERROR,
+                    budget_type="daily",
+                    limit=self.daily_budget,
+                    current=self.daily_costs[date_key],
+                    date=date_key,
+                )
+                return False
+
+            if self.monthly_budget > 0 and self.monthly_costs[month_key] > self.monthly_budget:
+                log_event(
+                    "openai_budget_exceeded",
+                    level=logging.ERROR,
+                    budget_type="monthly",
+                    limit=self.monthly_budget,
+                    current=self.monthly_costs[month_key],
+                    month=month_key,
+                )
+                return False
+
+            return True
+
+    def can_make_request(self, model: str, estimated_input_tokens: int, estimated_output_tokens: int) -> bool:
+        """Check if a request would exceed budget limits without recording it.
+
+        Args:
+            model: Model name
+            estimated_input_tokens: Estimated input tokens
+            estimated_output_tokens: Estimated output tokens
+
+        Returns:
+            True if request is within budget, False otherwise
+        """
+        cost = self.estimate_cost(model, estimated_input_tokens, estimated_output_tokens)
+        date_key = self._get_date_key()
+        month_key = self._get_month_key()
+
+        with self._lock:
+            daily_total = self.daily_costs.get(date_key, 0.0) + cost
+            monthly_total = self.monthly_costs.get(month_key, 0.0) + cost
+
+            if self.daily_budget > 0 and daily_total > self.daily_budget:
+                return False
+            if self.monthly_budget > 0 and monthly_total > self.monthly_budget:
+                return False
+            return True
+
+    def get_usage_stats(self) -> Dict[str, Any]:
+        """Get current usage statistics.
+
+        Returns:
+            Dictionary with usage stats
+        """
+        date_key = self._get_date_key()
+        month_key = self._get_month_key()
+
+        with self._lock:
+            return {
+                "total_calls": self.total_calls,
+                "daily_cost": self.daily_costs.get(date_key, 0.0),
+                "daily_budget": self.daily_budget,
+                "monthly_cost": self.monthly_costs.get(month_key, 0.0),
+                "monthly_budget": self.monthly_budget,
+                "date": date_key,
+                "month": month_key,
+            }
+
+
 _cached_rate_limiter: Optional[SimpleRateLimiter] = None
 _rate_limiter_config: Optional[tuple] = None
+
+_cached_cost_tracker: Optional[OpenAICostTracker] = None
+_cost_tracker_config: Optional[tuple] = None
+
+_cached_freescout_limiter: Optional[SimpleRateLimiter] = None
+_freescout_limiter_config: Optional[tuple] = None
 
 
 def _get_openai_rate_limiter() -> Optional[SimpleRateLimiter]:
@@ -339,13 +629,58 @@ def _get_openai_rate_limiter() -> Optional[SimpleRateLimiter]:
     return _cached_rate_limiter
 
 
-class FreeScoutClient:
-    """Minimal FreeScout API helper for conversations."""
+def _get_openai_cost_tracker() -> OpenAICostTracker:
+    """Get or create cost tracker, recreating if config changed."""
+    global _cached_cost_tracker, _cost_tracker_config
+    settings = _load_settings()
+    budget = settings.get("OPENAI_BUDGET", {}) or {}
+    daily_budget = float(budget.get("daily_usd", 0.0))
+    monthly_budget = float(budget.get("monthly_usd", 0.0))
+    current_config = (daily_budget, monthly_budget)
 
-    def __init__(self, base_url: str, api_key: str, timeout: int = 15):
+    # Create or recreate tracker if config changed or doesn't exist
+    if _cost_tracker_config != current_config or _cached_cost_tracker is None:
+        _cached_cost_tracker = OpenAICostTracker(daily_budget, monthly_budget)
+        _cost_tracker_config = current_config
+
+    return _cached_cost_tracker
+
+
+def _get_freescout_rate_limiter() -> Optional[SimpleRateLimiter]:
+    """Get or create FreeScout rate limiter, recreating if config changed."""
+    global _cached_freescout_limiter, _freescout_limiter_config
+    settings = _load_settings()
+    rate_limit = settings.get("FREESCOUT_RATE_LIMIT", {}) or {}
+    max_requests = rate_limit.get("max_requests", 0)
+    window_seconds = rate_limit.get("window_seconds", 0)
+    current_config = (max_requests, window_seconds)
+
+    if not max_requests or not window_seconds:
+        _cached_freescout_limiter = None
+        _freescout_limiter_config = current_config
+        return None
+
+    # Create or recreate limiter if config changed or limiter doesn't exist
+    if _freescout_limiter_config != current_config or _cached_freescout_limiter is None:
+        _cached_freescout_limiter = SimpleRateLimiter(int(max_requests), int(window_seconds))
+        _freescout_limiter_config = current_config
+
+    return _cached_freescout_limiter
+
+
+class FreeScoutClient:
+    """Minimal FreeScout API helper for conversations with rate limiting."""
+
+    def __init__(self, base_url: str, api_key: str, timeout: int = 15, rate_limiter: Optional[SimpleRateLimiter] = None):
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
         self.timeout = timeout
+        self.rate_limiter = rate_limiter
+
+    def _check_rate_limit(self) -> None:
+        """Check rate limit before making a request. Raises RuntimeError if limit exceeded."""
+        if self.rate_limiter and not self.rate_limiter.allow():
+            raise RuntimeError("FreeScout API rate limit exceeded")
 
     @staticmethod
     def _normalize_id(value: object) -> str:
@@ -371,6 +706,7 @@ class FreeScoutClient:
         }
 
     def get_conversation(self, conversation_id: str) -> Dict[str, Any]:
+        self._check_rate_limit()
         conversation_id = self._normalize_id(conversation_id)
         resp = requests.get(
             f"{self.base_url}/api/conversations/{conversation_id}",
@@ -384,6 +720,7 @@ class FreeScoutClient:
         return {}
 
     def list_conversations(self, params: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+        self._check_rate_limit()
         resp = requests.get(
             f"{self.base_url}/api/conversations",
             headers=self._headers(),
@@ -407,6 +744,7 @@ class FreeScoutClient:
         tags: Optional[List[str]] = None,
         custom_fields: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
+        self._check_rate_limit()
         conversation_id = self._normalize_id(conversation_id)
         payload: Dict[str, Any] = {}
         if priority is not None:
@@ -634,6 +972,60 @@ class FreeScoutClient:
         )
 
 
+# ----- Token Encryption Helpers -----
+
+
+def _get_token_encryption_key() -> Optional[bytes]:
+    """Get encryption key for Gmail tokens from environment.
+
+    Returns:
+        32-byte encryption key or None if encryption is disabled
+    """
+    key_env = os.getenv("GMAIL_TOKEN_ENCRYPTION_KEY", "")
+    if not key_env:
+        return None
+
+    # Derive a consistent 32-byte key using SHA-256
+    return hashlib.sha256(key_env.encode("utf-8")).digest()
+
+
+def _encrypt_token_data(data: str, key: bytes) -> str:
+    """Encrypt token data using XOR cipher with the provided key.
+
+    Args:
+        data: JSON string to encrypt
+        key: 32-byte encryption key
+
+    Returns:
+        Base64-encoded encrypted data
+    """
+    data_bytes = data.encode("utf-8")
+    # Extend key to match data length by repeating it
+    extended_key = (key * (len(data_bytes) // len(key) + 1))[:len(data_bytes)]
+    # XOR encryption
+    encrypted = bytes(a ^ b for a, b in zip(data_bytes, extended_key))
+    # Base64 encode for safe storage
+    return base64.b64encode(encrypted).decode("ascii")
+
+
+def _decrypt_token_data(encrypted_data: str, key: bytes) -> str:
+    """Decrypt token data using XOR cipher with the provided key.
+
+    Args:
+        encrypted_data: Base64-encoded encrypted data
+        key: 32-byte encryption key
+
+    Returns:
+        Decrypted JSON string
+    """
+    encrypted_bytes = base64.b64decode(encrypted_data.encode("ascii"))
+    # Extend key to match data length by repeating it
+    extended_key = (key * (len(encrypted_bytes) // len(key) + 1))[:len(encrypted_bytes)]
+    # XOR decryption (same as encryption)
+    decrypted = bytes(a ^ b for a, b in zip(encrypted_bytes, extended_key))
+    return decrypted.decode("utf-8")
+
+
 # ----- Gmail helpers -----
 
 
@@ -653,12 +1045,32 @@ def get_gmail_service(
         if use_console is not None
         else settings.get("GMAIL_USE_CONSOLE", False)
     )
+    encryption_key = _get_token_encryption_key()
+
     if os.path.exists(token_filename):
         try:
             with open(token_filename, "r", encoding="utf-8") as t:
-                creds = Credentials.from_authorized_user_info(
-                    json.load(t), settings["SCOPES"]
-                )
+                token_content = t.read()
+
+                # Try to decrypt if encryption key is available
+                if encryption_key:
+                    try:
+                        token_content = _decrypt_token_data(token_content, encryption_key)
+                    except Exception as e:
+                        log_event(
+                            "gmail_auth",
+                            level=logging.WARNING,
+                            action="decrypt_token",
+                            outcome="failed",
+                            reason=f"Token decryption failed, will re-authenticate: {e}",
+                        )
+                        creds = None
+                        token_content = None
+
+                if token_content:
+                    creds = Credentials.from_authorized_user_info(
+                        json.loads(token_content), settings["SCOPES"]
+                    )
         except (json.JSONDecodeError, ValueError, KeyError) as e:
             log_event(
                 "gmail_auth",
@@ -689,7 +1101,7 @@ def get_gmail_service(
                 creds = flow.run_console()
             else:
                 creds = flow.run_local_server(port=0)
-        # Save credentials as JSON instead of pickle for security
+        # Save credentials as JSON (encrypted if key is available)
         with open(token_filename, "w", encoding="utf-8") as t:
             # Convert credentials to JSON-serializable format
             creds_data = {
@@ -700,7 +1112,28 @@ def get_gmail_service(
                 "client_secret": creds.client_secret,
                 "scopes": creds.scopes,
             }
-            json.dump(creds_data, t, indent=2)
+            token_json = json.dumps(creds_data, indent=2)
+
+            # Encrypt if encryption key is available
+            if encryption_key:
+                token_json = _encrypt_token_data(token_json, encryption_key)
+                log_event(
+                    "gmail_auth",
+                    action="save_credentials",
+                    outcome="success",
+                    encrypted=True,
+                )
+            else:
+                log_event(
+                    "gmail_auth",
+                    level=logging.WARNING,
+                    action="save_credentials",
+                    outcome="success",
+                    encrypted=False,
+                    reason="No encryption key set (GMAIL_TOKEN_ENCRYPTION_KEY env var)",
+                )
+
+            t.write(token_json)
     return build("gmail", "v1", credentials=creds)
 
 
@@ -914,8 +1347,11 @@ def _get_fallback_reply(settings: Dict[str, Any]) -> str:
 def generate_ai_reply(subject, sender, snippet_or_body, email_type):
     """
     Generate a draft reply using OpenAI's new library (>=1.0.0).
+    Includes rate limiting, cost tracking, and budget enforcement.
     """
     settings = get_settings()
+
+    # Check rate limit
     limiter = _get_openai_rate_limiter()
     if limiter and not limiter.allow():
         log_event(
@@ -925,6 +1361,24 @@ def generate_ai_reply(subject, sender, snippet_or_body, email_type):
             reason="rate_limited",
         )
         return _get_fallback_reply(settings)
+
+    # Check cost budget
+    cost_tracker = _get_openai_cost_tracker()
+    model = settings["DRAFT_MODEL"]
+    # Rough estimate: ~4 chars per token
+    estimated_input_tokens = (len(settings["DRAFT_SYSTEM_MSG"]) + len(subject) + len(snippet_or_body) + 200) // 4
+    estimated_output_tokens = settings["DRAFT_MAX_TOKENS"] // 2  # Conservative estimate
+
+    if not cost_tracker.can_make_request(model, estimated_input_tokens, estimated_output_tokens):
+        log_event(
+            "openai_budget_exceeded",
+            level=logging.ERROR,
+            action="generate_ai_reply",
+            reason="budget_limit_reached",
+            stats=cost_tracker.get_usage_stats(),
+        )
+        return _get_fallback_reply(settings)
+
     try:
         client = OpenAI(
             api_key=require_openai_api_key(), timeout=settings["OPENAI_TIMEOUT"]
@@ -939,7 +1393,7 @@ def generate_ai_reply(subject, sender, snippet_or_body, email_type):
             "Return only the draft reply text without analysis, reasoning, or extra labels."
         )
         response = client.chat.completions.create(
-            model=settings["DRAFT_MODEL"],
+            model=model,
             messages=[
                 {"role": "system", "content": settings["DRAFT_SYSTEM_MSG"]},
                 {"role": "user", "content": instructions},
@@ -950,6 +1404,18 @@ def generate_ai_reply(subject, sender, snippet_or_body, email_type):
         # Check if response has choices before accessing
         if not response.choices:
             raise ValueError("OpenAI response contains no choices")
+
+        # Record actual usage
+        if hasattr(response, 'usage') and response.usage:
+            cost_tracker.record_usage(
+                model,
+                response.usage.prompt_tokens,
+                response.usage.completion_tokens
+            )
+        else:
+            # Fallback: record estimated usage if actual not available
+            cost_tracker.record_usage(model, estimated_input_tokens, estimated_output_tokens)
+
         raw_reply = response.choices[0].message.content
         if raw_reply is None:
             raise ValueError("OpenAI response content is None")
@@ -999,7 +1465,9 @@ def sanitize_draft_reply(text: str) -> str:
 
 
 def classify_email(text):
-    """Classify an email and return a dict with type, importance, and reasoning."""
+    """Classify an email and return a dict with type, importance, and reasoning.
+    Includes rate limiting, cost tracking, and budget enforcement.
+    """
     settings = get_settings()
     default_response = {
         "type": "other",
@@ -1022,6 +1490,8 @@ def classify_email(text):
         if not isinstance(payload.get("uncertainty"), list):
             return False
         return True
+
+    # Check rate limit
     limiter = _get_openai_rate_limiter()
     if limiter and not limiter.allow():
         log_event(
@@ -1031,12 +1501,30 @@ def classify_email(text):
             reason="rate_limited",
         )
         return default_response
+
+    # Check cost budget
+    cost_tracker = _get_openai_cost_tracker()
+    model = settings["CLASSIFY_MODEL"]
+    # Rough estimate: ~4 chars per token
+    estimated_input_tokens = (len(text) + 200) // 4
+    estimated_output_tokens = settings["CLASSIFY_MAX_TOKENS"]
+
+    if not cost_tracker.can_make_request(model, estimated_input_tokens, estimated_output_tokens):
+        log_event(
+            "openai_budget_exceeded",
+            level=logging.ERROR,
+            action="classify_email",
+            reason="budget_limit_reached",
+            stats=cost_tracker.get_usage_stats(),
+        )
+        return default_response
+
     try:
         client = OpenAI(
             api_key=require_openai_api_key(), timeout=settings["OPENAI_TIMEOUT"]
         )
         resp = client.chat.completions.create(
-            model=settings["CLASSIFY_MODEL"],
+            model=model,
             messages=[
                 {
                     "role": "system",
@@ -1056,6 +1544,18 @@ def classify_email(text):
         # Check if response has choices before accessing
         if not resp.choices:
             raise ValueError("OpenAI response contains no choices")
+
+        # Record actual usage
+        if hasattr(resp, 'usage') and resp.usage:
+            cost_tracker.record_usage(
+                model,
+                resp.usage.prompt_tokens,
+                resp.usage.completion_tokens
+            )
+        else:
+            # Fallback: record estimated usage if actual not available
+            cost_tracker.record_usage(model, estimated_input_tokens, estimated_output_tokens)
+
         content = resp.choices[0].message.content
         if content is None:
             raise ValueError("OpenAI response content is None")

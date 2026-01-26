@@ -35,6 +35,10 @@ openai:
   rate_limit:
     max_requests: 60
     window_seconds: 60
+  # Budget limits for OpenAI API costs (set to 0 to disable)
+  budget:
+    daily_usd: 10.0      # Maximum USD to spend per day (0 = unlimited)
+    monthly_usd: 200.0   # Maximum USD to spend per month (0 = unlimited)
   # Fallback email signature when OpenAI API fails or is rate limited
   fallback_signature: |
     Best,
@@ -59,6 +63,10 @@ ticket:
   freescout_key:  ""                 # API key from FreeScout settings
   # REQUIRED: Numeric FreeScout mailbox ID used when creating conversations
   mailbox_id:     null                # e.g., 1
+  # Rate limiter for FreeScout API calls (set to 0 to disable)
+  rate_limit:
+    max_requests: 100               # Maximum requests per window
+    window_seconds: 60              # Time window in seconds
   gmail_thread_field_id: null         # custom field ID to store the Gmail threadId (optional)
   gmail_message_field_id: null        # custom field ID to store the Gmail messageId (optional)
   sqlite_path: "./csm.sqlite"        # durable store for processed messages and thread mapping
@@ -117,3 +125,7 @@ webhook:
   # Directory for webhook payload logs (relative or absolute path)
   # Default: ./logs/webhooks
   log_dir: ""
+  # Maximum age of webhook logs in days (older files are deleted)
+  max_age_days: 30
+  # Maximum number of webhook log files to keep
+  max_files: 10000
