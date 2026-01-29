@@ -287,8 +287,12 @@ def _send_email_notification(email_cfg: dict, subject: str, body: str) -> bool:
         if server is not None:
             try:
                 server.quit()
-            except smtplib.SMTPException:
-                pass
+            except (smtplib.SMTPException, OSError, TimeoutError):
+                # If quit() fails or hangs, force close the socket
+                try:
+                    server.close()
+                except Exception:
+                    pass
 
 
 def _notify_if_configured(

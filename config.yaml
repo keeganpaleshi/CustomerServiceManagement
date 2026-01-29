@@ -147,3 +147,12 @@ webhook:
   max_age_days: 30
   # Maximum number of webhook log files to keep
   max_files: 10000
+  # Security settings for webhook validation
+  security:
+    # Maximum allowed time difference between webhook timestamp and server time (seconds)
+    # Webhooks outside this window will be rejected to prevent replay attacks
+    max_timestamp_skew_seconds: 300  # 5 minutes
+    # Maximum number of nonces to cache for replay attack prevention
+    nonce_cache_size: 10000
+    # Time-to-live for nonce cache entries (seconds)
+    nonce_cache_ttl_seconds: 600  # 10 minutes

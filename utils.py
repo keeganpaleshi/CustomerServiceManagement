@@ -100,9 +100,40 @@ _SENSITIVE_LOG_FIELDS = frozenset({
     "client_secret", "clientsecret",
 })
 
+# Maximum length for individual log field values to prevent log flooding
+_MAX_LOG_VALUE_LENGTH = 10000
+
+# Control characters that could cause log injection issues
+# Includes newlines, carriage returns, and other control chars that could
+# be used to forge log entries or break log parsing
+_LOG_CONTROL_CHARS = re.compile(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]')
+
+
+def _escape_control_chars(text: str) -> str:
+    """Escape control characters that could cause log injection issues.
+
+    Replaces control characters with their Unicode escape sequences
+    to prevent log forging attacks while preserving readability.
+
+    Args:
+        text: The string to sanitize
+
+    Returns:
+        String with control characters escaped
+    """
+    def escape_char(match: re.Match) -> str:
+        char = match.group(0)
+        return f"\\x{ord(char):02x}"
+    return _LOG_CONTROL_CHARS.sub(escape_char, text)
+
 
 def _sanitize_log_value(key: str, value: Any, depth: int = 0) -> Any:
-    """Sanitize a log value, redacting sensitive fields.
+    """Sanitize a log value, redacting sensitive fields and escaping control chars.
+
+    This function provides protection against:
+    - Sensitive data leakage (passwords, tokens, etc.)
+    - Log injection attacks via control characters
+    - Log flooding via extremely long values
 
     Args:
         key: The field name
@@ -110,7 +141,7 @@ def _sanitize_log_value(key: str, value: Any, depth: int = 0) -> Any:
         depth: Current recursion depth (max 5 to prevent infinite loops)
 
     Returns:
-        Sanitized value with sensitive data redacted
+        Sanitized value with sensitive data redacted and control chars escaped
     """
     if depth > 5:
         return value
@@ -137,6 +168,15 @@ def _sanitize_log_value(key: str, value: Any, depth: int = 0) -> Any:
     # Recursively sanitize lists
     if isinstance(value, list):
         return [_sanitize_log_value(key, item, depth + 1) for item in value]
+
+    # Sanitize string values: escape control chars and truncate if too long
+    if isinstance(value, str):
+        # Escape control characters to prevent log injection
+        sanitized = _escape_control_chars(value)
+        # Truncate extremely long values to prevent log flooding
+        if len(sanitized) > _MAX_LOG_VALUE_LENGTH:
+            sanitized = sanitized[:_MAX_LOG_VALUE_LENGTH] + f"...[truncated, total {len(value)} chars]"
+        return sanitized
 
     return value
 
@@ -243,6 +283,10 @@ def _load_settings() -> Dict[str, Any]:
         "WEBHOOK_LOG_DIR": cfg.get("webhook", {}).get("log_dir", ""),
         "WEBHOOK_LOG_MAX_AGE_DAYS": cfg.get("webhook", {}).get("max_age_days", 30),
         "WEBHOOK_LOG_MAX_FILES": cfg.get("webhook", {}).get("max_files", 10000),
+        # Webhook security settings
+        "WEBHOOK_MAX_TIMESTAMP_SKEW_SECONDS": cfg.get("webhook", {}).get("security", {}).get("max_timestamp_skew_seconds", 300),
+        "WEBHOOK_NONCE_CACHE_SIZE": cfg.get("webhook", {}).get("security", {}).get("nonce_cache_size", 10000),
+        "WEBHOOK_NONCE_CACHE_TTL_SECONDS": cfg.get("webhook", {}).get("security", {}).get("nonce_cache_ttl_seconds", 600),
     }
 
 
@@ -857,33 +901,51 @@ class FreeScoutClient:
     def get_conversation(self, conversation_id: str) -> Dict[str, Any]:
         self._check_rate_limit()
         conversation_id = self._normalize_id(conversation_id)
-        resp = requests.get(
-            f"{self.base_url}/api/conversations/{conversation_id}",
-            headers=self._headers(),
-            timeout=self.timeout,
+
+        def _request() -> Dict[str, Any]:
+            resp = requests.get(
+                f"{self.base_url}/api/conversations/{conversation_id}",
+                headers=self._headers(),
+                timeout=self.timeout,
+            )
+            resp.raise_for_status()
+            data = resp.json() or {}
+            if isinstance(data, dict):
+                return data.get("conversation") or data.get("data") or data
+            return {}
+
+        return retry_request(
+            _request,
+            action_name="freescout.get_conversation",
+            exceptions=(requests.RequestException,),
+            log_context={"conversation_id": conversation_id},
         )
-        resp.raise_for_status()
-        data = resp.json() or {}
-        if isinstance(data, dict):
-            return data.get("conversation") or data.get("data") or data
-        return {}
 
     def list_conversations(self, params: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
         self._check_rate_limit()
-        resp = requests.get(
-            f"{self.base_url}/api/conversations",
-            headers=self._headers(),
-            params=params,
-            timeout=self.timeout,
+
+        def _request() -> List[Dict[str, Any]]:
+            resp = requests.get(
+                f"{self.base_url}/api/conversations",
+                headers=self._headers(),
+                params=params,
+                timeout=self.timeout,
+            )
+            resp.raise_for_status()
+            payload = resp.json() or {}
+            if isinstance(payload, dict):
+                data = payload.get("data") or payload.get("conversations") or []
+                return data if isinstance(data, list) else []
+            if isinstance(payload, list):
+                return payload
+            return []
+
+        return retry_request(
+            _request,
+            action_name="freescout.list_conversations",
+            exceptions=(requests.RequestException,),
+            log_context={"params": params},
         )
-        resp.raise_for_status()
-        payload = resp.json() or {}
-        if isinstance(payload, dict):
-            data = payload.get("data") or payload.get("conversations") or []
-            return data if isinstance(data, list) else []
-        if isinstance(payload, list):
-            return payload
-        return []
 
     def update_conversation(
         self,
@@ -931,14 +993,22 @@ class FreeScoutClient:
         if not payload:
             return {}
 
-        resp = requests.put(
-            f"{self.base_url}/api/conversations/{conversation_id}",
-            headers=self._headers(),
-            json=payload,
-            timeout=self.timeout,
+        def _request() -> Dict[str, Any]:
+            resp = requests.put(
+                f"{self.base_url}/api/conversations/{conversation_id}",
+                headers=self._headers(),
+                json=payload,
+                timeout=self.timeout,
+            )
+            resp.raise_for_status()
+            return resp.json()
+
+        return retry_request(
+            _request,
+            action_name="freescout.update_conversation",
+            exceptions=(requests.RequestException,),
+            log_context={"conversation_id": conversation_id},
         )
-        resp.raise_for_status()
-        return resp.json()
 
     def add_customer_thread(
         self, conversation_id: str, text: str, imported: bool = True
@@ -1041,14 +1111,23 @@ class FreeScoutClient:
         payload: Dict[str, Any] = {"type": "note", "text": text}
         if user_id:
             payload["user_id"] = self._maybe_int(user_id) or user_id
-        resp = requests.post(
-            f"{self.base_url}/api/conversations/{conversation_id}/threads",
-            headers=self._headers(),
-            json=payload,
-            timeout=self.timeout,
+
+        def _request() -> Dict[str, Any]:
+            resp = requests.post(
+                f"{self.base_url}/api/conversations/{conversation_id}/threads",
+                headers=self._headers(),
+                json=payload,
+                timeout=self.timeout,
+            )
+            resp.raise_for_status()
+            return resp.json()
+
+        return retry_request(
+            _request,
+            action_name="freescout.add_internal_note",
+            exceptions=(requests.RequestException,),
+            log_context={"conversation_id": conversation_id},
         )
-        resp.raise_for_status()
-        return resp.json()
 
     def add_draft_reply(
         self, conversation_id: str, text: str, user_id: Optional[str] = None
@@ -1591,8 +1670,13 @@ def generate_ai_reply(subject, sender, snippet_or_body, email_type):
     cost_tracker = _get_openai_cost_tracker()
     model = settings["DRAFT_MODEL"]
     # Estimate tokens using constants (CHARS_PER_TOKEN_ESTIMATE chars per token average)
-    total_chars = len(settings["DRAFT_SYSTEM_MSG"]) + len(subject) + len(snippet_or_body) + TOKEN_OVERHEAD_ESTIMATE
-    estimated_input_tokens = total_chars // CHARS_PER_TOKEN_ESTIMATE
+    # Cap input lengths to prevent integer overflow and limit memory usage
+    MAX_TOKEN_ESTIMATE_INPUT = 1000000  # 1M chars max for estimation
+    system_msg_len = min(len(settings["DRAFT_SYSTEM_MSG"]), MAX_TOKEN_ESTIMATE_INPUT)
+    subject_len = min(len(subject) if subject else 0, MAX_TOKEN_ESTIMATE_INPUT)
+    body_len = min(len(snippet_or_body) if snippet_or_body else 0, MAX_TOKEN_ESTIMATE_INPUT)
+    total_chars = system_msg_len + subject_len + body_len + TOKEN_OVERHEAD_ESTIMATE
+    estimated_input_tokens = min(total_chars // CHARS_PER_TOKEN_ESTIMATE, 1000000)  # Cap at 1M tokens
     estimated_output_tokens = settings["DRAFT_MAX_TOKENS"] // 2  # Conservative estimate
 
     if not cost_tracker.can_make_request(model, estimated_input_tokens, estimated_output_tokens):
@@ -1762,7 +1846,10 @@ def classify_email(text):
     cost_tracker = _get_openai_cost_tracker()
     model = settings["CLASSIFY_MODEL"]
     # Estimate tokens using constants (CHARS_PER_TOKEN_ESTIMATE chars per token average)
-    estimated_input_tokens = (len(text) + TOKEN_OVERHEAD_ESTIMATE) // CHARS_PER_TOKEN_ESTIMATE
+    # Cap input length to prevent integer overflow and limit memory usage
+    MAX_TOKEN_ESTIMATE_INPUT = 1000000  # 1M chars max for estimation
+    text_len = min(len(text) if text else 0, MAX_TOKEN_ESTIMATE_INPUT)
+    estimated_input_tokens = min((text_len + TOKEN_OVERHEAD_ESTIMATE) // CHARS_PER_TOKEN_ESTIMATE, 1000000)
     estimated_output_tokens = settings["CLASSIFY_MAX_TOKENS"]
 
     if not cost_tracker.can_make_request(model, estimated_input_tokens, estimated_output_tokens):
