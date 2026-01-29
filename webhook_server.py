@@ -81,10 +81,33 @@ MAX_LOG_SIZE = 100 * 1024  # 100KB
 # Maximum size for error log truncation (10KB) - smaller for error messages
 MAX_ERROR_LOG_SIZE = 10 * 1024  # 10KB
 
-# Webhook replay protection settings
-MAX_TIMESTAMP_SKEW_SECONDS = 300  # 5 minutes
-NONCE_CACHE_SIZE = 10000  # Maximum nonces to track
-NONCE_CACHE_TTL_SECONDS = 600  # 10 minutes
+# Webhook replay protection settings - defaults used when config is unavailable
+# These can be overridden in config.yaml under webhook.security
+_DEFAULT_MAX_TIMESTAMP_SKEW_SECONDS = 300  # 5 minutes
+_DEFAULT_NONCE_CACHE_SIZE = 10000  # Maximum nonces to track
+_DEFAULT_NONCE_CACHE_TTL_SECONDS = 600  # 10 minutes
+
+
+def _get_webhook_security_settings() -> tuple[int, int, int]:
+    """Get webhook security settings from config with defaults.
+
+    Returns:
+        Tuple of (max_timestamp_skew_seconds, nonce_cache_size, nonce_cache_ttl_seconds)
+    """
+    try:
+        settings = get_settings()
+        return (
+            settings.get("WEBHOOK_MAX_TIMESTAMP_SKEW_SECONDS", _DEFAULT_MAX_TIMESTAMP_SKEW_SECONDS),
+            settings.get("WEBHOOK_NONCE_CACHE_SIZE", _DEFAULT_NONCE_CACHE_SIZE),
+            settings.get("WEBHOOK_NONCE_CACHE_TTL_SECONDS", _DEFAULT_NONCE_CACHE_TTL_SECONDS),
+        )
+    except Exception:
+        # Fall back to defaults if config loading fails
+        return (
+            _DEFAULT_MAX_TIMESTAMP_SKEW_SECONDS,
+            _DEFAULT_NONCE_CACHE_SIZE,
+            _DEFAULT_NONCE_CACHE_TTL_SECONDS,
+        )
 
 # In-memory nonce cache for replay protection
 from collections import OrderedDict
@@ -170,6 +193,8 @@ def _validate_webhook_timestamp(timestamp: Any) -> tuple[bool, str]:
     if timestamp is None:
         return True, ""  # Timestamp is optional
 
+    max_timestamp_skew, _, _ = _get_webhook_security_settings()
+
     try:
         # Try parsing as ISO format
         if isinstance(timestamp, str):
@@ -188,8 +213,8 @@ def _validate_webhook_timestamp(timestamp: Any) -> tuple[bool, str]:
         now = datetime.now(timezone.utc)
         time_diff = abs((now - webhook_time).total_seconds())
 
-        if time_diff > MAX_TIMESTAMP_SKEW_SECONDS:
-            return False, f"timestamp too old or too far in future (max skew: {MAX_TIMESTAMP_SKEW_SECONDS}s)"
+        if time_diff > max_timestamp_skew:
+            return False, f"timestamp too old or too far in future (max skew: {max_timestamp_skew}s)"
 
         return True, ""
     except (ValueError, TypeError, OverflowError) as e:
@@ -219,9 +244,11 @@ def _check_and_record_nonce(nonce: Any) -> tuple[bool, str]:
     if len(nonce_str) > 256:
         return False, "nonce exceeds maximum length (256)"
 
+    _, nonce_cache_size, nonce_cache_ttl = _get_webhook_security_settings()
+
     with _nonce_cache_lock:
         now = datetime.now(timezone.utc).timestamp()
-        cutoff_time = now - NONCE_CACHE_TTL_SECONDS
+        cutoff_time = now - nonce_cache_ttl
 
         # Check if nonce has been seen BEFORE cleanup to prevent race conditions
         if nonce_str in _nonce_cache:
@@ -230,7 +257,7 @@ def _check_and_record_nonce(nonce: Any) -> tuple[bool, str]:
         # Enforce hard limit on cache size BEFORE adding new entry
         # This prevents memory exhaustion under burst attack conditions
         # by ensuring we always have room for the new entry
-        hard_limit = NONCE_CACHE_SIZE - 1  # Reserve space for the new entry
+        hard_limit = nonce_cache_size - 1  # Reserve space for the new entry
 
         # Efficiently remove expired entries from the front (oldest first)
         # Since OrderedDict maintains insertion order and we always append,

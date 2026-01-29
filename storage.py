@@ -402,6 +402,19 @@ class TicketStore:
         return {row[0]: row[1] for row in cur.fetchall()}
 
     def get_recent_failures(self, limit: int = 10) -> List[dict]:
+        """Get the most recent failed messages for debugging.
+
+        Args:
+            limit: Maximum number of failures to return (must be positive, default: 10)
+
+        Returns:
+            List of failure records with gmail_message_id, error, and processed_at
+
+        Raises:
+            ValueError: If limit is not a positive integer
+        """
+        if not isinstance(limit, int) or limit < 1:
+            raise ValueError(f"limit must be a positive integer, got {limit!r}")
         cur = self._conn.execute(
             """
             SELECT gmail_message_id, error, processed_at
