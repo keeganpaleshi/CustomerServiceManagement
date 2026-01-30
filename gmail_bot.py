@@ -508,6 +508,19 @@ def process_gmail_message(
         if os.getenv("DEBUG", "").lower() in ("1", "true", "yes"):
             raise
         return ProcessResult(status="failed_permanent", reason=reason)
+    except Exception as exc:
+        reason = f"unexpected error: {type(exc).__name__}: {exc}"
+        store.mark_failed(message_id, thread_id, str(exc))
+        log_event(
+            "gmail_ingest",
+            action="process_message",
+            outcome="failed",
+            reason=reason,
+            error_type=type(exc).__name__,
+            message_id=message_id,
+            thread_id=thread_id,
+        )
+        return ProcessResult(status="failed_retryable", reason=reason)
 
 
 def poll_ticket_updates(limit: int = 10, timeout: Optional[int] = None):
