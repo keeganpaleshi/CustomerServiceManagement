@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import random
 import re
+import hmac
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -426,6 +427,22 @@ async def freescout(request: Request, x_webhook_secret: Optional[str] = Header(N
                 max_size=MAX_PAYLOAD_SIZE,
             )
             raise HTTPException(status_code=413, detail="Payload too large")
+
+    reload_settings()
+    settings = get_settings()
+    secret = settings.get("FREESCOUT_WEBHOOK_SECRET", "")
+    if secret:
+        provided_secret = x_webhook_secret or ""
+        if not hmac.compare_digest(provided_secret, secret):
+            client_host = request.client.host if request.client else "unknown"
+            log_event(
+                "webhook_ingest",
+                action="validate_secret",
+                outcome="failed",
+                reason="invalid_signature",
+                client_ip=client_host,
+            )
+            raise HTTPException(status_code=401, detail="invalid signature")
 
     raw_body = await request.body()
 
