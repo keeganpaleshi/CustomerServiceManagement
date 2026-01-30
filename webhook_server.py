@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import json
+import os
 import random
 import re
 import hmac
+import threading
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -19,7 +21,9 @@ from storage import TicketStore
 from utils import get_settings, log_event, reload_settings, validate_conversation_id
 
 
-import os
+# Thread-safe singleton for TicketStore to avoid creating new connections per request
+_counter_store: Optional[TicketStore] = None
+_counter_store_lock = threading.Lock()
 
 # HSTS configuration from environment variable
 # Set ENABLE_HSTS=1 or ENABLE_HSTS=true to enable Strict-Transport-Security header
@@ -115,11 +119,10 @@ def _get_webhook_security_settings() -> tuple[int, int, int]:
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     yield
+    # Log summary and close the singleton connection on shutdown
     counter_store = _get_counter_store()
-    try:
-        counters = counter_store.get_webhook_counters()
-    finally:
-        counter_store.close()
+    counters = counter_store.get_webhook_counters()
+    _close_counter_store()
     log_event(
         "webhook_ingest_summary",
         processed=counters.get("processed", 0),
@@ -273,14 +276,11 @@ def _check_and_record_nonce(nonce: Any) -> tuple[bool, str]:
     _, nonce_cache_size, nonce_cache_ttl = _get_webhook_security_settings()
 
     nonce_store = _get_counter_store()
-    try:
-        is_new = nonce_store.check_and_record_webhook_nonce(
-            nonce_str,
-            nonce_cache_ttl,
-            nonce_cache_size,
-        )
-    finally:
-        nonce_store.close()
+    is_new = nonce_store.check_and_record_webhook_nonce(
+        nonce_str,
+        nonce_cache_ttl,
+        nonce_cache_size,
+    )
 
     if not is_new:
         return False, "nonce has been used before (replay attack detected)"
@@ -393,10 +393,30 @@ def log_webhook_payload(payload: Any) -> Path:
 
 
 def _get_counter_store() -> TicketStore:
-    reload_settings()
-    settings = get_settings()
-    sqlite_path = settings.get("TICKET_SQLITE_PATH") or "./csm.sqlite"
-    return TicketStore(sqlite_path)
+    """Get or create the singleton TicketStore instance.
+
+    This uses lazy initialization with double-checked locking to avoid
+    creating a new database connection on every webhook request.
+    """
+    global _counter_store
+    if _counter_store is None:
+        with _counter_store_lock:
+            # Double-check inside lock
+            if _counter_store is None:
+                reload_settings()
+                settings = get_settings()
+                sqlite_path = settings.get("TICKET_SQLITE_PATH") or "./csm.sqlite"
+                _counter_store = TicketStore(sqlite_path)
+    return _counter_store
+
+
+def _close_counter_store() -> None:
+    """Close the singleton TicketStore connection if it exists."""
+    global _counter_store
+    with _counter_store_lock:
+        if _counter_store is not None:
+            _counter_store.close()
+            _counter_store = None
 
 
 @app.get("/health")
@@ -526,47 +546,44 @@ async def freescout(request: Request, x_webhook_secret: Optional[str] = Header(N
         logfile=str(logfile),
     )
 
-    # Create a single TicketStore instance and reuse it for all counter operations
+    # Use the singleton TicketStore for all counter operations
     counter_store = _get_counter_store()
-    try:
-        if not isinstance(body, dict):
-            message = "Expected JSON object payload for FreeScout webhook."
-            counter_store.increment_webhook_counter("failed")
-            log_event(
-                "webhook_ingest",
-                action="handle_payload",
-                outcome="failed",
-                conversation_id=conversation_id,
-                reason=message,
-            )
-            raise HTTPException(status_code=400, detail=message)
-
-        message, status, outcome = freescout_webhook_handler(
-            body, {"X-Webhook-Secret": x_webhook_secret}
+    if not isinstance(body, dict):
+        message = "Expected JSON object payload for FreeScout webhook."
+        counter_store.increment_webhook_counter("failed")
+        log_event(
+            "webhook_ingest",
+            action="handle_payload",
+            outcome="failed",
+            conversation_id=conversation_id,
+            reason=message,
         )
-        if status >= 400:
-            counter_store.increment_webhook_counter("failed")
-            log_event(
-                "webhook_ingest",
-                action="handle_payload",
-                outcome="failed",
-                conversation_id=conversation_id,
-                reason=message,
-            )
-        else:
-            counter_store.increment_webhook_counter("processed")
-            if outcome:
-                action = outcome.action
-                if action in COUNTER_KEYS:
-                    counter_store.increment_webhook_counter(action)
-                if outcome.drafted:
-                    counter_store.increment_webhook_counter("drafted")
-            log_event(
-                "webhook_ingest",
-                action="handle_payload",
-                outcome="success",
-                conversation_id=conversation_id,
-            )
-        return JSONResponse({"message": message}, status_code=status)
-    finally:
-        counter_store.close()
+        raise HTTPException(status_code=400, detail=message)
+
+    message, status, outcome = freescout_webhook_handler(
+        body, {"X-Webhook-Secret": x_webhook_secret}
+    )
+    if status >= 400:
+        counter_store.increment_webhook_counter("failed")
+        log_event(
+            "webhook_ingest",
+            action="handle_payload",
+            outcome="failed",
+            conversation_id=conversation_id,
+            reason=message,
+        )
+    else:
+        counter_store.increment_webhook_counter("processed")
+        if outcome:
+            action = outcome.action
+            if action in COUNTER_KEYS:
+                counter_store.increment_webhook_counter(action)
+            if outcome.drafted:
+                counter_store.increment_webhook_counter("drafted")
+        log_event(
+            "webhook_ingest",
+            action="handle_payload",
+            outcome="success",
+            conversation_id=conversation_id,
+        )
+    return JSONResponse({"message": message}, status_code=status)

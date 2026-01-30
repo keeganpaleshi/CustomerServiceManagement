@@ -175,10 +175,7 @@ def process_gmail_message(
                 message_id=message_id,
                 thread_id=thread_id,
             )
-            return ProcessResult(
-                status="skipped_already_success",
-                reason="already processed",
-            )
+            return ProcessResult.SKIPPED_ALREADY_SUCCESS
         if store.processed_filtered(message_id):
             log_event(
                 "gmail_ingest",

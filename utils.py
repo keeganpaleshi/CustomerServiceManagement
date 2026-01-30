@@ -1470,10 +1470,21 @@ def decode_base64url(data: str) -> str:
 
     padding = "=" * (-len(data) % 4)
     try:
-        return base64.urlsafe_b64decode((data + padding).encode("utf-8")).decode(
-            "utf-8", "ignore"
-        )
-    except (binascii.Error, ValueError):
+        raw_bytes = base64.urlsafe_b64decode((data + padding).encode("utf-8"))
+        try:
+            return raw_bytes.decode("utf-8")
+        except UnicodeDecodeError as e:
+            # Log decode errors for debugging email parsing issues
+            LOGGER.debug(
+                "Base64 decode produced non-UTF8 bytes (position %d-%d): %s",
+                e.start,
+                e.end,
+                e.reason,
+            )
+            # Fall back to lossy decode, replacing invalid sequences
+            return raw_bytes.decode("utf-8", "replace")
+    except (binascii.Error, ValueError) as e:
+        LOGGER.debug("Base64 decode failed: %s", e)
         return ""
 
 
