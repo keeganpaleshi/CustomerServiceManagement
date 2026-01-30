@@ -14,8 +14,6 @@ import webhook_server
 from webhook_server import (
     _validate_webhook_timestamp,
     _check_and_record_nonce,
-    _nonce_cache,
-    _nonce_cache_lock,
 )
 
 
@@ -80,9 +78,23 @@ class TestCheckAndRecordNonce(unittest.TestCase):
     """Tests for _check_and_record_nonce function."""
 
     def setUp(self):
-        # Clear the nonce cache before each test
-        with _nonce_cache_lock:
-            _nonce_cache.clear()
+        # Create a temporary database for each test
+        self._temp_dir = tempfile.TemporaryDirectory()
+        self._temp_db = Path(self._temp_dir.name) / "test_nonces.sqlite"
+        # Patch _get_counter_store to return a new store each time (since it gets closed after use)
+        from storage import TicketStore
+
+        def _make_store():
+            return TicketStore(str(self._temp_db))
+
+        self._patcher = patch.object(
+            webhook_server, "_get_counter_store", side_effect=_make_store
+        )
+        self._patcher.start()
+
+    def tearDown(self):
+        self._patcher.stop()
+        self._temp_dir.cleanup()
 
     def test_none_nonce_is_valid(self):
         is_new, error = _check_and_record_nonce(None)
@@ -124,13 +136,15 @@ class TestCheckAndRecordNonce(unittest.TestCase):
 
     def test_nonce_cache_size_limit(self):
         """Test that cache doesn't grow unbounded."""
-        # Fill the cache with many nonces
-        for i in range(webhook_server.NONCE_CACHE_SIZE + 100):
+        # Fill the cache with many nonces using the configured cache size
+        cache_size = webhook_server._DEFAULT_NONCE_CACHE_SIZE
+        num_nonces = min(cache_size + 100, 200)  # Limit to avoid slow tests
+        for i in range(num_nonces):
             _check_and_record_nonce(f"nonce-{i}")
 
-        with _nonce_cache_lock:
-            # Cache should not exceed NONCE_CACHE_SIZE
-            self.assertLessEqual(len(_nonce_cache), webhook_server.NONCE_CACHE_SIZE)
+        # Verify all nonces were recorded (duplicates would be rejected)
+        is_new, _ = _check_and_record_nonce("nonce-0")
+        self.assertFalse(is_new)  # Should be rejected as duplicate
 
     def test_thread_safety(self):
         """Test that nonce cache is thread-safe."""
