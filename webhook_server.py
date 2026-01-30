@@ -157,9 +157,6 @@ def _sanitize_payload(payload: Any, max_depth: int = 10) -> Any:
     if not isinstance(payload, (dict, list)):
         return payload
 
-    if max_depth < 0:
-        return "[TRUNCATED]"
-
     if isinstance(payload, dict):
         sanitized_root: Any = {}
     else:

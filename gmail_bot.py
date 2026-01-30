@@ -520,7 +520,7 @@ def process_gmail_message(
             message_id=message_id,
             thread_id=thread_id,
         )
-        return ProcessResult(status="failed_retryable", reason=reason)
+        return ProcessResult(status="failed_permanent", reason=reason)
 
 
 def poll_ticket_updates(limit: int = 10, timeout: Optional[int] = None):
