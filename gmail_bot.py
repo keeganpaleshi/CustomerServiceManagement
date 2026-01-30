@@ -223,8 +223,10 @@ def process_gmail_message(
             payload: Optional[dict], name: str, default: str = ""
         ) -> str:
             headers = (payload or {}).get("headers") or []
+            normalized_name = name.lower()
             for header in headers:
-                if header.get("name") == name:
+                header_name = header.get("name", "").lower()
+                if header_name == normalized_name:
                     return header.get("value", default)
             return default
 
