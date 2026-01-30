@@ -94,6 +94,13 @@ class TicketStore:
             ON processed_messages(status)
             """
         )
+        # Add index on gmail_thread_id for faster thread lookups
+        self._conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_processed_messages_thread_id
+            ON processed_messages(gmail_thread_id)
+            """
+        )
         self._conn.commit()
 
     def _migrate_processed_messages(self) -> None:
