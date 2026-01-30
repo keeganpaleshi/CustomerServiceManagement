@@ -1,5 +1,6 @@
 import logging
 import sqlite3
+import time
 from pathlib import Path
 from typing import List, Optional
 
@@ -70,6 +71,20 @@ class TicketStore:
                 counter TEXT PRIMARY KEY,
                 value INTEGER NOT NULL DEFAULT 0
             )
+            """
+        )
+        self._conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS webhook_nonces (
+                nonce TEXT PRIMARY KEY,
+                created_at REAL NOT NULL
+            )
+            """
+        )
+        self._conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_webhook_nonces_created_at
+            ON webhook_nonces(created_at)
             """
         )
         # Add index on status column for faster queries by status
@@ -753,6 +768,55 @@ class TicketStore:
     def get_webhook_counters(self) -> dict:
         cur = self._conn.execute("SELECT counter, value FROM webhook_counters")
         return {row[0]: int(row[1]) for row in cur.fetchall()}
+
+    def check_and_record_webhook_nonce(self, nonce: str, ttl_seconds: int, cache_size: int) -> bool:
+        """Atomically check and store a webhook nonce for replay protection."""
+        now = time.time()
+        cutoff_time = now - max(ttl_seconds, 0)
+        hard_limit = max(cache_size - 1, 0)
+
+        self._conn.execute("BEGIN IMMEDIATE")
+        try:
+            self._conn.execute(
+                "DELETE FROM webhook_nonces WHERE created_at < ?",
+                (cutoff_time,),
+            )
+            cur = self._conn.execute(
+                "SELECT 1 FROM webhook_nonces WHERE nonce = ? LIMIT 1",
+                (nonce,),
+            )
+            if cur.fetchone():
+                self._conn.rollback()
+                return False
+
+            if hard_limit == 0:
+                self._conn.execute("DELETE FROM webhook_nonces")
+            else:
+                cur = self._conn.execute("SELECT COUNT(*) FROM webhook_nonces")
+                count = int(cur.fetchone()[0])
+                if count >= hard_limit:
+                    to_remove = count - (hard_limit - 1)
+                    self._conn.execute(
+                        """
+                        DELETE FROM webhook_nonces
+                        WHERE nonce IN (
+                            SELECT nonce FROM webhook_nonces
+                            ORDER BY created_at ASC
+                            LIMIT ?
+                        )
+                        """,
+                        (to_remove,),
+                    )
+
+            self._conn.execute(
+                "INSERT INTO webhook_nonces (nonce, created_at) VALUES (?, ?)",
+                (nonce, now),
+            )
+            self._conn.commit()
+            return True
+        except Exception:
+            self._conn.rollback()
+            raise
 
     def close(self) -> None:
         try:
