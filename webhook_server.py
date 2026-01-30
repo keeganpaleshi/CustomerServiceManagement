@@ -109,12 +109,6 @@ def _get_webhook_security_settings() -> tuple[int, int, int]:
             _DEFAULT_NONCE_CACHE_TTL_SECONDS,
         )
 
-# In-memory nonce cache for replay protection
-from collections import OrderedDict
-import threading
-_nonce_cache: OrderedDict = OrderedDict()
-_nonce_cache_lock = threading.Lock()
-
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
@@ -246,40 +240,20 @@ def _check_and_record_nonce(nonce: Any) -> tuple[bool, str]:
 
     _, nonce_cache_size, nonce_cache_ttl = _get_webhook_security_settings()
 
-    with _nonce_cache_lock:
-        now = datetime.now(timezone.utc).timestamp()
-        cutoff_time = now - nonce_cache_ttl
+    nonce_store = _get_counter_store()
+    try:
+        is_new = nonce_store.check_and_record_webhook_nonce(
+            nonce_str,
+            nonce_cache_ttl,
+            nonce_cache_size,
+        )
+    finally:
+        nonce_store.close()
 
-        # Check if nonce has been seen BEFORE cleanup to prevent race conditions
-        if nonce_str in _nonce_cache:
-            return False, "nonce has been used before (replay attack detected)"
+    if not is_new:
+        return False, "nonce has been used before (replay attack detected)"
 
-        # Enforce hard limit on cache size BEFORE adding new entry
-        # This prevents memory exhaustion under burst attack conditions
-        # by ensuring we always have room for the new entry
-        hard_limit = nonce_cache_size - 1  # Reserve space for the new entry
-
-        # Efficiently remove expired entries from the front (oldest first)
-        # Since OrderedDict maintains insertion order and we always append,
-        # expired entries are at the front
-        while _nonce_cache:
-            oldest_key = next(iter(_nonce_cache))
-            if _nonce_cache[oldest_key] < cutoff_time:
-                del _nonce_cache[oldest_key]
-            else:
-                break  # All remaining entries are newer
-
-        # If still over hard limit, remove oldest entries until under limit
-        # This handles burst scenarios where cache grows faster than entries expire
-        while len(_nonce_cache) >= hard_limit:
-            # Remove the oldest entry
-            oldest_key = next(iter(_nonce_cache))
-            del _nonce_cache[oldest_key]
-
-        # Record nonce with current timestamp
-        _nonce_cache[nonce_str] = now
-
-        return True, ""
+    return True, ""
 
 
 def _cleanup_old_webhook_logs(log_dir: Path, max_age_days: int = 30, max_files: int = 10000) -> None:
