@@ -205,6 +205,21 @@ class TestSanitizePayload(unittest.TestCase):
         result = webhook_server._sanitize_payload(payload)
         self.assertEqual(result, "just a string")
 
+    def test_truncates_deeply_nested_payload(self):
+        payload = {}
+        current = payload
+        for _ in range(12):
+            current["level"] = {}
+            current = current["level"]
+
+        result = webhook_server._sanitize_payload(payload, max_depth=5)
+        current = result
+        for _ in range(4):
+            self.assertIsInstance(current, dict)
+            current = current["level"]
+
+        self.assertEqual(current, "[TRUNCATED]")
+
 
 if __name__ == "__main__":
     unittest.main()
