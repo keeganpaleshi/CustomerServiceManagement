@@ -152,22 +152,54 @@ def _safe_filename(value: str) -> str:
     return cleaned or "unknown"
 
 
-def _sanitize_payload(payload: Any) -> Any:
+def _sanitize_payload(payload: Any, max_depth: int = 10) -> Any:
     """Redact sensitive fields from payload for logging."""
+    if not isinstance(payload, (dict, list)):
+        return payload
+
+    if max_depth < 0:
+        return "[TRUNCATED]"
+
     if isinstance(payload, dict):
-        sanitized = {}
-        for key, value in payload.items():
-            if key.lower() in SENSITIVE_FIELDS_LOWER:
-                if isinstance(value, str) and len(value) > 0:
-                    sanitized[key] = f"[REDACTED:{len(value)} chars]"
+        sanitized_root: Any = {}
+    else:
+        sanitized_root = []
+
+    stack: list[tuple[Any, int, Any]] = [(payload, 0, sanitized_root)]
+
+    while stack:
+        current, depth, sanitized = stack.pop()
+        if isinstance(current, dict):
+            for key, value in current.items():
+                if key.lower() in SENSITIVE_FIELDS_LOWER:
+                    if isinstance(value, str) and len(value) > 0:
+                        sanitized[key] = f"[REDACTED:{len(value)} chars]"
+                    else:
+                        sanitized[key] = "[REDACTED]"
+                    continue
+
+                if isinstance(value, (dict, list)):
+                    if depth + 1 >= max_depth:
+                        sanitized[key] = "[TRUNCATED]"
+                        continue
+                    next_container: Any = {} if isinstance(value, dict) else []
+                    sanitized[key] = next_container
+                    stack.append((value, depth + 1, next_container))
                 else:
-                    sanitized[key] = "[REDACTED]"
-            else:
-                sanitized[key] = _sanitize_payload(value)
-        return sanitized
-    elif isinstance(payload, list):
-        return [_sanitize_payload(item) for item in payload]
-    return payload
+                    sanitized[key] = value
+        elif isinstance(current, list):
+            for item in current:
+                if isinstance(item, (dict, list)):
+                    if depth + 1 >= max_depth:
+                        sanitized.append("[TRUNCATED]")
+                        continue
+                    next_container = {} if isinstance(item, dict) else []
+                    sanitized.append(next_container)
+                    stack.append((item, depth + 1, next_container))
+                else:
+                    sanitized.append(item)
+
+    return sanitized_root
 
 
 def _select_event_id(payload: Any) -> str:
