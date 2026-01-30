@@ -1,10 +1,13 @@
 """Unit tests for webhook validation functions in webhook_server.py."""
 
+import re
 import time
+import tempfile
 import threading
 import unittest
 from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
+from pathlib import Path
 
 # Import the module to access its internal functions
 import webhook_server
@@ -204,6 +207,28 @@ class TestSanitizePayload(unittest.TestCase):
         payload = "just a string"
         result = webhook_server._sanitize_payload(payload)
         self.assertEqual(result, "just a string")
+
+
+class TestWebhookLogging(unittest.TestCase):
+    """Tests for webhook logging behavior."""
+
+    def test_log_webhook_payload_caps_filename_length(self):
+        long_event_id = "a" * 500
+        payload = {"event_id": long_event_id, "payload": {"key": "value"}}
+        filename_pattern = re.compile(
+            r"^(?P<timestamp>\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}\.\d{6}Z)-(?P<event_id>.+)\.json$"
+        )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            log_dir = Path(temp_dir)
+            with patch.object(webhook_server, "_get_log_dir", return_value=log_dir):
+                logfile = webhook_server.log_webhook_payload(payload)
+
+            self.assertTrue(logfile.exists())
+            match = filename_pattern.match(logfile.name)
+            self.assertIsNotNone(match)
+            event_id = match.group("event_id")
+            self.assertLessEqual(len(event_id), webhook_server.SAFE_FILENAME_MAX_LENGTH)
 
 
 if __name__ == "__main__":

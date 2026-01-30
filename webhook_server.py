@@ -68,6 +68,7 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
 
 _DEFAULT_LOG_DIR = Path(__file__).resolve().parent / "logs" / "webhooks"
 SAFE_FILENAME_RE = re.compile(r"[^A-Za-z0-9_.-]+")
+SAFE_FILENAME_MAX_LENGTH = 128
 COUNTER_KEYS = ("processed", "created", "appended", "drafted", "filtered", "failed")
 # Fields that may contain sensitive data and should be redacted in logs
 SENSITIVE_FIELDS = {"email", "customer_email", "customerEmail", "body", "text", "content", "password", "secret", "token", "api_key"}
@@ -147,6 +148,7 @@ def _get_log_dir() -> Path:
 
 def _safe_filename(value: str) -> str:
     cleaned = SAFE_FILENAME_RE.sub("-", value.strip())
+    cleaned = cleaned[:SAFE_FILENAME_MAX_LENGTH]
     return cleaned or "unknown"
 
 
