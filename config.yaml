@@ -1,7 +1,7 @@
 openai:
   api_key_env: OPENAI_API_KEY        # name of env var or you can inline a key (not recommended)
-  classify_model: "gpt-4o"
-  draft_model:    "gpt-4o"
+  classify_model: "gpt-5-nano"       # Fast, cheap model optimized for classification
+  draft_model:    "gpt-5"            # Full model for high-quality email drafting
   # Maximum tokens allowed in the draft generation call
   draft_max_tokens: 16384
   # System prompt used when drafting replies. Modify to change tone or style.
@@ -29,6 +29,13 @@ openai:
         information.
   # Maximum tokens for the classification model
   classify_max_tokens: 150
+  # Optional: Reasoning effort for draft generation (for reasoning models: o1, o3, gpt-5 series)
+  # Supported values: none, minimal, low, medium, high, xhigh
+  # Leave commented for default behavior (medium for most models, none for gpt-5.1+)
+  # draft_reasoning_effort: "medium"
+  # Optional: Reasoning effort for email classification (for reasoning models)
+  # For gpt-5-nano, "low" reasoning significantly improves classification accuracy
+  classify_reasoning_effort: "low"
   # Timeout (seconds) for OpenAI API requests
   timeout: 30
   # Rate limiter for OpenAI calls (set max_requests or window_seconds to 0 to disable)
@@ -39,22 +46,83 @@ openai:
   budget:
     daily_usd: 10.0      # Maximum USD to spend per day (0 = unlimited)
     monthly_usd: 200.0   # Maximum USD to spend per month (0 = unlimited)
-  # Pricing per 1K tokens (update when OpenAI changes prices)
-  # Last updated: 2024-01 - check https://openai.com/pricing for current rates
+  # Pricing per 1M tokens (update when OpenAI changes prices)
+  # Last updated: 2026-01 - check https://openai.com/api/pricing for current rates
+  # Note: Reasoning models (o1, o3, gpt-5 series) support reasoning_effort parameter
+  # Cached input pricing is 90% off for tokens used within previous few minutes
   pricing:
+    # GPT-5.2 family - Latest flagship models (Dec 2025)
+    gpt-5.2:
+      input: 0.00175      # $1.75 per 1M input tokens
+      output: 0.014       # $14.00 per 1M output tokens
+      cached_input: 0.000175  # $0.175 per 1M cached tokens (90% discount)
+    gpt-5.2-pro:
+      input: 0.003        # $3.00 per 1M input tokens
+      output: 0.024       # $24.00 per 1M output tokens
+      cached_input: 0.0003
+    # GPT-5 family - Previous generation
+    gpt-5:
+      input: 0.00125      # $1.25 per 1M input tokens
+      output: 0.01        # $10.00 per 1M output tokens
+      cached_input: 0.000125
+    gpt-5-mini:
+      input: 0.00025      # $0.25 per 1M input tokens
+      output: 0.002       # $2.00 per 1M output tokens
+      cached_input: 0.000025
+    gpt-5-nano:
+      input: 0.00005      # $0.05 per 1M input tokens
+      output: 0.0004      # $0.40 per 1M output tokens
+      cached_input: 0.000005
+    gpt-5.1:
+      input: 0.0015       # $1.50 per 1M input tokens
+      output: 0.012       # $12.00 per 1M output tokens
+      cached_input: 0.00015
+    gpt-5.1-mini:
+      input: 0.0003       # $0.30 per 1M input tokens
+      output: 0.0024      # $2.40 per 1M output tokens
+      cached_input: 0.00003
+    # GPT-4.1 family - Reliable production models
+    gpt-4.1:
+      input: 0.002        # $2.00 per 1M input tokens
+      output: 0.008       # $8.00 per 1M output tokens
+    gpt-4.1-mini:
+      input: 0.0004       # $0.40 per 1M input tokens
+      output: 0.0016      # $1.60 per 1M output tokens
+    # GPT-4o family - Previous flagship
     gpt-4o:
-      input: 0.005       # USD per 1K input tokens
-      output: 0.015      # USD per 1K output tokens
+      input: 0.0025       # $2.50 per 1M input tokens
+      output: 0.01        # $10.00 per 1M output tokens
+    gpt-4o-mini:
+      input: 0.00015      # $0.15 per 1M input tokens
+      output: 0.0006      # $0.60 per 1M output tokens
+    # o3 family - Reasoning models with reasoning_effort parameter support
+    # Note: Reasoning tokens are hidden but billed as output tokens
+    o3:
+      input: 0.01         # $10.00 per 1M input tokens
+      output: 0.04        # $40.00 per 1M output tokens
+      cached_input: 0.0025  # $2.50 per 1M cached tokens
+    o3-mini:
+      input: 0.002        # $2.00 per 1M input tokens
+      output: 0.008       # $8.00 per 1M output tokens
+      cached_input: 0.0005
+    # o1 family - Previous generation reasoning models
+    o1:
+      input: 0.015        # $15.00 per 1M input tokens
+      output: 0.06        # $60.00 per 1M output tokens
+    o1-mini:
+      input: 0.003        # $3.00 per 1M input tokens
+      output: 0.012       # $12.00 per 1M output tokens
+    # Legacy models (maintained for compatibility)
     gpt-4:
-      input: 0.03
-      output: 0.06
+      input: 0.03         # $30.00 per 1M input tokens
+      output: 0.06        # $60.00 per 1M output tokens
     gpt-3.5-turbo:
-      input: 0.001
-      output: 0.002
-    # Default pricing for unknown models (uses gpt-4o rates)
+      input: 0.001        # $1.00 per 1M input tokens
+      output: 0.002       # $2.00 per 1M output tokens
+    # Default pricing for unknown models (uses gpt-5.2 rates)
     default:
-      input: 0.005
-      output: 0.015
+      input: 0.00175
+      output: 0.014
   # Fallback email signature when OpenAI API fails or is rate limited
   fallback_signature: |
     Best,
