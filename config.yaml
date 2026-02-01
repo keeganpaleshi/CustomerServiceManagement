@@ -28,7 +28,8 @@ openai:
         know you're checking into it and will respond once you have the
         information.
   # Maximum tokens for the classification model
-  classify_max_tokens: 150
+  # Modern reasoning models benefit from higher limits for structured JSON responses
+  classify_max_tokens: 512
   # Optional: Reasoning effort for draft generation (for reasoning models: o1, o3, gpt-5 series)
   # Supported values: none, minimal, low, medium, high, xhigh
   # Leave commented for default behavior (medium for most models, none for gpt-5.1+)
@@ -37,7 +38,8 @@ openai:
   # For gpt-5-nano, "low" reasoning significantly improves classification accuracy
   classify_reasoning_effort: "low"
   # Timeout (seconds) for OpenAI API requests
-  timeout: 30
+  # Reasoning models may require additional time for complex requests
+  timeout: 60
   # Rate limiter for OpenAI calls (set max_requests or window_seconds to 0 to disable)
   rate_limit:
     max_requests: 60
