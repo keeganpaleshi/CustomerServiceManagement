@@ -512,7 +512,9 @@ async def freescout(request: Request, x_webhook_secret: Optional[str] = Header(N
             raise HTTPException(status_code=400, detail=f"Invalid timestamp: {ts_error}")
 
         # Check nonce for replay protection
-        nonce = body.get("nonce") or body.get("event_id") or body.get("id")
+        # Only use purpose-built nonce/event_id fields, not conversation "id"
+        # which would cause false positives for multiple events on the same conversation
+        nonce = body.get("nonce") or body.get("event_id")
         is_new_nonce, nonce_error = _check_and_record_nonce(nonce)
         if not is_new_nonce:
             log_event(
@@ -560,9 +562,7 @@ async def freescout(request: Request, x_webhook_secret: Optional[str] = Header(N
         )
         raise HTTPException(status_code=400, detail=message)
 
-    message, status, outcome = freescout_webhook_handler(
-        body, {"X-Webhook-Secret": x_webhook_secret}
-    )
+    message, status, outcome = freescout_webhook_handler(body, {})
     if status >= 400:
         counter_store.increment_webhook_counter("failed")
         log_event(
