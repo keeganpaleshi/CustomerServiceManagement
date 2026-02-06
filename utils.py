@@ -50,8 +50,7 @@ def _merge_followup_env_vars(followup_cfg: Dict[str, Any]) -> Dict[str, Any]:
     Returns:
         Merged configuration with environment variable overrides
     """
-    import copy as copy_module
-    result = copy_module.deepcopy(followup_cfg)
+    result = copy.deepcopy(followup_cfg)
 
     notify_cfg = result.setdefault("notify", {})
     email_cfg = notify_cfg.setdefault("email", {})
@@ -292,14 +291,26 @@ def _load_settings() -> Dict[str, Any]:
     }
 
 
+# Keys containing mutable nested dicts that callers might modify
+_MUTABLE_SETTINGS_KEYS = frozenset({
+    "FREESCOUT_ACTIONS", "FREESCOUT_FOLLOWUP", "FREESCOUT_RATE_LIMIT",
+    "OPENAI_RATE_LIMIT", "OPENAI_BUDGET", "SCOPES",
+})
+
+
 def get_settings() -> Dict[str, Any]:
     """Public accessor for cached settings.
 
-    Returns a deep copy to prevent accidental mutation of cached values,
-    especially nested dictionaries like FREESCOUT_ACTIONS.
+    Returns a copy to prevent accidental mutation of cached values.
+    Only deep-copies the mutable nested dicts that callers might modify,
+    avoiding the overhead of deep-copying the large pricing table.
     """
-
-    return copy.deepcopy(_load_settings())
+    cached = _load_settings()
+    result = dict(cached)
+    for key in _MUTABLE_SETTINGS_KEYS:
+        if key in result:
+            result[key] = copy.deepcopy(result[key])
+    return result
 
 
 def validate_settings() -> List[str]:
@@ -885,6 +896,8 @@ class FreeScoutClient:
         self.api_key = api_key
         self.timeout = timeout
         self.rate_limiter = rate_limiter
+        self._session = requests.Session()
+        self._session.headers.update(self._headers())
 
     def _check_rate_limit(self) -> None:
         """Check rate limit before making a request. Raises RuntimeError if limit exceeded."""
@@ -919,9 +932,8 @@ class FreeScoutClient:
         conversation_id = self._normalize_id(conversation_id)
 
         def _request() -> Dict[str, Any]:
-            resp = requests.get(
+            resp = self._session.get(
                 f"{self.base_url}/api/conversations/{conversation_id}",
-                headers=self._headers(),
                 timeout=self.timeout,
             )
             resp.raise_for_status()
@@ -941,9 +953,8 @@ class FreeScoutClient:
         self._check_rate_limit()
 
         def _request() -> List[Dict[str, Any]]:
-            resp = requests.get(
+            resp = self._session.get(
                 f"{self.base_url}/api/conversations",
-                headers=self._headers(),
                 params=params,
                 timeout=self.timeout,
             )
@@ -1010,9 +1021,8 @@ class FreeScoutClient:
             return {}
 
         def _request() -> Dict[str, Any]:
-            resp = requests.put(
+            resp = self._session.put(
                 f"{self.base_url}/api/conversations/{conversation_id}",
-                headers=self._headers(),
                 json=payload,
                 timeout=self.timeout,
             )
@@ -1034,9 +1044,8 @@ class FreeScoutClient:
         payload: Dict[str, Any] = {"type": "customer", "text": text, "imported": imported}
 
         def _request() -> Dict[str, Any]:
-            resp = requests.post(
+            resp = self._session.post(
                 f"{self.base_url}/api/conversations/{conversation_id}/threads",
-                headers=self._headers(),
                 json=payload,
                 timeout=self.timeout,
             )
@@ -1103,9 +1112,8 @@ class FreeScoutClient:
             payload["customFields"] = serialized
 
         def _request() -> Dict[str, Any]:
-            resp = requests.post(
+            resp = self._session.post(
                 f"{self.base_url}/api/conversations",
-                headers=self._headers(),
                 json=payload,
                 timeout=self.timeout,
             )
@@ -1129,9 +1137,8 @@ class FreeScoutClient:
             payload["user_id"] = self._maybe_int(user_id) or user_id
 
         def _request() -> Dict[str, Any]:
-            resp = requests.post(
+            resp = self._session.post(
                 f"{self.base_url}/api/conversations/{conversation_id}/threads",
-                headers=self._headers(),
                 json=payload,
                 timeout=self.timeout,
             )
@@ -1172,9 +1179,8 @@ class FreeScoutClient:
             payload["draft"] = True
 
         def _request() -> Dict[str, Any]:
-            resp = requests.post(
+            resp = self._session.post(
                 f"{self.base_url}/api/conversations/{conversation_id}/threads",
-                headers=self._headers(),
                 json=payload,
                 timeout=self.timeout,
             )
@@ -1201,9 +1207,8 @@ class FreeScoutClient:
         payload: Dict[str, Any] = {"text": text, "draft": draft}
 
         def _request() -> Dict[str, Any]:
-            resp = requests.put(
+            resp = self._session.put(
                 f"{self.base_url}/api/conversations/{conversation_id}/threads/{thread_id}",
-                headers=self._headers(),
                 json=payload,
                 timeout=self.timeout,
             )
@@ -1415,37 +1420,38 @@ def get_gmail_service(
             else:
                 creds = flow.run_local_server(port=0)
         # Save credentials as JSON (encrypted if key is available)
-        with open(token_filename, "w", encoding="utf-8") as t:
-            # Convert credentials to JSON-serializable format
-            creds_data = {
-                "token": creds.token,
-                "refresh_token": creds.refresh_token,
-                "token_uri": creds.token_uri,
-                "client_id": creds.client_id,
-                "client_secret": creds.client_secret,
-                "scopes": creds.scopes,
-            }
-            token_json = json.dumps(creds_data, indent=2)
+        # Use restrictive permissions (owner read/write only) to protect tokens
+        creds_data = {
+            "token": creds.token,
+            "refresh_token": creds.refresh_token,
+            "token_uri": creds.token_uri,
+            "client_id": creds.client_id,
+            "client_secret": creds.client_secret,
+            "scopes": creds.scopes,
+        }
+        token_json = json.dumps(creds_data, indent=2)
 
-            # Encrypt if encryption key is available
-            if encryption_key:
-                token_json = _encrypt_token_data(token_json, encryption_key)
-                log_event(
-                    "gmail_auth",
-                    action="save_credentials",
-                    outcome="success",
-                    encrypted=True,
-                )
-            else:
-                log_event(
-                    "gmail_auth",
-                    level=logging.WARNING,
-                    action="save_credentials",
-                    outcome="success",
-                    encrypted=False,
-                    reason="No encryption key set (GMAIL_TOKEN_ENCRYPTION_KEY env var)",
-                )
+        # Encrypt if encryption key is available
+        if encryption_key:
+            token_json = _encrypt_token_data(token_json, encryption_key)
+            log_event(
+                "gmail_auth",
+                action="save_credentials",
+                outcome="success",
+                encrypted=True,
+            )
+        else:
+            log_event(
+                "gmail_auth",
+                level=logging.WARNING,
+                action="save_credentials",
+                outcome="success",
+                encrypted=False,
+                reason="No encryption key set (GMAIL_TOKEN_ENCRYPTION_KEY env var)",
+            )
 
+        fd = os.open(token_filename, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as t:
             t.write(token_json)
     return build("gmail", "v1", credentials=creds)
 
@@ -1804,6 +1810,9 @@ def generate_ai_reply(subject, sender, snippet_or_body, email_type):
             reason=str(exc),
             error_type=type(exc).__name__,
         )
+        # Re-raise in debug mode to catch programming errors during development
+        if os.getenv("DEBUG", "").lower() in ("1", "true", "yes"):
+            raise
         return _get_fallback_reply(settings)
 
 

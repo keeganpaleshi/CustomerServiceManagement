@@ -1,6 +1,5 @@
 import argparse
 import hashlib
-import hmac
 import json
 import logging
 import os
@@ -146,6 +145,191 @@ def should_filter_message(message: dict) -> Tuple[bool, str]:
     return False, ""
 
 
+def _get_header_value(
+    payload: Optional[dict], name: str, default: str = ""
+) -> str:
+    """Extract a header value from a Gmail message payload by name (case-insensitive)."""
+    headers = (payload or {}).get("headers") or []
+    normalized_name = name.lower()
+    for header in headers:
+        if header.get("name", "").lower() == normalized_name:
+            return header.get("value", default)
+    return default
+
+
+@dataclass(frozen=True)
+class _MessageContent:
+    """Parsed content extracted from a Gmail message."""
+    subject: str
+    sender: str
+    body_text: str
+
+
+def _extract_message_content(full_message: dict) -> _MessageContent:
+    """Extract subject, sender, and body text from a full Gmail message."""
+    payload = full_message.get("payload", {})
+    subject = _get_header_value(payload, "Subject")
+    raw_sender = _get_header_value(payload, "From")
+    sender = parseaddr(raw_sender)[1] or raw_sender
+    body = extract_plain_text(payload)
+    snippet = full_message.get("snippet", "")
+    body_text = body.strip() or snippet or "(no body)"
+    return _MessageContent(subject=subject, sender=sender, body_text=body_text)
+
+
+def _finalize_ticket(
+    freescout: FreeScoutClient,
+    store: TicketStore,
+    gmail,
+    conv_id: str,
+    content: _MessageContent,
+    settings: dict,
+    ticket_label_id: Optional[str],
+    message_id: str,
+    thread_id: str,
+) -> bool:
+    """Run post-ticket processing: classify, label, and draft a reply. Returns whether a draft was created."""
+    try:
+        process_conversation(
+            conv_id,
+            {
+                "subject": content.subject,
+                "sender": content.sender,
+                "latest_text": content.body_text,
+            },
+            settings,
+            freescout,
+        )
+    except Exception as exc:
+        log_event(
+            "gmail_ingest",
+            action="process_conversation",
+            outcome="failed",
+            reason=str(exc),
+            message_id=message_id,
+            thread_id=thread_id,
+            conversation_id=conv_id,
+        )
+    if ticket_label_id:
+        _apply_ticket_label(gmail, thread_id, ticket_label_id)
+    return _maybe_write_draft_reply(
+        freescout, store, conv_id,
+        content.subject, content.sender, content.body_text, settings,
+    )
+
+
+def _append_to_conversation(
+    freescout: FreeScoutClient,
+    store: TicketStore,
+    gmail,
+    conv_id: str,
+    content: _MessageContent,
+    settings: dict,
+    ticket_label_id: Optional[str],
+    message_id: str,
+    thread_id: str,
+) -> ProcessResult:
+    """Append a message to an existing FreeScout conversation."""
+    try:
+        freescout.add_customer_thread(conv_id, content.body_text, imported=True)
+    except requests.RequestException as exc:
+        reason = f"append failed: {exc}"
+        store.mark_failed(message_id, thread_id, str(exc), conv_id)
+        log_event(
+            "gmail_ingest", action="append_thread", outcome="failed",
+            reason=reason, message_id=message_id,
+            thread_id=thread_id, conversation_id=conv_id,
+        )
+        return ProcessResult(
+            status="failed_retryable", reason=reason,
+            freescout_conversation_id=conv_id,
+        )
+
+    store.mark_success(message_id, thread_id, conv_id, action="append")
+    log_event(
+        "gmail_ingest", action="append_thread", outcome="success",
+        message_id=message_id, thread_id=thread_id, conversation_id=conv_id,
+    )
+    drafted = _finalize_ticket(
+        freescout, store, gmail, conv_id, content,
+        settings, ticket_label_id, message_id, thread_id,
+    )
+    return ProcessResult(
+        status="freescout_appended", reason="append success",
+        freescout_conversation_id=conv_id, drafted=drafted,
+    )
+
+
+def _create_conversation_ticket(
+    freescout: FreeScoutClient,
+    store: TicketStore,
+    gmail,
+    content: _MessageContent,
+    settings: dict,
+    ticket_label_id: Optional[str],
+    message_id: str,
+    thread_id: str,
+) -> ProcessResult:
+    """Create a new FreeScout conversation for a Gmail message."""
+    mailbox_id = normalize_id(settings.get("FREESCOUT_MAILBOX_ID"))
+    if not mailbox_id:
+        reason = "freescout mailbox missing"
+        store.mark_failed(message_id, thread_id, reason)
+        log_event(
+            "gmail_ingest", action="create_ticket", outcome="failed",
+            reason=reason, message_id=message_id, thread_id=thread_id,
+        )
+        return ProcessResult(status="failed_permanent", reason=reason)
+
+    gmail_thread_field = normalize_id(settings.get("FREESCOUT_GMAIL_THREAD_FIELD_ID"))
+    gmail_message_field = normalize_id(settings.get("FREESCOUT_GMAIL_MESSAGE_FIELD_ID"))
+
+    try:
+        ticket = freescout.create_conversation(
+            content.subject, content.sender, content.body_text, mailbox_id,
+            thread_id=thread_id, message_id=message_id,
+            gmail_thread_field=gmail_thread_field,
+            gmail_message_field=gmail_message_field,
+        )
+    except requests.RequestException as exc:
+        reason = f"ticket creation failed: {exc}"
+        store.mark_failed(message_id, thread_id, str(exc))
+        log_event(
+            "gmail_ingest", action="create_ticket", outcome="failed",
+            reason=reason, message_id=message_id, thread_id=thread_id,
+        )
+        return ProcessResult(status="failed_retryable", reason=reason)
+
+    conv_id = _extract_conversation_id(ticket)
+    if not ticket or not conv_id:
+        reason = "ticket creation failed"
+        store.mark_failed(message_id, thread_id, reason, conv_id)
+        log_event(
+            "gmail_ingest", action="create_ticket", outcome="failed",
+            reason=reason, message_id=message_id,
+            thread_id=thread_id, conversation_id=conv_id,
+        )
+        return ProcessResult(
+            status="failed_retryable", reason=reason,
+            freescout_conversation_id=conv_id,
+        )
+
+    store.mark_success(message_id, thread_id, conv_id, action="create")
+    store.upsert_thread_map(thread_id, conv_id)
+    log_event(
+        "gmail_ingest", action="create_ticket", outcome="success",
+        message_id=message_id, thread_id=thread_id, conversation_id=conv_id,
+    )
+    drafted = _finalize_ticket(
+        freescout, store, gmail, conv_id, content,
+        settings, ticket_label_id, message_id, thread_id,
+    )
+    return ProcessResult(
+        status="freescout_created", reason="create success",
+        freescout_conversation_id=conv_id, drafted=drafted,
+    )
+
+
 def process_gmail_message(
     message: dict,
     store: TicketStore,
@@ -159,40 +343,33 @@ def process_gmail_message(
     if not message_id:
         reason = "missing message id"
         log_event(
-            "gmail_ingest",
-            action="validate_message",
-            outcome="failed",
-            reason=reason,
+            "gmail_ingest", action="validate_message",
+            outcome="failed", reason=reason,
         )
         return ProcessResult(status="failed_retryable", reason=reason)
 
     if not store.mark_processing_if_new(message_id, thread_id):
         if store.processed_success(message_id):
             log_event(
-                "gmail_ingest",
-                action="skip_message",
+                "gmail_ingest", action="skip_message",
                 outcome="already_processed",
-                message_id=message_id,
-                thread_id=thread_id,
+                message_id=message_id, thread_id=thread_id,
             )
             return ProcessResult.SKIPPED_ALREADY_SUCCESS
         if store.processed_filtered(message_id):
             log_event(
-                "gmail_ingest",
-                action="skip_message",
+                "gmail_ingest", action="skip_message",
                 outcome="already_filtered",
-                message_id=message_id,
-                thread_id=thread_id,
+                message_id=message_id, thread_id=thread_id,
             )
             return ProcessResult.FILTERED
         log_event(
-            "gmail_ingest",
-            action="skip_message",
+            "gmail_ingest", action="skip_message",
             outcome="already_claimed",
-            message_id=message_id,
-            thread_id=thread_id,
+            message_id=message_id, thread_id=thread_id,
         )
         return ProcessResult.SKIPPED_ALREADY_CLAIMED
+
     try:
         full_message = message
         if "payload" not in message:
@@ -208,264 +385,57 @@ def process_gmail_message(
             reason = "missing thread id"
             store.mark_failed(message_id, thread_id, reason)
             log_event(
-                "gmail_ingest",
-                action="validate_message",
-                outcome="failed",
-                reason=reason,
-                message_id=message_id,
+                "gmail_ingest", action="validate_message",
+                outcome="failed", reason=reason, message_id=message_id,
             )
             return ProcessResult(status="failed_permanent", reason=reason)
 
-        def get_header_value(
-            payload: Optional[dict], name: str, default: str = ""
-        ) -> str:
-            headers = (payload or {}).get("headers") or []
-            normalized_name = name.lower()
-            for header in headers:
-                header_name = header.get("name", "").lower()
-                if header_name == normalized_name:
-                    return header.get("value", default)
-            return default
-
-        payload = full_message.get("payload", {})
-        subject = get_header_value(payload, "Subject")
-        raw_sender = get_header_value(payload, "From")
-        sender = parseaddr(raw_sender)[1] or raw_sender
-        body = extract_plain_text(payload)
-        snippet = full_message.get("snippet", "")
-        body_text = body.strip() or snippet or "(no body)"
+        content = _extract_message_content(full_message)
 
         message_with_body = dict(full_message)
-        message_with_body["body_text"] = body_text
+        message_with_body["body_text"] = content.body_text
         filtered, reason = should_filter_message(message_with_body)
         if filtered:
             store.mark_filtered(message_id, thread_id, reason=reason)
             log_event(
-                "gmail_ingest",
-                action="filter_message",
-                outcome="filtered",
-                reason=reason,
-                message_id=message_id,
-                thread_id=thread_id,
+                "gmail_ingest", action="filter_message", outcome="filtered",
+                reason=reason, message_id=message_id, thread_id=thread_id,
             )
             return ProcessResult(status="filtered", reason=reason)
 
         settings = get_settings()
         conv_id = normalize_id(store.get_conversation_id_for_thread(thread_id))
+
         if conv_id:
             if not freescout:
                 reason = "freescout disabled"
                 store.mark_failed(message_id, thread_id, reason, conv_id)
                 log_event(
-                    "gmail_ingest",
-                    action="append_thread",
-                    outcome="failed",
-                    reason=reason,
-                    message_id=message_id,
-                    thread_id=thread_id,
-                    conversation_id=conv_id,
+                    "gmail_ingest", action="append_thread", outcome="failed",
+                    reason=reason, message_id=message_id,
+                    thread_id=thread_id, conversation_id=conv_id,
                 )
                 return ProcessResult(
-                    status="failed_retryable",
-                    reason=reason,
+                    status="failed_retryable", reason=reason,
                     freescout_conversation_id=conv_id,
                 )
-            try:
-                freescout.add_customer_thread(conv_id, body_text, imported=True)
-            except requests.RequestException as exc:
-                reason = f"append failed: {exc}"
-                store.mark_failed(message_id, thread_id, str(exc), conv_id)
-                log_event(
-                    "gmail_ingest",
-                    action="append_thread",
-                    outcome="failed",
-                    reason=reason,
-                    message_id=message_id,
-                    thread_id=thread_id,
-                    conversation_id=conv_id,
-                )
-                return ProcessResult(
-                    status="failed_retryable",
-                    reason=reason,
-                    freescout_conversation_id=conv_id,
-                )
-
-            store.mark_success(message_id, thread_id, conv_id, action="append")
-            log_event(
-                "gmail_ingest",
-                action="append_thread",
-                outcome="success",
-                message_id=message_id,
-                thread_id=thread_id,
-                conversation_id=conv_id,
-            )
-            try:
-                process_conversation(
-                    conv_id,
-                    {
-                        "subject": subject,
-                        "sender": sender,
-                        "latest_text": body_text,
-                    },
-                    settings,
-                    freescout,
-                )
-            except Exception as exc:
-                log_event(
-                    "gmail_ingest",
-                    action="process_conversation",
-                    outcome="failed",
-                    reason=str(exc),
-                    message_id=message_id,
-                    thread_id=thread_id,
-                    conversation_id=conv_id,
-                )
-            if ticket_label_id:
-                _apply_ticket_label(gmail, thread_id, ticket_label_id)
-            drafted = _maybe_write_draft_reply(
-                freescout,
-                store,
-                conv_id,
-                subject,
-                sender,
-                body_text,
-                settings,
-                message_id,
-                thread_id,
-            )
-            return ProcessResult(
-                status="freescout_appended",
-                reason="append success",
-                freescout_conversation_id=conv_id,
-                drafted=drafted,
+            return _append_to_conversation(
+                freescout, store, gmail, conv_id, content,
+                settings, ticket_label_id, message_id, thread_id,
             )
 
         if not freescout:
             reason = "freescout disabled"
             store.mark_failed(message_id, thread_id, reason)
             log_event(
-                "gmail_ingest",
-                action="create_ticket",
-                outcome="failed",
-                reason=reason,
-                message_id=message_id,
-                thread_id=thread_id,
+                "gmail_ingest", action="create_ticket", outcome="failed",
+                reason=reason, message_id=message_id, thread_id=thread_id,
             )
             return ProcessResult(status="failed_retryable", reason=reason)
 
-        mailbox_id = normalize_id(settings.get("FREESCOUT_MAILBOX_ID"))
-        if not mailbox_id:
-            reason = "freescout mailbox missing"
-            store.mark_failed(message_id, thread_id, reason)
-            log_event(
-                "gmail_ingest",
-                action="create_ticket",
-                outcome="failed",
-                reason=reason,
-                message_id=message_id,
-                thread_id=thread_id,
-            )
-            return ProcessResult(status="failed_permanent", reason=reason)
-
-        gmail_thread_field = normalize_id(
-            settings.get("FREESCOUT_GMAIL_THREAD_FIELD_ID")
-        )
-        gmail_message_field = normalize_id(
-            settings.get("FREESCOUT_GMAIL_MESSAGE_FIELD_ID")
-        )
-
-        try:
-            ticket = freescout.create_conversation(
-                subject,
-                sender,
-                body_text,
-                mailbox_id,
-                thread_id=thread_id,
-                message_id=message_id,
-                gmail_thread_field=gmail_thread_field,
-                gmail_message_field=gmail_message_field,
-            )
-        except requests.RequestException as exc:
-            reason = f"ticket creation failed: {exc}"
-            store.mark_failed(message_id, thread_id, str(exc))
-            log_event(
-                "gmail_ingest",
-                action="create_ticket",
-                outcome="failed",
-                reason=reason,
-                message_id=message_id,
-                thread_id=thread_id,
-            )
-            return ProcessResult(status="failed_retryable", reason=reason)
-
-        conv_id = _extract_conversation_id(ticket)
-        if not ticket or not conv_id:
-            reason = "ticket creation failed"
-            store.mark_failed(message_id, thread_id, reason, conv_id)
-            log_event(
-                "gmail_ingest",
-                action="create_ticket",
-                outcome="failed",
-                reason=reason,
-                message_id=message_id,
-                thread_id=thread_id,
-                conversation_id=conv_id,
-            )
-            return ProcessResult(
-                status="failed_retryable",
-                reason=reason,
-                freescout_conversation_id=conv_id,
-            )
-
-        store.mark_success(message_id, thread_id, conv_id, action="create")
-        store.upsert_thread_map(thread_id, conv_id)
-        log_event(
-            "gmail_ingest",
-            action="create_ticket",
-            outcome="success",
-            message_id=message_id,
-            thread_id=thread_id,
-            conversation_id=conv_id,
-        )
-        try:
-            process_conversation(
-                conv_id,
-                {
-                    "subject": subject,
-                    "sender": sender,
-                    "latest_text": body_text,
-                },
-                settings,
-                freescout,
-            )
-        except Exception as exc:
-            log_event(
-                "gmail_ingest",
-                action="process_conversation",
-                outcome="failed",
-                reason=str(exc),
-                message_id=message_id,
-                thread_id=thread_id,
-                conversation_id=conv_id,
-            )
-        if ticket_label_id:
-            _apply_ticket_label(gmail, thread_id, ticket_label_id)
-        drafted = _maybe_write_draft_reply(
-            freescout,
-            store,
-            conv_id,
-            subject,
-            sender,
-            body_text,
-            settings,
-            message_id,
-            thread_id,
-        )
-        return ProcessResult(
-            status="freescout_created",
-            reason="create success",
-            freescout_conversation_id=conv_id,
-            drafted=drafted,
+        return _create_conversation_ticket(
+            freescout, store, gmail, content,
+            settings, ticket_label_id, message_id, thread_id,
         )
     except (
         requests.RequestException,  # Network/HTTP errors
@@ -477,31 +447,19 @@ def process_gmail_message(
         reason = f"transient error: {type(exc).__name__}: {exc}"
         store.mark_failed(message_id, thread_id, str(exc))
         log_event(
-            "gmail_ingest",
-            action="process_message",
-            outcome="failed",
-            reason=reason,
-            error_type=type(exc).__name__,
-            message_id=message_id,
-            thread_id=thread_id,
+            "gmail_ingest", action="process_message", outcome="failed",
+            reason=reason, error_type=type(exc).__name__,
+            message_id=message_id, thread_id=thread_id,
         )
         return ProcessResult(status="failed_retryable", reason=reason)
     except (KeyError, ValueError, TypeError, AttributeError) as exc:
-        # Data validation errors - these indicate malformed API responses
-        # or programming errors. Log with details and don't retry.
         reason = f"data validation error: {type(exc).__name__}: {exc}"
         store.mark_failed(message_id, thread_id, str(exc))
         log_event(
-            "gmail_ingest",
-            action="process_message",
-            outcome="failed",
-            reason=reason,
-            error_type=type(exc).__name__,
-            message_id=message_id,
-            thread_id=thread_id,
-            level=logging.ERROR,
+            "gmail_ingest", action="process_message", outcome="failed",
+            reason=reason, error_type=type(exc).__name__,
+            message_id=message_id, thread_id=thread_id, level=logging.ERROR,
         )
-        # Re-raise in debug mode to catch programming errors during development
         if os.getenv("DEBUG", "").lower() in ("1", "true", "yes"):
             raise
         return ProcessResult(status="failed_permanent", reason=reason)
@@ -509,13 +467,9 @@ def process_gmail_message(
         reason = f"unexpected error: {type(exc).__name__}: {exc}"
         store.mark_failed(message_id, thread_id, str(exc))
         log_event(
-            "gmail_ingest",
-            action="process_message",
-            outcome="failed",
-            reason=reason,
-            error_type=type(exc).__name__,
-            message_id=message_id,
-            thread_id=thread_id,
+            "gmail_ingest", action="process_message", outcome="failed",
+            reason=reason, error_type=type(exc).__name__,
+            message_id=message_id, thread_id=thread_id,
         )
         return ProcessResult(status="failed_permanent", reason=reason)
 
@@ -782,6 +736,61 @@ def _extract_conversation_id(ticket: Optional[dict]) -> Optional[str]:
     return _extract_id(ticket, "conversation")
 
 
+def _create_and_record_draft(
+    client: FreeScoutClient,
+    store: TicketStore,
+    conversation_id: str,
+    reply_text: str,
+    reply_hash: str,
+    generated_at: str,
+    max_drafts: Optional[int] = None,
+    use_atomic_limit: bool = False,
+) -> bool:
+    """Create a new draft on FreeScout and record it locally.
+
+    Args:
+        use_atomic_limit: If True, use atomic upsert with draft limit check
+            (for brand-new drafts). If False, use plain upsert (for replacements).
+    """
+    try:
+        response = client.create_agent_draft_reply(conversation_id, reply_text)
+    except requests.RequestException as exc:
+        log_event(
+            "freescout_draft",
+            action="create_draft",
+            outcome="failed",
+            conversation_id=conversation_id,
+            reason=str(exc),
+        )
+        return False
+
+    thread_id = _extract_thread_id(response)
+
+    if use_atomic_limit:
+        if not store.atomic_upsert_bot_draft_if_under_limit(
+            conversation_id, thread_id, reply_hash, generated_at, max_drafts
+        ):
+            log_event(
+                "freescout_draft",
+                action="create_draft",
+                outcome="skipped",
+                reason="draft_limit_reached_atomic",
+                conversation_id=conversation_id,
+            )
+            return False
+    else:
+        store.upsert_bot_draft(conversation_id, thread_id, reply_hash, generated_at)
+
+    log_event(
+        "freescout_draft",
+        action="create_draft",
+        outcome="success",
+        conversation_id=conversation_id,
+        thread_id=thread_id,
+    )
+    return True
+
+
 def _post_write_draft_reply(
     client: Optional[FreeScoutClient],
     store: TicketStore,
@@ -811,41 +820,13 @@ def _post_write_draft_reply(
     reply_hash = _hash_draft_text(reply_text)
     generated_at = datetime.now(timezone.utc).isoformat()
     existing = store.get_bot_draft(conversation_id)
+
+    # No existing draft: create new with atomic limit check
     if not existing:
-        try:
-            response = client.create_agent_draft_reply(conversation_id, reply_text)
-        except requests.RequestException as exc:
-            log_event(
-                "freescout_draft",
-                action="create_draft",
-                outcome="failed",
-                conversation_id=conversation_id,
-                reason=str(exc),
-            )
-            return False
-        thread_id = _extract_thread_id(response)
-        # Use atomic upsert to prevent race conditions with draft limit
-        # The pre-check above reduces the chance of this failing, but the atomic
-        # check is still needed for concurrent requests
-        if not store.atomic_upsert_bot_draft_if_under_limit(
-            conversation_id, thread_id, reply_hash, generated_at, max_drafts
-        ):
-            log_event(
-                "freescout_draft",
-                action="create_draft",
-                outcome="skipped",
-                reason="draft_limit_reached_atomic",
-                conversation_id=conversation_id,
-            )
-            return False
-        log_event(
-            "freescout_draft",
-            action="create_draft",
-            outcome="success",
-            conversation_id=conversation_id,
-            thread_id=thread_id,
+        return _create_and_record_draft(
+            client, store, conversation_id, reply_text, reply_hash,
+            generated_at, max_drafts=max_drafts, use_atomic_limit=True,
         )
-        return True
 
     try:
         details = client.get_conversation(conversation_id)
@@ -861,54 +842,13 @@ def _post_write_draft_reply(
 
     threads = _extract_conversation_threads(details)
     stored_thread_id = existing.get("freescout_thread_id")
-    if not stored_thread_id:
-        try:
-            response = client.create_agent_draft_reply(conversation_id, reply_text)
-        except requests.RequestException as exc:
-            log_event(
-                "freescout_draft",
-                action="create_draft",
-                outcome="failed",
-                conversation_id=conversation_id,
-                reason=str(exc),
-            )
-            return False
-        thread_id = _extract_thread_id(response)
-        # Use atomic upsert (existing draft means we're updating, so limit doesn't apply)
-        store.upsert_bot_draft(conversation_id, thread_id, reply_hash, generated_at)
-        log_event(
-            "freescout_draft",
-            action="create_draft",
-            outcome="success",
-            conversation_id=conversation_id,
-            thread_id=thread_id,
-        )
-        return True
 
-    thread = _find_thread_by_id(threads, stored_thread_id)
+    # Existing draft record but no thread ID or thread not found: create replacement
+    thread = _find_thread_by_id(threads, stored_thread_id) if stored_thread_id else None
     if not thread:
-        try:
-            response = client.create_agent_draft_reply(conversation_id, reply_text)
-        except requests.RequestException as exc:
-            log_event(
-                "freescout_draft",
-                action="create_draft",
-                outcome="failed",
-                conversation_id=conversation_id,
-                reason=str(exc),
-            )
-            return False
-        thread_id = _extract_thread_id(response)
-        # Use atomic upsert (existing draft means we're updating, so limit doesn't apply)
-        store.upsert_bot_draft(conversation_id, thread_id, reply_hash, generated_at)
-        log_event(
-            "freescout_draft",
-            action="create_draft",
-            outcome="success",
-            conversation_id=conversation_id,
-            thread_id=thread_id,
+        return _create_and_record_draft(
+            client, store, conversation_id, reply_text, reply_hash, generated_at,
         )
-        return True
 
     if not _thread_is_draft(thread) or not existing.get("last_hash"):
         _post_draft_skip_note(client, conversation_id, stored_thread_id)
@@ -968,8 +908,6 @@ def _maybe_write_draft_reply(
     sender: str,
     body_text: str,
     settings: dict,
-    message_id: Optional[str],
-    gmail_thread_id: Optional[str],
 ) -> bool:
     # Draft limit is now enforced atomically in _post_write_draft_reply
     # via atomic_upsert_bot_draft_if_under_limit
@@ -1212,7 +1150,7 @@ def poll_freescout_updates(
                     break
                 process_freescout_conversation(client, conv, settings)
             since = poll_start  # Use poll start time to avoid gaps
-            time.sleep(interval)
+            _shutdown_event.wait(interval)
         except Exception as exc:
             log_event(
                 "freescout_poll",
@@ -1221,7 +1159,7 @@ def poll_freescout_updates(
                 error=str(exc),
             )
             # Sleep before retry to avoid busy-wait loop on persistent errors
-            time.sleep(min(interval, 60))
+            _shutdown_event.wait(min(interval, 60))
 
     log_event(
         "freescout_poll",
@@ -1251,15 +1189,15 @@ def _infer_webhook_outcome(payload: dict) -> WebhookOutcome:
 def freescout_webhook_handler(
     payload: dict, headers: dict
 ) -> Tuple[str, int, Optional[WebhookOutcome]]:
-    """Generic webhook handler usable by Flask or FastAPI routes."""
+    """Generic webhook handler usable by Flask or FastAPI routes.
+
+    Note: Secret validation is expected to be performed by the caller
+    (e.g., the FastAPI route handler in webhook_server.py) before
+    invoking this function.
+    """
 
     reload_settings()
     settings = get_settings()
-    secret = settings.get("FREESCOUT_WEBHOOK_SECRET", "")
-    if secret:
-        provided_secret = headers.get("X-Webhook-Secret") or ""
-        if not hmac.compare_digest(provided_secret, secret):
-            return "invalid signature", 401, None
 
     if not payload:
         return "missing payload", 400, None
