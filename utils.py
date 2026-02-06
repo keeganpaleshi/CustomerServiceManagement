@@ -869,7 +869,7 @@ def _get_openai_cost_tracker() -> OpenAICostTracker:
         return _cached_cost_tracker
 
 
-def _get_freescout_rate_limiter() -> Optional[SimpleRateLimiter]:
+def get_freescout_rate_limiter() -> Optional[SimpleRateLimiter]:
     """Get or create FreeScout rate limiter, recreating if config changed.
 
     Thread-safe: Uses a lock to prevent race conditions during recreation.
@@ -1850,7 +1850,7 @@ def generate_ai_reply(subject, sender, snippet_or_body, email_type):
         return _get_fallback_reply(settings)
 
 
-def sanitize_draft_reply(text: str) -> str:
+def sanitize_draft_reply(text: Optional[str]) -> str:
     if not text:
         return ""
 

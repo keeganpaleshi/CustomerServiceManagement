@@ -34,7 +34,7 @@ from utils import (
     retry_request,
     thread_timestamp,
     validate_conversation_id,
-    _get_freescout_rate_limiter,
+    get_freescout_rate_limiter,
 )
 from storage import TicketStore
 
@@ -546,7 +546,7 @@ def _build_freescout_client(timeout: Optional[int] = None) -> Optional[FreeScout
         return None
     url, key = require_ticket_settings()
     http_timeout = timeout if timeout is not None else settings["HTTP_TIMEOUT"]
-    rate_limiter = _get_freescout_rate_limiter()
+    rate_limiter = get_freescout_rate_limiter()
     return FreeScoutClient(url, key, timeout=http_timeout, rate_limiter=rate_limiter)
 
 
