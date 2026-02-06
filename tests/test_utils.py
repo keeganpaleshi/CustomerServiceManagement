@@ -95,10 +95,10 @@ class TestOpenAICostTracker(unittest.TestCase):
 
     def test_estimate_cost_known_model(self):
         tracker = OpenAICostTracker()
-        # gpt-4o: input=0.005, output=0.015 per 1K tokens
+        # gpt-4o: input=0.0025, output=0.01 per 1M tokens
         cost = tracker.estimate_cost("gpt-4o", 1000, 500)
-        expected = (1000 / 1000 * 0.005) + (500 / 1000 * 0.015)
-        self.assertAlmostEqual(cost, expected, places=6)
+        expected = (1000 / 1_000_000 * 0.0025) + (500 / 1_000_000 * 0.01)
+        self.assertAlmostEqual(cost, expected, places=10)
 
     def test_estimate_cost_unknown_model(self):
         tracker = OpenAICostTracker()
@@ -113,18 +113,19 @@ class TestOpenAICostTracker(unittest.TestCase):
 
     def test_record_usage_exceeds_daily_budget(self):
         tracker = OpenAICostTracker(daily_budget_usd=0.001, monthly_budget_usd=100.0)
-        # First call may succeed
-        tracker.record_usage("gpt-4o", 10000, 10000)
+        # First call with large token count to exceed $0.001 budget
+        # gpt-4o: input=$0.0025/1M, output=$0.01/1M — 10M tokens costs $0.025+$0.1=$0.125
+        tracker.record_usage("gpt-4o", 10_000_000, 10_000_000)
         # Second call should exceed budget
-        result = tracker.record_usage("gpt-4o", 10000, 10000)
+        result = tracker.record_usage("gpt-4o", 10_000_000, 10_000_000)
         self.assertFalse(result)
 
     def test_record_usage_exceeds_monthly_budget(self):
         tracker = OpenAICostTracker(daily_budget_usd=100.0, monthly_budget_usd=0.001)
-        # First call may succeed
-        tracker.record_usage("gpt-4o", 10000, 10000)
+        # First call with large token count to exceed $0.001 budget
+        tracker.record_usage("gpt-4o", 10_000_000, 10_000_000)
         # Second call should exceed budget
-        result = tracker.record_usage("gpt-4o", 10000, 10000)
+        result = tracker.record_usage("gpt-4o", 10_000_000, 10_000_000)
         self.assertFalse(result)
 
     def test_can_make_request_within_budget(self):
@@ -134,10 +135,10 @@ class TestOpenAICostTracker(unittest.TestCase):
 
     def test_can_make_request_exceeds_budget(self):
         tracker = OpenAICostTracker(daily_budget_usd=0.001, monthly_budget_usd=100.0)
-        # Exhaust budget first
-        tracker.record_usage("gpt-4o", 10000, 10000)
+        # Exhaust budget first with large token count
+        tracker.record_usage("gpt-4o", 10_000_000, 10_000_000)
         # Check if new request would exceed
-        result = tracker.can_make_request("gpt-4o", 10000, 10000)
+        result = tracker.can_make_request("gpt-4o", 10_000_000, 10_000_000)
         self.assertFalse(result)
 
     def test_unlimited_budget(self):

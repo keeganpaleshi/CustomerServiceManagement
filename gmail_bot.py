@@ -995,8 +995,7 @@ def fetch_recent_conversations(
 
     params = None
     if since_iso:
-        # Support multiple possible FreeScout filter names to avoid missing updates
-        params = {"updated_since": since_iso, "updated_from": since_iso}
+        params = {"updated_since": since_iso}
 
     try:
         resp = requests.get(
@@ -1117,6 +1116,8 @@ def poll_freescout_updates(
         return
 
     since = datetime.now(timezone.utc) - timedelta(minutes=5)
+    # Track config fingerprint to only rebuild client when settings change
+    _last_client_config: Optional[tuple] = None
     while not is_shutdown_requested():
         try:
             reload_settings()
@@ -1130,7 +1131,18 @@ def poll_freescout_updates(
                 )
                 return
             http_timeout = timeout if timeout is not None else settings["HTTP_TIMEOUT"]
-            client = _build_freescout_client(timeout=http_timeout)
+            # Only rebuild client when relevant settings change
+            current_config = (
+                settings.get("FREESCOUT_URL"),
+                settings.get("FREESCOUT_KEY"),
+                http_timeout,
+                settings.get("TICKET_SYSTEM"),
+            )
+            if current_config != _last_client_config:
+                if client:
+                    client.close()
+                client = _build_freescout_client(timeout=http_timeout)
+                _last_client_config = current_config
             if not client:
                 log_event(
                     "freescout_poll",
@@ -1161,6 +1173,8 @@ def poll_freescout_updates(
             # Sleep before retry to avoid busy-wait loop on persistent errors
             _shutdown_event.wait(min(interval, 60))
 
+    if client:
+        client.close()
     log_event(
         "freescout_poll",
         action="poll_updates",

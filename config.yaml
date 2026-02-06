@@ -7,7 +7,7 @@ openai:
   # System prompt used when drafting replies. Modify to change tone or style.
   draft_system_message: |
     Context: This is a business email for Cruising Solutions. You are replying
-    to customers who have concerns or questions some about orders they've
+    to customers who have concerns or questions — some about orders they've
     placed, others about products they're considering purchasing. You should
     reply in the name of David, lead Customer Service Member, with the phone
     number 843-222-3660.
