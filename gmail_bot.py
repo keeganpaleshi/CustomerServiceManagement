@@ -844,12 +844,11 @@ def _post_write_draft_reply(
     stored_thread_id = existing.get("freescout_thread_id")
 
     # Existing draft record but no thread ID or thread not found: create replacement
-    if not stored_thread_id or not _find_thread_by_id(threads, stored_thread_id):
+    thread = _find_thread_by_id(threads, stored_thread_id) if stored_thread_id else None
+    if not thread:
         return _create_and_record_draft(
             client, store, conversation_id, reply_text, reply_hash, generated_at,
         )
-
-    thread = _find_thread_by_id(threads, stored_thread_id)
 
     if not _thread_is_draft(thread) or not existing.get("last_hash"):
         _post_draft_skip_note(client, conversation_id, stored_thread_id)
