@@ -17,9 +17,9 @@ class TicketStore:
         self.sqlite_path = sqlite_path
         try:
             Path(self.sqlite_path).parent.mkdir(parents=True, exist_ok=True)
-            self._conn = sqlite3.connect(self.sqlite_path, timeout=timeout)
+            self._conn = sqlite3.connect(self.sqlite_path, timeout=timeout, isolation_level=None)
             self._conn.execute("PRAGMA journal_mode=WAL")
-            self._conn.execute("PRAGMA busy_timeout = 5000")
+            self._conn.execute("PRAGMA busy_timeout = 10000")
             self._conn.execute("PRAGMA foreign_keys = ON")
             self._init_schema()
         except sqlite3.Error as e:
@@ -780,7 +780,7 @@ class TicketStore:
         """Atomically check and store a webhook nonce for replay protection."""
         now = time.time()
         cutoff_time = now - max(ttl_seconds, 0)
-        hard_limit = max(cache_size - 1, 0)
+        hard_limit = max(cache_size, 1)
 
         self._conn.execute("BEGIN IMMEDIATE")
         try:
@@ -796,24 +796,21 @@ class TicketStore:
                 self._conn.rollback()
                 return False
 
-            if hard_limit == 0:
-                self._conn.execute("DELETE FROM webhook_nonces")
-            else:
-                cur = self._conn.execute("SELECT COUNT(*) FROM webhook_nonces")
-                count = int(cur.fetchone()[0])
-                if count >= hard_limit:
-                    to_remove = count - (hard_limit - 1)
-                    self._conn.execute(
-                        """
-                        DELETE FROM webhook_nonces
-                        WHERE nonce IN (
-                            SELECT nonce FROM webhook_nonces
-                            ORDER BY created_at ASC
-                            LIMIT ?
-                        )
-                        """,
-                        (to_remove,),
+            cur = self._conn.execute("SELECT COUNT(*) FROM webhook_nonces")
+            count = int(cur.fetchone()[0])
+            if count >= hard_limit:
+                to_remove = count - (hard_limit - 1)
+                self._conn.execute(
+                    """
+                    DELETE FROM webhook_nonces
+                    WHERE nonce IN (
+                        SELECT nonce FROM webhook_nonces
+                        ORDER BY created_at ASC
+                        LIMIT ?
                     )
+                    """,
+                    (to_remove,),
+                )
 
             self._conn.execute(
                 "INSERT INTO webhook_nonces (nonce, created_at) VALUES (?, ?)",

@@ -165,20 +165,20 @@ def _sanitize_log_value(key: str, value: Any, depth: int = 0) -> Any:
         Sanitized value with sensitive data redacted and control chars escaped
     """
     if depth > 5:
-        return value
+        return "[DEPTH_LIMIT]" if isinstance(value, (dict, list)) else _escape_control_chars(str(value)) if isinstance(value, str) else value
 
     key_lower = key.lower()
 
     # Check if the key itself is sensitive
     if key_lower in _SENSITIVE_LOG_FIELDS:
-        if isinstance(value, str) and value:
+        if value is not None and value != "" and value != 0:
             return "[REDACTED]"
         return value
 
     # Check if key contains sensitive patterns
     for sensitive in _SENSITIVE_LOG_FIELDS:
         if sensitive in key_lower:
-            if isinstance(value, str) and value:
+            if value is not None and value != "" and value != 0:
                 return "[REDACTED]"
             return value
 
@@ -934,8 +934,11 @@ class FreeScoutClient:
     @staticmethod
     def _normalize_id(value: object) -> str:
         if value is None:
-            return ""
-        return str(value)
+            raise ValueError("ID must not be None")
+        result = str(value).strip()
+        if not result:
+            raise ValueError("ID must not be empty")
+        return result
 
     @staticmethod
     def _maybe_int(value: Optional[str]) -> Optional[int]:
@@ -1777,11 +1780,12 @@ def generate_ai_reply(subject, sender, snippet_or_body, email_type):
         safe_subject = sanitize_ai_input(subject)
         safe_sender = sanitize_ai_input(sender)
         safe_body = sanitize_ai_input(snippet_or_body)
+        safe_email_type = sanitize_ai_input(email_type)
 
         # Use clear delimiters to separate user content from instructions
         # This helps the model distinguish between instructions and user input
         instructions = (
-            f"[Email type: {email_type}]\n\n"
+            f"[Email type: {safe_email_type}]\n\n"
             "You are an AI email assistant. The user received an email that needs a reply.\n\n"
             "---BEGIN EMAIL METADATA---\n"
             f"Subject: {safe_subject}\n"

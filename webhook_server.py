@@ -76,7 +76,7 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
 _DEFAULT_LOG_DIR = Path(__file__).resolve().parent / "logs" / "webhooks"
 SAFE_FILENAME_RE = re.compile(r"[^A-Za-z0-9_.-]+")
 SAFE_FILENAME_MAX_LENGTH = 128
-COUNTER_KEYS = ("processed", "created", "appended", "drafted", "filtered", "failed")
+COUNTER_KEYS = ("created", "appended", "filtered", "failed")
 # Fields that may contain sensitive data and should be redacted in logs
 SENSITIVE_FIELDS = {"email", "customer_email", "customerEmail", "body", "text", "content", "password", "secret", "token", "api_key"}
 # Pre-computed lowercase version for efficient case-insensitive comparison
@@ -465,6 +465,13 @@ async def freescout(
     # Read body early so HMAC can be computed over it
     raw_body = await request.body()
 
+    if not secret:
+        log_event(
+            "webhook_ingest",
+            action="authenticate",
+            outcome="skipped",
+            reason="no webhook secret configured - authentication disabled",
+        )
     if secret:
         authenticated = False
         # Prefer HMAC-SHA256 signature verification (X-Webhook-Signature header)
@@ -505,12 +512,16 @@ async def freescout(
     try:
         body = json.loads(raw_body)
     except json.JSONDecodeError:
-        # Decode raw body but limit length to prevent logging excessive data
-        # Use smaller error log size for non-JSON payloads (likely malformed)
-        decoded = raw_body.decode("utf-8", errors="replace")
-        if len(decoded) > MAX_ERROR_LOG_SIZE:
-            decoded = decoded[:MAX_ERROR_LOG_SIZE] + "...[truncated]"
-        body = {"raw": "[NON-JSON PAYLOAD - content not logged for security]", "raw_length": len(raw_body)}
+        log_event(
+            "webhook_ingest",
+            action="parse_payload",
+            outcome="failed",
+            reason="non-JSON payload",
+            raw_length=len(raw_body),
+        )
+        counter_store = _get_counter_store()
+        counter_store.increment_webhook_counter("failed")
+        raise HTTPException(status_code=400, detail="Invalid JSON payload")
 
     logfile = log_webhook_payload(body)
 
