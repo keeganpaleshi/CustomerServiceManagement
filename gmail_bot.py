@@ -1205,20 +1205,33 @@ def poll_freescout_updates(
     )
 
 
-def _infer_webhook_outcome(payload: dict) -> WebhookOutcome:
+def _infer_webhook_outcome(payload: dict, headers: Optional[Dict[str, str]] = None) -> WebhookOutcome:
+    # FreeScout sends the event type in the X-FreeScout-Event header (e.g. "convo.created")
+    # Also check payload fields for compatibility with other webhook sources
+    headers = headers or {}
     event = str(
-        payload.get("event") or payload.get("event_type") or payload.get("type") or ""
+        headers.get("X-FreeScout-Event", "")
+        or payload.get("event") or payload.get("event_type") or payload.get("type") or ""
     ).lower()
     thread_type = str(payload.get("thread_type") or payload.get("thread", "")).lower()
     is_draft = bool(payload.get("draft")) or "draft" in event or "draft" in thread_type
     if "filter" in event or payload.get("filtered") is True:
         return WebhookOutcome(action="filtered", drafted=is_draft)
-    if "conversation" in event and "created" in event:
+    # FreeScout uses "convo.created"; also support "conversation.created" for other sources
+    if ("convo.created" == event) or ("conversation" in event and "created" in event):
         return WebhookOutcome(action="created", drafted=is_draft)
+    # FreeScout: "convo.customer.reply.created", "convo.agent.reply.created", "convo.note.created"
+    if "reply" in event and "created" in event:
+        return WebhookOutcome(action="appended", drafted=is_draft)
+    if "note" in event and "created" in event:
+        return WebhookOutcome(action="appended", drafted=is_draft)
     if "thread" in event and "created" in event:
         return WebhookOutcome(action="appended", drafted=is_draft)
-    if ("message" in event or "reply" in event) and "created" in event:
+    if ("message" in event) and "created" in event:
         return WebhookOutcome(action="appended", drafted=is_draft)
+    # FreeScout status/assignment events
+    if "status" in event or "assigned" in event or "moved" in event:
+        return WebhookOutcome(action="processed", drafted=is_draft)
     return WebhookOutcome(action="processed", drafted=is_draft)
 
 
@@ -1249,7 +1262,7 @@ def freescout_webhook_handler(
 
     try:
         process_freescout_conversation(client, {"id": conv_id}, settings)
-        return "ok", 200, _infer_webhook_outcome(payload)
+        return "ok", 200, _infer_webhook_outcome(payload, headers)
     finally:
         client.close()
 

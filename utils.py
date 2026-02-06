@@ -1039,31 +1039,86 @@ class FreeScoutClient:
                     priority=priority,
                 )
         if assignee is not None:
-            payload["user_id"] = self._maybe_int(assignee) or assignee
+            # FreeScout API uses "assignTo" for conversation assignment
+            payload["assignTo"] = self._maybe_int(assignee) or assignee
+
+        result: Dict[str, Any] = {}
+
+        # Update core conversation fields (priority, assignee) via main PUT endpoint
+        if payload:
+            def _update_core() -> Dict[str, Any]:
+                resp = self._session.put(
+                    f"{self.base_url}/api/conversations/{conversation_id}",
+                    json=payload,
+                    timeout=self.timeout,
+                )
+                resp.raise_for_status()
+                return resp.json()
+
+            result = retry_request(
+                _update_core,
+                action_name="freescout.update_conversation",
+                exceptions=(requests.RequestException,),
+                log_context={"conversation_id": conversation_id},
+            )
+
+        # Tags must use the dedicated PUT /tags endpoint (full replacement).
+        # Merge with existing tags so we don't remove tags set by agents.
         if tags is not None:
-            payload["tags"] = tags
+            self._check_rate_limit()
+            merged_tags = self._merge_tags(conversation_id, tags)
+
+            def _update_tags() -> Dict[str, Any]:
+                resp = self._session.put(
+                    f"{self.base_url}/api/conversations/{conversation_id}/tags",
+                    json={"tags": merged_tags},
+                    timeout=self.timeout,
+                )
+                resp.raise_for_status()
+                return resp.json()
+
+            retry_request(
+                _update_tags,
+                action_name="freescout.update_tags",
+                exceptions=(requests.RequestException,),
+                log_context={"conversation_id": conversation_id},
+            )
+
+        # Custom fields use a dedicated PUT endpoint
         serialized = serialize_custom_fields(custom_fields or {})
         if serialized:
-            payload["customFields"] = serialized
+            self._check_rate_limit()
 
-        if not payload:
-            return {}
+            def _update_custom_fields() -> Dict[str, Any]:
+                resp = self._session.put(
+                    f"{self.base_url}/api/conversations/{conversation_id}/custom_fields",
+                    json={"customFields": serialized},
+                    timeout=self.timeout,
+                )
+                resp.raise_for_status()
+                return resp.json()
 
-        def _request() -> Dict[str, Any]:
-            resp = self._session.put(
-                f"{self.base_url}/api/conversations/{conversation_id}",
-                json=payload,
-                timeout=self.timeout,
+            retry_request(
+                _update_custom_fields,
+                action_name="freescout.update_custom_fields",
+                exceptions=(requests.RequestException,),
+                log_context={"conversation_id": conversation_id},
             )
-            resp.raise_for_status()
-            return resp.json()
 
-        return retry_request(
-            _request,
-            action_name="freescout.update_conversation",
-            exceptions=(requests.RequestException,),
-            log_context={"conversation_id": conversation_id},
-        )
+        return result
+
+    def _merge_tags(self, conversation_id: str, new_tags: List[str]) -> List[str]:
+        """Fetch existing tags and merge with new ones to avoid clobbering agent-set tags."""
+        try:
+            convo = self.get_conversation(conversation_id)
+            existing_tags = convo.get("tags", [])
+            if isinstance(existing_tags, list):
+                # Merge: add new tags while preserving existing ones
+                merged = list(set(existing_tags) | set(new_tags))
+                return merged
+        except Exception:
+            pass
+        return new_tags
 
     def add_customer_thread(
         self, conversation_id: str, text: str, imported: bool = True
@@ -1127,8 +1182,9 @@ class FreeScoutClient:
             "type": "email",
             "mailboxId": self._maybe_int(mailbox_id) or mailbox_id,
             "subject": subject or "(no subject)",
-            "customerEmail": sender,
-            "customerName": sender,
+            "customer": {
+                "email": sender,
+            },
             "imported": True,
             "threads": [thread_payload],
         }
@@ -1161,9 +1217,10 @@ class FreeScoutClient:
     ) -> Dict[str, Any]:
         self._check_rate_limit()
         conversation_id = self._normalize_id(conversation_id)
+        # FreeScout API uses "user" (integer) for thread attribution, not "user_id"
         payload: Dict[str, Any] = {"type": "note", "text": text}
         if user_id:
-            payload["user_id"] = self._maybe_int(user_id) or user_id
+            payload["user"] = self._maybe_int(user_id) or user_id
 
         def _request() -> Dict[str, Any]:
             resp = self._session.post(
@@ -1211,11 +1268,13 @@ class FreeScoutClient:
     ) -> Dict[str, Any]:
         self._check_rate_limit()
         conversation_id = self._normalize_id(conversation_id)
-        payload: Dict[str, Any] = {"type": "reply", "text": text}
+        # FreeScout API uses type "message" for agent replies
+        # and "state": "draft" to create a draft (not "draft": true)
+        payload: Dict[str, Any] = {"type": "message", "text": text}
         if user_id:
-            payload["user_id"] = self._maybe_int(user_id) or user_id
+            payload["user"] = self._maybe_int(user_id) or user_id
         if draft:
-            payload["draft"] = True
+            payload["state"] = "draft"
 
         def _request() -> Dict[str, Any]:
             resp = self._session.post(
@@ -1243,7 +1302,7 @@ class FreeScoutClient:
         self._check_rate_limit()
         conversation_id = self._normalize_id(conversation_id)
         thread_id = self._normalize_id(thread_id)
-        payload: Dict[str, Any] = {"text": text, "draft": draft}
+        payload: Dict[str, Any] = {"text": text, "state": "draft" if draft else "published"}
 
         def _request() -> Dict[str, Any]:
             resp = self._session.put(

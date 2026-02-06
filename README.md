@@ -205,21 +205,21 @@ Configuration lives under `ticket.followup` in `config.yaml`:
 
 ### Webhook handler
 
-Add this minimal FastAPI or Flask endpoint to receive FreeScout webhooks and
-let `gmail_bot` do the rest:
-
 The production webhook server is implemented in `webhook_server.py` with full
-HMAC signature verification, nonce-based replay protection, timestamp
-validation, payload size limits, and security headers. Deploy it with:
+HMAC signature verification (`X-FreeScout-Signature` with HMAC-SHA1), nonce-based
+replay protection, timestamp validation, payload size limits, and security
+headers. Deploy it with:
 
 ```bash
 uvicorn webhook_server:app --host 0.0.0.0 --port 8000
 ```
 
 Deploy the webhook with HTTPS and set the URL inside FreeScout's webhook
-settings. The handler validates `X-Webhook-Secret` (when configured) and then
-fetches the conversation from FreeScout before applying the same classification
-and update flow used by the poller.
+settings (Manage > API & Webhooks). Configure the same secret in both FreeScout
+and `ticket.webhook_secret` in `config.yaml`. The handler validates the
+`X-FreeScout-Signature` HMAC header (or falls back to `X-Webhook-Secret` for
+simple setups), then fetches the conversation from FreeScout before applying the
+same classification and update flow used by the poller.
 
 Webhook ingestion takes precedence over polling, so disable
 `ticket.webhook_enabled` if you need to run the poller instead.

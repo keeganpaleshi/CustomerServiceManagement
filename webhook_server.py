@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import hashlib
 import hmac
 import json
@@ -431,6 +432,8 @@ async def freescout(
     request: Request,
     x_webhook_secret: Optional[str] = Header(None),
     x_webhook_signature: Optional[str] = Header(None),
+    x_freescout_signature: Optional[str] = Header(None),
+    x_freescout_event: Optional[str] = Header(None),
 ):
     # Check content-length header first to reject oversized payloads quickly
     content_length = request.headers.get("content-length")
@@ -474,15 +477,22 @@ async def freescout(
         )
     if secret:
         authenticated = False
-        # Prefer HMAC-SHA256 signature verification (X-Webhook-Signature header)
-        # which proves both possession of the secret AND payload integrity
-        if x_webhook_signature:
+        # Prefer FreeScout's native signature header (X-FreeScout-Signature)
+        # which uses HMAC-SHA1 with base64 encoding per FreeScout API docs
+        if x_freescout_signature:
+            expected_sig = base64.b64encode(
+                hmac.new(secret.encode("utf-8"), raw_body, hashlib.sha1).digest()
+            ).decode("utf-8")
+            authenticated = hmac.compare_digest(x_freescout_signature, expected_sig)
+        # Also support HMAC-SHA256 hex signature via generic X-Webhook-Signature
+        # header for proxies or custom webhook sources
+        if not authenticated and x_webhook_signature:
             expected_sig = hmac.new(
                 secret.encode("utf-8"), raw_body, hashlib.sha256
             ).hexdigest()
             authenticated = hmac.compare_digest(x_webhook_signature, expected_sig)
-        # Fall back to shared secret header (X-Webhook-Secret) for backward
-        # compatibility with FreeScout's default webhook implementation
+        # Fall back to shared secret comparison (X-Webhook-Secret) for simple
+        # setups without HMAC
         if not authenticated and x_webhook_secret:
             authenticated = hmac.compare_digest(x_webhook_secret, secret)
 
@@ -529,7 +539,8 @@ async def freescout(
     conversation_id = None
     if isinstance(body, dict):
         # Validate timestamp for replay protection
-        timestamp = body.get("timestamp") or body.get("created_at") or body.get("updated_at")
+        # FreeScout uses camelCase (createdAt/updatedAt) in webhook payloads
+        timestamp = body.get("timestamp") or body.get("createdAt") or body.get("updatedAt") or body.get("created_at") or body.get("updated_at")
         is_valid_ts, ts_error = _validate_webhook_timestamp(timestamp)
         if not is_valid_ts:
             log_event(
@@ -592,7 +603,10 @@ async def freescout(
         )
         raise HTTPException(status_code=400, detail=message)
 
-    message, status, outcome = freescout_webhook_handler(body, {})
+    webhook_headers = {}
+    if x_freescout_event:
+        webhook_headers["X-FreeScout-Event"] = x_freescout_event
+    message, status, outcome = freescout_webhook_handler(body, webhook_headers)
     if status >= 400:
         counter_store.increment_webhook_counter("failed")
         log_event(
