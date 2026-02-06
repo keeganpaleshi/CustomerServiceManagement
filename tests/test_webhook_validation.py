@@ -231,11 +231,15 @@ class TestSanitizePayload(unittest.TestCase):
 
         result = webhook_server._sanitize_payload(payload, max_depth=5)
         current = result
+        # max_depth=5 allows depths 0-4, truncates at depth 5
+        # After 4 iterations we reach the dict at depth 4
         for _ in range(4):
             self.assertIsInstance(current, dict)
             current = current["level"]
 
-        self.assertEqual(current, "[TRUNCATED]")
+        # At depth 4, the nested "level" value should be truncated
+        self.assertIsInstance(current, dict)
+        self.assertEqual(current["level"], "[TRUNCATED]")
 
 
 class TestWebhookLogging(unittest.TestCase):
