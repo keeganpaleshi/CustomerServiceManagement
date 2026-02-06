@@ -382,12 +382,12 @@ def main() -> None:
     args = parse_args(settings)
 
     # Validate hours argument
-    if args.hours < 0:
+    if args.hours <= 0:
         log_event(
             "freescout_followup",
             action="start",
             outcome="failed",
-            reason=f"hours must be non-negative, got {args.hours}",
+            reason=f"hours must be positive, got {args.hours}",
         )
         return
     if args.limit < 1:
@@ -411,6 +411,14 @@ def main() -> None:
     url, key = require_ticket_settings()
     rate_limiter = _get_freescout_rate_limiter()
     client = FreeScoutClient(url, key, timeout=settings.get("HTTP_TIMEOUT", 15), rate_limiter=rate_limiter)
+    try:
+        _run_followups(client, settings, args)
+    finally:
+        client.close()
+
+
+def _run_followups(client: FreeScoutClient, settings: dict, args) -> None:
+    """Core followup logic, separated to ensure client cleanup."""
     followup_cfg = settings.get("FREESCOUT_FOLLOWUP", {})
     params = followup_cfg.get("list_params", {})
     p0_tags = followup_cfg.get("p0_tags", ["p0"])
@@ -482,7 +490,6 @@ def main() -> None:
         if not snippet:
             snippet = details.get("last_text", "") or ""
 
-        draft = generate_ai_reply(subject, sender, snippet, "customer")
         if args.dry_run:
             log_event(
                 "freescout_followup",
@@ -493,6 +500,7 @@ def main() -> None:
             )
             continue
 
+        draft = generate_ai_reply(subject, sender, snippet, "customer")
         try:
             client.create_agent_draft_reply(conv_id, draft)
         except requests.RequestException as exc:

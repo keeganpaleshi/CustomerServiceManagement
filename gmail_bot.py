@@ -185,8 +185,9 @@ def _finalize_ticket(
     thread_id: str,
 ) -> bool:
     """Run post-ticket processing: classify, label, and draft a reply. Returns whether a draft was created."""
+    email_type = "other"
     try:
-        process_conversation(
+        result = process_conversation(
             conv_id,
             {
                 "subject": content.subject,
@@ -196,6 +197,9 @@ def _finalize_ticket(
             settings,
             freescout,
         )
+        if result and isinstance(result, dict):
+            cls = result.get("classification") or {}
+            email_type = cls.get("type", "other")
     except Exception as exc:
         log_event(
             "gmail_ingest",
@@ -211,6 +215,7 @@ def _finalize_ticket(
     return _maybe_write_draft_reply(
         freescout, store, conv_id,
         content.subject, content.sender, content.body_text, settings,
+        email_type=email_type,
     )
 
 
@@ -296,8 +301,18 @@ def _create_conversation_ticket(
         )
         return ProcessResult(status="failed_retryable", reason=reason)
 
+    if not ticket:
+        reason = "ticket creation failed"
+        store.mark_failed(message_id, thread_id, reason)
+        log_event(
+            "gmail_ingest", action="create_ticket", outcome="failed",
+            reason=reason, message_id=message_id, thread_id=thread_id,
+        )
+        return ProcessResult(
+            status="failed_retryable", reason=reason,
+        )
     conv_id = _extract_conversation_id(ticket)
-    if not ticket or not conv_id:
+    if not conv_id:
         reason = "ticket creation failed"
         store.mark_failed(message_id, thread_id, reason, conv_id)
         log_event(
@@ -792,6 +807,7 @@ def _post_write_draft_reply(
     sender: str,
     body_text: str,
     max_drafts: Optional[int] = None,
+    email_type: str = "other",
 ) -> bool:
     conversation_id = normalize_id(conversation_id)
     if not client or not conversation_id:
@@ -809,10 +825,61 @@ def _post_write_draft_reply(
         )
         return False
 
-    reply_text = generate_ai_reply(subject, sender, body_text, "customer")
+    existing = store.get_bot_draft(conversation_id)
+
+    # For existing drafts, check if the draft was modified externally before
+    # generating an AI reply. This avoids wasting API budget on replies that
+    # cannot be used.
+    if existing:
+        try:
+            details = client.get_conversation(conversation_id)
+        except requests.RequestException as exc:
+            log_event(
+                "freescout_draft",
+                action="fetch_conversation",
+                outcome="failed",
+                conversation_id=conversation_id,
+                reason=str(exc),
+            )
+            return False
+
+        threads = _extract_conversation_threads(details)
+        stored_thread_id = existing.get("freescout_thread_id")
+
+        thread = _find_thread_by_id(threads, stored_thread_id) if stored_thread_id else None
+
+        # If thread exists, check if it was modified externally before generating AI reply
+        if thread:
+            if not _thread_is_draft(thread) or not existing.get("last_hash"):
+                _post_draft_skip_note(client, conversation_id, stored_thread_id)
+                log_event(
+                    "freescout_draft",
+                    action="update_draft",
+                    outcome="skipped",
+                    conversation_id=conversation_id,
+                    thread_id=stored_thread_id,
+                    reason="draft updated outside bot",
+                )
+                return False
+
+            current_text = _thread_text(thread)
+            current_hash = _hash_draft_text(current_text)
+            if current_hash != existing.get("last_hash"):
+                _post_draft_skip_note(client, conversation_id, stored_thread_id)
+                log_event(
+                    "freescout_draft",
+                    action="update_draft",
+                    outcome="skipped",
+                    conversation_id=conversation_id,
+                    thread_id=stored_thread_id,
+                    reason="draft edited",
+                )
+                return False
+
+    # Generate AI reply only after confirming we can use it
+    reply_text = generate_ai_reply(subject, sender, body_text, email_type)
     reply_hash = _hash_draft_text(reply_text)
     generated_at = datetime.now(timezone.utc).isoformat()
-    existing = store.get_bot_draft(conversation_id)
 
     # No existing draft: create new with atomic limit check
     if not existing:
@@ -821,53 +888,15 @@ def _post_write_draft_reply(
             generated_at, max_drafts=max_drafts, use_atomic_limit=True,
         )
 
-    try:
-        details = client.get_conversation(conversation_id)
-    except requests.RequestException as exc:
-        log_event(
-            "freescout_draft",
-            action="fetch_conversation",
-            outcome="failed",
-            conversation_id=conversation_id,
-            reason=str(exc),
-        )
-        return False
-
-    threads = _extract_conversation_threads(details)
+    # Re-use the stored_thread_id and thread from the validation above
     stored_thread_id = existing.get("freescout_thread_id")
+    thread = _find_thread_by_id(threads, stored_thread_id) if stored_thread_id else None
 
     # Existing draft record but no thread ID or thread not found: create replacement
-    thread = _find_thread_by_id(threads, stored_thread_id) if stored_thread_id else None
     if not thread:
         return _create_and_record_draft(
             client, store, conversation_id, reply_text, reply_hash, generated_at,
         )
-
-    if not _thread_is_draft(thread) or not existing.get("last_hash"):
-        _post_draft_skip_note(client, conversation_id, stored_thread_id)
-        log_event(
-            "freescout_draft",
-            action="update_draft",
-            outcome="skipped",
-            conversation_id=conversation_id,
-            thread_id=stored_thread_id,
-            reason="draft updated outside bot",
-        )
-        return False
-
-    current_text = _thread_text(thread)
-    current_hash = _hash_draft_text(current_text)
-    if current_hash != existing.get("last_hash"):
-        _post_draft_skip_note(client, conversation_id, stored_thread_id)
-        log_event(
-            "freescout_draft",
-            action="update_draft",
-            outcome="skipped",
-            conversation_id=conversation_id,
-            thread_id=stored_thread_id,
-            reason="draft edited",
-        )
-        return False
 
     try:
         client.update_thread(conversation_id, stored_thread_id, reply_text, draft=True)
@@ -901,6 +930,7 @@ def _maybe_write_draft_reply(
     sender: str,
     body_text: str,
     settings: dict,
+    email_type: str = "other",
 ) -> bool:
     # Draft limit is now enforced atomically in _post_write_draft_reply
     # via atomic_upsert_bot_draft_if_under_limit
@@ -913,6 +943,7 @@ def _maybe_write_draft_reply(
         sender,
         body_text,
         max_drafts=max_drafts,
+        email_type=email_type,
     )
 
 
