@@ -3,10 +3,8 @@ import hashlib
 import json
 import logging
 import os
-import re
 import signal
 import threading
-import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from email.utils import parseaddr
@@ -30,7 +28,6 @@ from utils import (
     generate_ai_reply,
     log_event,
     normalize_id,
-    parse_datetime,
     require_ticket_settings,
     importance_to_bucket,
     reload_settings,
@@ -109,7 +106,6 @@ TICKET_LABEL_NAME = "Ticketed"
 DEFAULT_PRIORITY_HIGH_THRESHOLD = 8  # Default importance score that marks a message as high priority
 
 
-
 @dataclass(frozen=True)
 class ProcessResult:
     status: str
@@ -118,15 +114,15 @@ class ProcessResult:
     drafted: bool = False
 
 
-ProcessResult.SKIPPED_ALREADY_SUCCESS = ProcessResult(
+RESULT_SKIPPED_ALREADY_SUCCESS = ProcessResult(
     status="skipped_already_success",
     reason="already processed",
 )
-ProcessResult.FILTERED = ProcessResult(
+RESULT_FILTERED = ProcessResult(
     status="filtered",
     reason="already filtered",
 )
-ProcessResult.SKIPPED_ALREADY_CLAIMED = ProcessResult(
+RESULT_SKIPPED_ALREADY_CLAIMED = ProcessResult(
     status="skipped_already_claimed",
     reason="already claimed by another worker",
 )
@@ -355,20 +351,20 @@ def process_gmail_message(
                 outcome="already_processed",
                 message_id=message_id, thread_id=thread_id,
             )
-            return ProcessResult.SKIPPED_ALREADY_SUCCESS
+            return RESULT_SKIPPED_ALREADY_SUCCESS
         if store.processed_filtered(message_id):
             log_event(
                 "gmail_ingest", action="skip_message",
                 outcome="already_filtered",
                 message_id=message_id, thread_id=thread_id,
             )
-            return ProcessResult.FILTERED
+            return RESULT_FILTERED
         log_event(
             "gmail_ingest", action="skip_message",
             outcome="already_claimed",
             message_id=message_id, thread_id=thread_id,
         )
-        return ProcessResult.SKIPPED_ALREADY_CLAIMED
+        return RESULT_SKIPPED_ALREADY_CLAIMED
 
     try:
         full_message = message
@@ -463,6 +459,9 @@ def process_gmail_message(
         if os.getenv("DEBUG", "").lower() in ("1", "true", "yes"):
             raise
         return ProcessResult(status="failed_permanent", reason=reason)
+    except (MemoryError, RecursionError):
+        # Unrecoverable runtime errors — let them propagate
+        raise
     except Exception as exc:
         reason = f"unexpected error: {type(exc).__name__}: {exc}"
         store.mark_failed(message_id, thread_id, str(exc))
@@ -471,37 +470,28 @@ def process_gmail_message(
             reason=reason, error_type=type(exc).__name__,
             message_id=message_id, thread_id=thread_id,
         )
-        return ProcessResult(status="failed_permanent", reason=reason)
+        return ProcessResult(status="failed_retryable", reason=reason)
 
 
-def poll_ticket_updates(limit: int = 10, timeout: Optional[int] = None):
-    """Fetch recent ticket updates from FreeScout with retry logic for transient failures."""
+def poll_ticket_updates(
+    limit: int = 10,
+    timeout: Optional[int] = None,
+    client: Optional[FreeScoutClient] = None,
+):
+    """Fetch recent ticket updates from FreeScout using FreeScoutClient."""
     settings = get_settings()
     if settings["TICKET_SYSTEM"] != "freescout":
         return []
-    http_timeout = timeout if timeout is not None else settings["HTTP_TIMEOUT"]
-    url = f"{settings['FREESCOUT_URL'].rstrip('/')}/api/conversations"
 
-    def _fetch():
-        resp = requests.get(
-            url,
-            headers={
-                "Accept": "application/json",
-                "X-FreeScout-API-Key": settings["FREESCOUT_KEY"],
-            },
-            params={"limit": limit},
-            timeout=http_timeout,
-        )
-        resp.raise_for_status()
-        return resp.json().get("data", [])
+    owns_client = False
+    if client is None:
+        client = _build_freescout_client(timeout=timeout)
+        owns_client = True
+    if not client:
+        return []
 
     try:
-        return retry_request(
-            _fetch,
-            action_name="freescout.poll_ticket_updates",
-            exceptions=(requests.RequestException,),
-            log_context={"url": url, "limit": limit},
-        )
+        return client.list_conversations({"limit": limit})
     except requests.RequestException as e:
         log_event(
             "freescout_poll",
@@ -510,6 +500,9 @@ def poll_ticket_updates(limit: int = 10, timeout: Optional[int] = None):
             reason=str(e),
         )
         return []
+    finally:
+        if owns_client:
+            client.close()
 
 
 def _apply_ticket_label(gmail, thread_id: str, ticket_label_id: str) -> None:
@@ -986,35 +979,30 @@ def _post_draft_skip_note(
 
 
 def fetch_recent_conversations(
-    since_iso: Optional[str] = None, timeout: Optional[int] = None
+    since_iso: Optional[str] = None,
+    timeout: Optional[int] = None,
+    client: Optional[FreeScoutClient] = None,
 ):
-    """Return list of recent FreeScout conversations since a given ISO time."""
-    settings = get_settings()
-    http_timeout = timeout if timeout is not None else settings["HTTP_TIMEOUT"]
-    url = f"{settings['FREESCOUT_URL'].rstrip('/')}/api/conversations"
+    """Return list of recent FreeScout conversations since a given ISO time.
 
-    params = None
+    Args:
+        since_iso: ISO timestamp to filter conversations updated after this time
+        timeout: HTTP timeout override
+        client: Optional FreeScoutClient to reuse (avoids creating a new session)
+    """
+    params: Dict[str, str] = {}
     if since_iso:
-        params = {"updated_since": since_iso}
+        params["updated_since"] = since_iso
+
+    owns_client = False
+    if client is None:
+        client = _build_freescout_client(timeout=timeout)
+        owns_client = True
+    if not client:
+        return []
 
     try:
-        resp = requests.get(
-            url,
-            headers={
-                "Accept": "application/json",
-                "X-FreeScout-API-Key": settings["FREESCOUT_KEY"],
-            },
-            params=params,
-            timeout=http_timeout,
-        )
-        resp.raise_for_status()
-
-        data = resp.json() or []
-        if isinstance(data, dict):
-            return data.get("data") or data.get("conversations") or []
-        if isinstance(data, list):
-            return data
-        return []
+        return client.list_conversations(params)
     except requests.RequestException as e:
         log_event(
             "freescout_poll",
@@ -1023,6 +1011,9 @@ def fetch_recent_conversations(
             reason=str(e),
         )
         return []
+    finally:
+        if owns_client:
+            client.close()
 
 
 def send_update_email(service, summary: str, label_id: Optional[str] = None):
@@ -1155,7 +1146,7 @@ def poll_freescout_updates(
             # Record poll start time BEFORE fetching to avoid missing updates
             poll_start = datetime.now(timezone.utc)
             convs = fetch_recent_conversations(
-                since.isoformat(), timeout=http_timeout
+                since.isoformat(), timeout=http_timeout, client=client
             )
             for conv in convs:
                 if is_shutdown_requested():
@@ -1225,8 +1216,11 @@ def freescout_webhook_handler(
     if not client:
         return "freescout disabled", 503, None
 
-    process_freescout_conversation(client, {"id": conv_id}, settings)
-    return "ok", 200, _infer_webhook_outcome(payload)
+    try:
+        process_freescout_conversation(client, {"id": conv_id}, settings)
+        return "ok", 200, _infer_webhook_outcome(payload)
+    finally:
+        client.close()
 
 
 def main():
@@ -1287,52 +1281,56 @@ def main():
                 )
         client = _build_freescout_client(timeout=args.timeout)
 
-        processed = 0
-        created_conversations = 0
-        appended_threads = 0
-        drafted = 0
-        skipped = 0
-        filtered_terminal = 0
-        failed = 0
+        try:
+            processed = 0
+            created_conversations = 0
+            appended_threads = 0
+            drafted = 0
+            skipped = 0
+            filtered_terminal = 0
+            failed = 0
 
-        for ref in fetch_all_unread_messages(
-            svc, query=args.gmail_query, limit=settings["MAX_MESSAGES_PER_RUN"]
-        ):
-            processed += 1
-            result = process_gmail_message(ref, ticket_store, client, svc, ticket_label_id)
-            if result.status in {"skipped_already_success", "skipped_already_claimed"}:
-                skipped += 1
-            elif result.status == "filtered":
-                filtered_terminal += 1
-            elif result.status == "freescout_appended":
-                appended_threads += 1
-            elif result.status == "freescout_created":
-                created_conversations += 1
-            elif result.status == "failed_retryable":
-                failed += 1
-            elif result.status == "failed_permanent":
-                failed += 1
-            if result.drafted:
-                drafted += 1
+            for ref in fetch_all_unread_messages(
+                svc, query=args.gmail_query, limit=settings["MAX_MESSAGES_PER_RUN"]
+            ):
+                processed += 1
+                result = process_gmail_message(ref, ticket_store, client, svc, ticket_label_id)
+                if result.status in {"skipped_already_success", "skipped_already_claimed"}:
+                    skipped += 1
+                elif result.status == "filtered":
+                    filtered_terminal += 1
+                elif result.status == "freescout_appended":
+                    appended_threads += 1
+                elif result.status == "freescout_created":
+                    created_conversations += 1
+                elif result.status == "failed_retryable":
+                    failed += 1
+                elif result.status == "failed_permanent":
+                    failed += 1
+                if result.drafted:
+                    drafted += 1
 
-        updates = poll_ticket_updates()
-        if updates:
+            updates = poll_ticket_updates(client=client)
+            if updates:
+                log_event(
+                    "freescout_poll",
+                    action="fetch_updates",
+                    outcome="success",
+                    count=len(updates),
+                )
             log_event(
-                "freescout_poll",
-                action="fetch_updates",
-                outcome="success",
-                count=len(updates),
+                "gmail_ingest_summary",
+                processed=processed,
+                created=created_conversations,
+                appended=appended_threads,
+                drafted=drafted,
+                skipped=skipped,
+                filtered=filtered_terminal,
+                failed=failed,
             )
-        log_event(
-            "gmail_ingest_summary",
-            processed=processed,
-            created=created_conversations,
-            appended=appended_threads,
-            drafted=drafted,
-            skipped=skipped,
-            filtered=filtered_terminal,
-            failed=failed,
-        )
+        finally:
+            if client:
+                client.close()
 
 
 if __name__ == "__main__":

@@ -15,7 +15,6 @@ from utils import (
     is_customer_thread,
     log_event,
     normalize_id,
-    parse_datetime,
     reload_settings,
     require_ticket_settings,
     thread_timestamp,

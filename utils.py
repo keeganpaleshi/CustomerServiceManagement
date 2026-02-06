@@ -12,7 +12,7 @@ import time
 from collections import deque
 from datetime import datetime, timezone
 from email.mime.text import MIMEText
-from functools import lru_cache
+from functools import cache
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple, Type
 
@@ -90,6 +90,27 @@ def _merge_followup_env_vars(followup_cfg: Dict[str, Any]) -> Dict[str, Any]:
 # These are rough estimates based on empirical data from GPT tokenizers
 CHARS_PER_TOKEN_ESTIMATE = 4  # Average characters per token (GPT models use ~4 chars/token for English)
 TOKEN_OVERHEAD_ESTIMATE = 200  # Approximate token overhead for system prompts and formatting
+
+# Maximum input length for AI requests to prevent context overflow attacks
+MAX_AI_INPUT_LENGTH = 50000
+
+
+def sanitize_ai_input(text: str, max_length: int = MAX_AI_INPUT_LENGTH) -> str:
+    """Sanitize user-provided text before sending to OpenAI.
+
+    Mitigates prompt injection by stripping control-like tags and
+    instruction markers, and truncates to *max_length* characters.
+    """
+    if not text:
+        return ""
+    sanitized = text
+    # Escape XML-like tags that could be interpreted as control markers
+    sanitized = re.sub(r'</?(?:system|assistant|user|instruction|prompt)>', '[tag]', sanitized, flags=re.IGNORECASE)
+    # Escape markdown-style instruction markers
+    sanitized = re.sub(r'^#{1,6}\s*(system|instruction|ignore|override)', r'\1', sanitized, flags=re.MULTILINE | re.IGNORECASE)
+    if len(sanitized) > max_length:
+        sanitized = sanitized[:max_length] + "...[truncated]"
+    return sanitized
 
 
 # Fields that may contain sensitive data and should be redacted in logs
@@ -222,7 +243,8 @@ def log_error(
 # Thread lock for settings reload to prevent race conditions
 _settings_lock = threading.Lock()
 
-@lru_cache(maxsize=1)
+
+@cache
 def _load_settings() -> Dict[str, Any]:
     """Load configuration and environment overrides lazily."""
 
@@ -693,33 +715,37 @@ class OpenAICostTracker:
             date_key = self._get_date_key()
             month_key = self._get_month_key()
 
-            # Update costs
-            self.daily_costs[date_key] = self.daily_costs.get(date_key, 0.0) + cost
-            self.monthly_costs[month_key] = self.monthly_costs.get(month_key, 0.0) + cost
-            self.total_calls += 1
+            # Check budgets BEFORE committing the cost to avoid inflating
+            # totals when the budget is already exceeded
+            new_daily = self.daily_costs.get(date_key, 0.0) + cost
+            new_monthly = self.monthly_costs.get(month_key, 0.0) + cost
 
-            # Check budgets
-            if self.daily_budget > 0 and self.daily_costs[date_key] > self.daily_budget:
+            if self.daily_budget > 0 and new_daily > self.daily_budget:
                 log_event(
                     "openai_budget_exceeded",
                     level=logging.ERROR,
                     budget_type="daily",
                     limit=self.daily_budget,
-                    current=self.daily_costs[date_key],
+                    current=new_daily,
                     date=date_key,
                 )
                 return False
 
-            if self.monthly_budget > 0 and self.monthly_costs[month_key] > self.monthly_budget:
+            if self.monthly_budget > 0 and new_monthly > self.monthly_budget:
                 log_event(
                     "openai_budget_exceeded",
                     level=logging.ERROR,
                     budget_type="monthly",
                     limit=self.monthly_budget,
-                    current=self.monthly_costs[month_key],
+                    current=new_monthly,
                     month=month_key,
                 )
                 return False
+
+            # Budget check passed — commit the cost
+            self.daily_costs[date_key] = new_daily
+            self.monthly_costs[month_key] = new_monthly
+            self.total_calls += 1
 
             return True
 
@@ -919,7 +945,6 @@ class FreeScoutClient:
             return int(value)
         except (TypeError, ValueError):
             return None
-
 
     def _headers(self) -> Dict[str, str]:
         return {
@@ -1749,28 +1774,9 @@ def generate_ai_reply(subject, sender, snippet_or_body, email_type):
     try:
         client = _get_openai_client()
 
-        # Sanitize user inputs to mitigate prompt injection attacks
-        # Remove or escape control sequences that could manipulate the prompt
-        # Maximum input length to prevent context overflow attacks
-        MAX_AI_INPUT_LENGTH = 50000
-
-        def sanitize_input(text: str) -> str:
-            if not text:
-                return ""
-            # Remove common prompt injection patterns
-            sanitized = text
-            # Escape XML-like tags that could be interpreted as control markers
-            sanitized = re.sub(r'</?(?:system|assistant|user|instruction|prompt)>', '[tag]', sanitized, flags=re.IGNORECASE)
-            # Escape markdown-style instruction markers
-            sanitized = re.sub(r'^#{1,6}\s*(system|instruction|ignore|override)', r'\1', sanitized, flags=re.MULTILINE | re.IGNORECASE)
-            # Limit length to prevent context overflow attacks
-            if len(sanitized) > MAX_AI_INPUT_LENGTH:
-                sanitized = sanitized[:MAX_AI_INPUT_LENGTH] + "...[truncated]"
-            return sanitized
-
-        safe_subject = sanitize_input(subject)
-        safe_sender = sanitize_input(sender)
-        safe_body = sanitize_input(snippet_or_body)
+        safe_subject = sanitize_ai_input(subject)
+        safe_sender = sanitize_ai_input(sender)
+        safe_body = sanitize_ai_input(snippet_or_body)
 
         # Use clear delimiters to separate user content from instructions
         # This helps the model distinguish between instructions and user input
@@ -1885,6 +1891,7 @@ def classify_email(text):
         "facts": [],
         "uncertainty": [],
     }
+
     def is_valid_response(payload: Any) -> bool:
         if not isinstance(payload, dict):
             return False
@@ -1934,14 +1941,7 @@ def classify_email(text):
     try:
         client = _get_openai_client()
 
-        # Sanitize user input to mitigate prompt injection attacks
-        MAX_CLASSIFY_INPUT_LENGTH = 50000
-        safe_text = text or ""
-        # Remove common prompt injection patterns
-        safe_text = re.sub(r'</?(?:system|assistant|user|instruction|prompt)>', '[tag]', safe_text, flags=re.IGNORECASE)
-        safe_text = re.sub(r'^#{1,6}\s*(system|instruction|ignore|override)', r'\1', safe_text, flags=re.MULTILINE | re.IGNORECASE)
-        if len(safe_text) > MAX_CLASSIFY_INPUT_LENGTH:
-            safe_text = safe_text[:MAX_CLASSIFY_INPUT_LENGTH] + "...[truncated]"
+        safe_text = sanitize_ai_input(text or "")
 
         # Build API call parameters
         api_params = {
@@ -2102,5 +2102,3 @@ def is_customer_thread(thread: dict) -> bool:
 def thread_timestamp(thread: dict) -> Optional[datetime]:
     """Extract timestamp from a FreeScout thread."""
     return parse_datetime(thread.get("created_at") or thread.get("updated_at"))
-
-
