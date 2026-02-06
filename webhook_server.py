@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
 import os
 import random
 import re
-import hmac
 import threading
+from collections import deque
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -69,6 +71,7 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         )
 
         return response
+
 
 _DEFAULT_LOG_DIR = Path(__file__).resolve().parent / "logs" / "webhooks"
 SAFE_FILENAME_RE = re.compile(r"[^A-Za-z0-9_.-]+")
@@ -165,10 +168,10 @@ def _sanitize_payload(payload: Any, max_depth: int = 10) -> Any:
     else:
         sanitized_root = []
 
-    stack: list[tuple[Any, int, Any]] = [(payload, 0, sanitized_root)]
+    queue: deque[tuple[Any, int, Any]] = deque([(payload, 0, sanitized_root)])
 
-    while stack:
-        current, depth, sanitized = stack.pop()
+    while queue:
+        current, depth, sanitized = queue.popleft()
         if isinstance(current, dict):
             for key, value in current.items():
                 if key.lower() in SENSITIVE_FIELDS_LOWER:
@@ -184,7 +187,7 @@ def _sanitize_payload(payload: Any, max_depth: int = 10) -> Any:
                         continue
                     next_container: Any = {} if isinstance(value, dict) else []
                     sanitized[key] = next_container
-                    stack.append((value, depth + 1, next_container))
+                    queue.append((value, depth + 1, next_container))
                 else:
                     sanitized[key] = value
         elif isinstance(current, list):
@@ -195,7 +198,7 @@ def _sanitize_payload(payload: Any, max_depth: int = 10) -> Any:
                         continue
                     next_container = {} if isinstance(item, dict) else []
                     sanitized.append(next_container)
-                    stack.append((item, depth + 1, next_container))
+                    queue.append((item, depth + 1, next_container))
                 else:
                     sanitized.append(item)
 
@@ -395,19 +398,17 @@ def log_webhook_payload(payload: Any) -> Path:
 def _get_counter_store() -> TicketStore:
     """Get or create the singleton TicketStore instance.
 
-    This uses lazy initialization with double-checked locking to avoid
-    creating a new database connection on every webhook request.
+    Always acquires the lock to safely check and initialize the store,
+    avoiding race conditions with concurrent _close_counter_store calls.
     """
     global _counter_store
-    if _counter_store is None:
-        with _counter_store_lock:
-            # Double-check inside lock
-            if _counter_store is None:
-                reload_settings()
-                settings = get_settings()
-                sqlite_path = settings.get("TICKET_SQLITE_PATH") or "./csm.sqlite"
-                _counter_store = TicketStore(sqlite_path)
-    return _counter_store
+    with _counter_store_lock:
+        if _counter_store is None:
+            reload_settings()
+            settings = get_settings()
+            sqlite_path = settings.get("TICKET_SQLITE_PATH") or "./csm.sqlite"
+            _counter_store = TicketStore(sqlite_path)
+        return _counter_store
 
 
 def _close_counter_store() -> None:
@@ -426,7 +427,11 @@ async def health():
 
 
 @app.post("/freescout")
-async def freescout(request: Request, x_webhook_secret: Optional[str] = Header(None)):
+async def freescout(
+    request: Request,
+    x_webhook_secret: Optional[str] = Header(None),
+    x_webhook_signature: Optional[str] = Header(None),
+):
     # Check content-length header first to reject oversized payloads quickly
     content_length = request.headers.get("content-length")
     if content_length:
@@ -456,9 +461,25 @@ async def freescout(request: Request, x_webhook_secret: Optional[str] = Header(N
     reload_settings()
     settings = get_settings()
     secret = settings.get("FREESCOUT_WEBHOOK_SECRET", "")
+
+    # Read body early so HMAC can be computed over it
+    raw_body = await request.body()
+
     if secret:
-        provided_secret = x_webhook_secret or ""
-        if not hmac.compare_digest(provided_secret, secret):
+        authenticated = False
+        # Prefer HMAC-SHA256 signature verification (X-Webhook-Signature header)
+        # which proves both possession of the secret AND payload integrity
+        if x_webhook_signature:
+            expected_sig = hmac.new(
+                secret.encode("utf-8"), raw_body, hashlib.sha256
+            ).hexdigest()
+            authenticated = hmac.compare_digest(x_webhook_signature, expected_sig)
+        # Fall back to shared secret header (X-Webhook-Secret) for backward
+        # compatibility with FreeScout's default webhook implementation
+        if not authenticated and x_webhook_secret:
+            authenticated = hmac.compare_digest(x_webhook_secret, secret)
+
+        if not authenticated:
             client_host = request.client.host if request.client else "unknown"
             log_event(
                 "webhook_ingest",
@@ -468,8 +489,6 @@ async def freescout(request: Request, x_webhook_secret: Optional[str] = Header(N
                 client_ip=client_host,
             )
             raise HTTPException(status_code=401, detail="invalid signature")
-
-    raw_body = await request.body()
 
     # Validate actual body size
     if len(raw_body) > MAX_PAYLOAD_SIZE:
