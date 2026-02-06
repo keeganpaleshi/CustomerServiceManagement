@@ -18,7 +18,7 @@ from utils import (
     reload_settings,
     require_ticket_settings,
     thread_timestamp,
-    _get_freescout_rate_limiter,
+    get_freescout_rate_limiter,
 )
 
 
@@ -409,7 +409,7 @@ def main() -> None:
         return
 
     url, key = require_ticket_settings()
-    rate_limiter = _get_freescout_rate_limiter()
+    rate_limiter = get_freescout_rate_limiter()
     client = FreeScoutClient(url, key, timeout=settings.get("HTTP_TIMEOUT", 15), rate_limiter=rate_limiter)
     try:
         _run_followups(client, settings, args)

@@ -3,7 +3,7 @@
 **What it does**
 
 1. Reads all **unread** Gmail messages.
-2. Uses **GPT-4o** to classify each as `lead`, `customer`, or `other` and assign an `importance` score (1-10).
+2. Uses **OpenAI** to classify each as `lead`, `customer`, or `other` and assign an `importance` score (1-10).
 3. Ignores `other` and automatically skips promotional or newsletter emails
    based on message headers/body content (e.g., List-Unsubscribe/List-ID or
    unsubscribe text).
@@ -105,6 +105,7 @@ to use the copy/paste console flow when no browser is available.
 - `webhook-server` – FastAPI webhook receiver (profile: webhook)
 - `freescout-poller` – Continuous FreeScout polling (profile: polling)
 - `followups` – Generate follow-up drafts for stale conversations (profile: followups)
+
 ### Development
 
 Run `flake8` before committing:
@@ -207,19 +208,12 @@ Configuration lives under `ticket.followup` in `config.yaml`:
 Add this minimal FastAPI or Flask endpoint to receive FreeScout webhooks and
 let `gmail_bot` do the rest:
 
-```python
-from fastapi import FastAPI, Header, Request
-from gmail_bot import freescout_webhook_handler
+The production webhook server is implemented in `webhook_server.py` with full
+HMAC signature verification, nonce-based replay protection, timestamp
+validation, payload size limits, and security headers. Deploy it with:
 
-app = FastAPI()
-
-@app.post("/freescout")
-async def freescout(payload: Request, x_webhook_secret: str | None = Header(None)):
-    body = await payload.json()
-    message, status, _ = freescout_webhook_handler(
-        body, {"X-Webhook-Secret": x_webhook_secret}
-    )
-    return message, status
+```bash
+uvicorn webhook_server:app --host 0.0.0.0 --port 8000
 ```
 
 Deploy the webhook with HTTPS and set the URL inside FreeScout's webhook

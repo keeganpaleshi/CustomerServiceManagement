@@ -76,7 +76,3 @@ services:
     restart: "no"
     profiles:
       - followups
-
-volumes:
-  data:
-  logs:
