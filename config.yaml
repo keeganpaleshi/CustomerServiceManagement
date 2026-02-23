@@ -226,3 +226,6 @@ webhook:
     nonce_cache_size: 10000
     # Time-to-live for nonce cache entries (seconds)
     nonce_cache_ttl_seconds: 600  # 10 minutes
+    # Development-only escape hatch: allow unsigned webhooks when no secret is set
+    # Keep false in production.
+    allow_unauthenticated: false
