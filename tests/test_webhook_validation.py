@@ -9,6 +9,8 @@ from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 from pathlib import Path
 
+from fastapi.testclient import TestClient
+
 # Import the module to access its internal functions
 import webhook_server
 from webhook_server import (
@@ -262,6 +264,62 @@ class TestWebhookLogging(unittest.TestCase):
             self.assertIsNotNone(match)
             event_id = match.group("event_id")
             self.assertLessEqual(len(event_id), webhook_server.SAFE_FILENAME_MAX_LENGTH)
+
+
+class TestWebhookSecretRequirement(unittest.TestCase):
+    """Tests webhook secret requirement behavior."""
+
+    def test_rejects_when_secret_missing_and_unauthenticated_not_allowed(self):
+        client = TestClient(webhook_server.app)
+        payload = {"type": "conversation.created", "conversation_id": "123"}
+
+        with patch.object(
+            webhook_server,
+            "get_settings",
+            return_value={
+                "FREESCOUT_WEBHOOK_SECRET": "",
+                "WEBHOOK_ALLOW_UNAUTHENTICATED": False,
+                "WEBHOOK_LOG_DIR": "",
+                "WEBHOOK_MAX_TIMESTAMP_SKEW_SECONDS": 300,
+                "WEBHOOK_NONCE_CACHE_SIZE": 10000,
+                "WEBHOOK_NONCE_CACHE_TTL_SECONDS": 600,
+            },
+        ), patch.object(webhook_server, "reload_settings"), patch.object(
+            webhook_server, "log_webhook_payload", return_value=Path("/tmp/test.json")
+        ), patch.object(webhook_server, "_get_counter_store") as mock_store:
+            response = client.post("/freescout", json=payload)
+
+        self.assertEqual(response.status_code, 503)
+        self.assertIn("Webhook authentication is required", response.json()["detail"])
+        mock_store.assert_not_called()
+
+    def test_allows_when_secret_missing_but_unauthenticated_explicitly_enabled(self):
+        client = TestClient(webhook_server.app)
+        payload = {"type": "conversation.created", "conversation_id": "123"}
+
+        with patch.object(
+            webhook_server,
+            "get_settings",
+            return_value={
+                "FREESCOUT_WEBHOOK_SECRET": "",
+                "WEBHOOK_ALLOW_UNAUTHENTICATED": True,
+                "WEBHOOK_LOG_DIR": "",
+                "WEBHOOK_MAX_TIMESTAMP_SKEW_SECONDS": 300,
+                "WEBHOOK_NONCE_CACHE_SIZE": 10000,
+                "WEBHOOK_NONCE_CACHE_TTL_SECONDS": 600,
+            },
+        ), patch.object(webhook_server, "reload_settings"), patch.object(
+            webhook_server, "log_webhook_payload", return_value=Path("/tmp/test.json")
+        ), patch.object(
+            webhook_server,
+            "freescout_webhook_handler",
+            return_value=("ok", 200, None),
+        ), patch.object(webhook_server, "_get_counter_store") as mock_store:
+            response = client.post("/freescout", json=payload)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {"message": "ok"})
+        mock_store.assert_called_once()
 
 
 if __name__ == "__main__":

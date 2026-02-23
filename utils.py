@@ -311,6 +311,7 @@ def _load_settings() -> Dict[str, Any]:
         "WEBHOOK_MAX_TIMESTAMP_SKEW_SECONDS": cfg.get("webhook", {}).get("security", {}).get("max_timestamp_skew_seconds", 300),
         "WEBHOOK_NONCE_CACHE_SIZE": cfg.get("webhook", {}).get("security", {}).get("nonce_cache_size", 10000),
         "WEBHOOK_NONCE_CACHE_TTL_SECONDS": cfg.get("webhook", {}).get("security", {}).get("nonce_cache_ttl_seconds", 600),
+        "WEBHOOK_ALLOW_UNAUTHENTICATED": cfg.get("webhook", {}).get("security", {}).get("allow_unauthenticated", False),
     }
 
 
@@ -434,12 +435,13 @@ def validate_settings() -> List[str]:
         # Validate webhook secret strength if webhook is enabled
         if settings.get("FREESCOUT_WEBHOOK_ENABLED"):
             webhook_secret = settings.get("FREESCOUT_WEBHOOK_SECRET", "")
-            if not webhook_secret:
+            allow_unauthenticated = bool(settings.get("WEBHOOK_ALLOW_UNAUTHENTICATED", False))
+            if not webhook_secret and not allow_unauthenticated:
                 errors.append(
-                    "FREESCOUT_WEBHOOK_SECRET is required when webhook_enabled is true. "
-                    "Set a strong random secret in config.yaml ticket.webhook_secret"
+                    "FREESCOUT_WEBHOOK_SECRET is required when webhook_enabled is true unless "
+                    "webhook.security.allow_unauthenticated is explicitly enabled."
                 )
-            elif len(webhook_secret) < 16:
+            elif webhook_secret and len(webhook_secret) < 16:
                 errors.append(
                     f"FREESCOUT_WEBHOOK_SECRET is too weak (length: {len(webhook_secret)}). "
                     "Use at least 16 characters."

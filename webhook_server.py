@@ -97,6 +97,15 @@ _DEFAULT_NONCE_CACHE_SIZE = 10000  # Maximum nonces to track
 _DEFAULT_NONCE_CACHE_TTL_SECONDS = 600  # 10 minutes
 
 
+def _coerce_bool(value: Any) -> bool:
+    """Convert common string/boolean representations to bool."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return bool(value)
+
+
 def _get_webhook_security_settings() -> tuple[int, int, int]:
     """Get webhook security settings from config with defaults.
 
@@ -461,16 +470,33 @@ async def freescout(
     reload_settings()
     settings = get_settings()
     secret = settings.get("FREESCOUT_WEBHOOK_SECRET", "")
+    allow_unauthenticated = _coerce_bool(
+        settings.get("WEBHOOK_ALLOW_UNAUTHENTICATED", False)
+    )
 
     # Read body early so HMAC can be computed over it
     raw_body = await request.body()
 
-    if not secret:
+    if not secret and not allow_unauthenticated:
         log_event(
             "webhook_ingest",
             action="authenticate",
-            outcome="skipped",
-            reason="no webhook secret configured - authentication disabled",
+            outcome="failed",
+            reason="webhook secret missing while unauthenticated mode is disabled",
+        )
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Webhook authentication is required: set ticket.webhook_secret "
+                "or explicitly enable webhook.security.allow_unauthenticated"
+            ),
+        )
+    if not secret and allow_unauthenticated:
+        log_event(
+            "webhook_ingest",
+            action="authenticate",
+            outcome="warning",
+            reason="running without webhook authentication (explicitly allowed)",
         )
     if secret:
         authenticated = False
